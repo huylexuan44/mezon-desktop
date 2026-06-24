@@ -140,11 +140,13 @@ impl InputBar {
                     .gap_2()
                     .px_4()
                     .py_3()
+                    .min_w_0()
+                    .w_full()
                     .border_t_1()
                     .border_color(theme.border)
                     .bg(theme.bg_primary)
                     .when_some(self.input_state.as_ref(), |d, state| {
-                        d.child(div().flex_1().child(Input::new(state)))
+                        d.child(div().flex_1().min_w_0().child(Input::new(state)))
                     })
                     .child(
                         Button::new("send-btn")

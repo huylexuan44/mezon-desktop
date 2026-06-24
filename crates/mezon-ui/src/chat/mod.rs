@@ -1,10 +1,12 @@
 pub mod area;
 pub mod channel_header;
+pub mod create_thread_panel;
 pub mod grouping;
 pub mod input_bar;
 pub mod layout;
 pub mod message_list;
 pub mod message_row;
+pub mod threads_popover;
 
 pub use area::ChatArea;
 pub use channel_header::ChannelHeader;

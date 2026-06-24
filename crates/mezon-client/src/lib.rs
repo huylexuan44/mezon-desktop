@@ -21,7 +21,10 @@ pub use network_monitor::NetworkMonitor;
 pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
-pub use transport::{ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiVoiceChannelUser};
+pub use transport::{
+    ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiThreadDesc,
+    ApiVoiceChannelUser,
+};
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;
 

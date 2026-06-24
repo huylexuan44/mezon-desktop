@@ -7,7 +7,7 @@ use crate::{
     TransportClient,
     transport::{
         ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
-        ApiMessage, ApiVoiceChannelUser, RealtimeEvent,
+        ApiMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -159,6 +159,38 @@ impl AppApi {
     ) -> Result<Vec<ApiMessage>> {
         self.transport
             .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
+            .await
+    }
+
+    pub async fn list_thread_descs(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        page: i32,
+    ) -> Result<Vec<ApiThreadDesc>> {
+        self.transport
+            .list_thread_descs(channel_id, clan_id, page)
+            .await
+    }
+
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<ApiThreadDesc>> {
+        self.transport
+            .search_thread(clan_id, channel_id, label)
+            .await
+    }
+
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        self.transport
+            .check_duplicate_thread_name(name, parent_channel_id)
             .await
     }
 

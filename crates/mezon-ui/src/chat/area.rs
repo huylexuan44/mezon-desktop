@@ -1,25 +1,37 @@
 use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
-use gpui::{AnyView, App, Context, Entity, Window, div, prelude::*};
-use mezon_store::Settings;
+use gpui::{AnyView, App, Context, Entity, SharedString, Window, div, prelude::*};
+use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChannelHeader;
 use crate::chat::input_bar::InputBar;
 use crate::chat::message_list::MessageTimeline;
+use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::theme::Theme;
+
+pub struct ChatAreaRenderParams<'a> {
+    pub theme: &'a Theme,
+    pub locale: &'a str,
+    pub layout_entity: Entity<crate::ChatLayout>,
+    pub channel_name: &'a str,
+    pub is_dm: bool,
+    pub typing_label: Option<SharedString>,
+    pub thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
+    pub show_threads: bool,
+}
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<MessageTimeline>,
     pub(crate) input_state: Option<Entity<InputState>>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
-    settings: Entity<Settings>,
+    settings: Entity<mezon_store::Settings>,
 }
 
 impl ChatArea {
-    pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
+    pub fn new(settings: Entity<mezon_store::Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
         let timeline = cx.new({
             let settings = settings.clone();
             move |cx| MessageTimeline::new(settings, cx)
@@ -53,27 +65,21 @@ impl ChatArea {
 
     pub fn render(
         &self,
-        theme: &Theme,
-        locale: &str,
-        layout_entity: Entity<crate::ChatLayout>,
-        channel_name: &str,
-        is_dm: bool,
-        typing_label: Option<gpui::SharedString>,
+        params: ChatAreaRenderParams<'_>,
+        window: &mut Window,
+        cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
-        let input_state = match self.input_state.clone() {
-            Some(s) => s,
-            None => {
-                return div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .into_any_element();
-            }
+        let Some(input_state) = self.input_state.clone() else {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .into_any_element();
         };
 
         let on_send = {
-            let handle = layout_entity.clone();
+            let handle = params.layout_entity.clone();
             Arc::new(move |window: &mut Window, cx: &mut App| {
                 handle.update(cx, |this, cx| this.send_current_message(window, cx));
             })
@@ -82,23 +88,32 @@ impl ChatArea {
         let input_bar = InputBar::new()
             .with_input(input_state)
             .on_send(on_send)
-            .typing_label(typing_label);
+            .typing_label(params.typing_label);
 
-        let header = ChannelHeader::new(channel_name).dm(is_dm);
+        let mut header = ChannelHeader::new(params.channel_name)
+            .dm(params.is_dm)
+            .show_threads(params.show_threads)
+            .layout(params.layout_entity.clone());
+        if let Some(handle) = params.thread_handle {
+            header = header.thread_popover(handle);
+        }
 
         div()
             .flex()
             .flex_col()
             .flex_1()
+            .min_w_0()
             .min_h_0()
-            .child(header.render(theme))
+            .w_full()
+            .overflow_hidden()
+            .child(header.render(params.theme, window, cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .child(AnyView::from(self.timeline.clone())),
             )
-            .child(input_bar.render(theme, locale))
+            .child(input_bar.render(params.theme, params.locale))
             .into_any_element()
     }
 }

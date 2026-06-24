@@ -493,6 +493,13 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     }
 }
 
+fn parse_message_text(content: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+        .unwrap_or_else(|| content.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiMessage {
     pub message_id: String,
@@ -503,6 +510,25 @@ pub struct ApiMessage {
     pub create_time: i64,
     pub attachments: Vec<ApiAttachment>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiThreadDesc {
+    pub channel_id: String,
+    pub channel_label: String,
+    pub clan_id: String,
+    pub parent_id: String,
+    pub category_id: String,
+    pub channel_private: i32,
+    pub member_count: i32,
+    pub active: i32,
+    pub last_message_content: String,
+    pub last_message_sender_id: String,
+    pub last_sent_timestamp: i64,
+}
+
+pub const THREAD_LIST_LIMIT: i32 = 50;
+
+pub const CHECK_NAME_TYPE_THREAD: i32 = 3;
 
 impl MezonTransport {
     /// Build a protobuf-encoded API request envelope.
@@ -650,10 +676,7 @@ impl MezonTransport {
     }
 
     pub fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
-        let content = serde_json::from_str::<serde_json::Value>(&message.content)
-            .ok()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| message.content.clone());
+        let content = parse_message_text(&message.content);
 
         let sender_name = if !message.clan_nick.is_empty() {
             message.clan_nick.clone()
@@ -673,6 +696,32 @@ impl MezonTransport {
             avatar: message.avatar,
             create_time: i64::from(message.create_time_seconds),
             attachments,
+        }
+    }
+
+    fn thread_desc_from_proto(channel: api::ChannelDescription) -> ApiThreadDesc {
+        let (last_message_content, last_message_sender_id, last_sent_timestamp) =
+            match channel.last_sent_message.as_ref() {
+                Some(msg) => (
+                    parse_message_text(&msg.content),
+                    msg.sender_id.to_string(),
+                    i64::from(msg.timestamp_seconds),
+                ),
+                None => (String::new(), String::new(), 0),
+            };
+
+        ApiThreadDesc {
+            channel_id: channel.channel_id.to_string(),
+            channel_label: channel.channel_label,
+            clan_id: channel.clan_id.to_string(),
+            parent_id: channel.parent_id.to_string(),
+            category_id: channel.category_id.to_string(),
+            channel_private: channel.channel_private,
+            member_count: channel.member_count,
+            active: channel.active,
+            last_message_content,
+            last_message_sender_id,
+            last_sent_timestamp,
         }
     }
 
@@ -1445,28 +1494,40 @@ impl MezonTransport {
         Ok(api::ChannelDescription::decode(response.as_slice())?)
     }
 
-    /// List thread descriptions.
+    /// List thread descriptions for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: &str,
         clan_id: &str,
         limit: i32,
         page: i32,
-    ) -> Result<api::ChannelDescList> {
+        state: i32,
+        thread_id: Option<&str>,
+    ) -> Result<Vec<ApiThreadDesc>> {
         let cid = self.generate_cid();
+        let thread_id = match thread_id {
+            Some(id) => parse_id(id)?,
+            None => 0,
+        };
         let body = api::ListThreadRequest {
             channel_id: parse_id(channel_id)?,
             clan_id: parse_id(clan_id)?,
             limit,
             page,
-            ..Default::default()
+            state,
+            thread_id,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListThreadDescs", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelDescList::decode(response.as_slice())?)
+        let list = api::ChannelDescList::decode(response.as_slice())?;
+        Ok(list
+            .channeldesc
+            .into_iter()
+            .map(Self::thread_desc_from_proto)
+            .collect())
     }
 
     /// List channels by user ID.
@@ -2413,20 +2474,30 @@ impl MezonTransport {
         Ok(api::SearchMessageResponse::decode(response.as_slice())?)
     }
 
-    /// Search thread.
-    pub async fn search_thread(&self, clan_id: &str, label: &str) -> Result<api::ChannelDescList> {
+    /// Search threads by label within a parent channel.
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<ApiThreadDesc>> {
         let cid = self.generate_cid();
         let body = api::SearchThreadRequest {
             clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             label: label.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "SearchThread", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelDescList::decode(response.as_slice())?)
+        let list = api::ChannelDescList::decode(response.as_slice())?;
+        Ok(list
+            .channeldesc
+            .into_iter()
+            .map(Self::thread_desc_from_proto)
+            .collect())
     }
 
     /// List Mezon OAuth client.
@@ -3368,6 +3439,18 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
+    }
+
+    /// Check duplicate thread name within a parent channel.
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        let resp = self
+            .check_duplicate_name(name, CHECK_NAME_TYPE_THREAD, parse_id(parent_channel_id)?)
+            .await?;
+        Ok(resp.is_duplicate)
     }
 
     /// Check duplicate name.

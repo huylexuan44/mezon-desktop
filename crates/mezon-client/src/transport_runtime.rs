@@ -370,6 +370,46 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    /// List threads for a parent channel.
+    pub async fn list_thread_descs(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        page: i32,
+    ) -> Result<Vec<crate::transport::ApiThreadDesc>> {
+        use crate::transport::THREAD_LIST_LIMIT;
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_thread_descs(&channel_id, &clan_id, THREAD_LIST_LIMIT, page, 0, None)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Search threads by label within a parent channel.
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<crate::transport::ApiThreadDesc>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_id = channel_id.to_string();
+        let label = label.to_string();
+
+        runtime()
+            .spawn(async move { transport.search_thread(&clan_id, &channel_id, &label).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Send a message to a channel.
     pub async fn join_chat(
         &self,
@@ -647,6 +687,26 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .check_duplicate_name(&name, r#type, condition_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Check duplicate thread name within a parent channel.
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        let transport = self.inner.clone();
+        let name = name.to_string();
+        let parent_channel_id = parent_channel_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .check_duplicate_thread_name(&name, &parent_channel_id)
                     .await
             })
             .await

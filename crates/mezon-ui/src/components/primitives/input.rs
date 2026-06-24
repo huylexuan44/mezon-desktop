@@ -74,6 +74,7 @@ pub struct InputState {
     is_selecting: bool,
     masked: bool,
     multi_line: bool,
+    embedded: bool,
     validate: Option<ValidateFn>,
 }
 
@@ -93,6 +94,7 @@ impl InputState {
             is_selecting: false,
             masked: false,
             multi_line: false,
+            embedded: false,
             validate: None,
         }
     }
@@ -104,6 +106,11 @@ impl InputState {
 
     pub fn multi_line(mut self, multi_line: bool) -> Self {
         self.multi_line = multi_line;
+        self
+    }
+
+    pub fn embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
         self
     }
 
@@ -128,6 +135,16 @@ impl InputState {
         self.marked_range = None;
         cx.notify();
         cx.emit(InputEvent::Change);
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            return;
+        }
+        self.content = SharedString::default();
+        self.selected_range = 0..0;
+        self.marked_range = None;
+        cx.notify();
     }
 
     pub fn set_masked(&mut self, masked: bool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -570,14 +587,17 @@ impl Render for InputState {
             .when(self.multi_line, |el| el.items_start().py(px(8.)))
             .when(!self.multi_line, |el| el.items_center())
             .w_full()
-            .min_h(if self.multi_line { px(72.) } else { px(36.) })
-            .px(px(10.))
-            .rounded_md()
-            .bg(bg)
+            .when(self.embedded, |el| el.min_h(px(24.)).px_0())
+            .when(!self.embedded, |el| {
+                el.min_h(if self.multi_line { px(72.) } else { px(36.) })
+                    .px(px(10.))
+                    .rounded_md()
+                    .bg(bg)
+                    .border_1()
+                    .border_color(if focused { focus_border } else { border })
+            })
             .text_color(text_color)
             .text_size(px(14.))
-            .border_1()
-            .border_color(if focused { focus_border } else { border })
             .child(
                 div()
                     .flex_1()

@@ -10,6 +10,7 @@ pub mod login;
 pub mod messages;
 pub mod presence;
 pub mod realtime;
+pub mod threads;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -31,6 +32,7 @@ pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use messages::*;
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use threads::{ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 
