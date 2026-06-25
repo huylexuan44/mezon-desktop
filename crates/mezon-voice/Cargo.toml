@@ -20,7 +20,7 @@ futures = { workspace = true }
 
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 
-scap = { workspace = true }
+scap = { workspace = true, features = ["x11", "wayland"] }
 image = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

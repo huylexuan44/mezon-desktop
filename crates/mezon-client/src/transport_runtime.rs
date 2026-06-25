@@ -518,6 +518,83 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_notifications(
+        &self,
+        clan_id: &str,
+        limit: i32,
+        notification_id: &str,
+        category: i32,
+        direction: i32,
+    ) -> Result<Vec<crate::InboxNotification>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
+        let notification_id = if notification_id.is_empty() || notification_id == "0" {
+            0
+        } else {
+            notification_id
+                .parse::<i64>()
+                .map_err(|e| anyhow::anyhow!("invalid notification_id {notification_id:?}: {e}"))?
+        };
+        runtime()
+            .spawn(async move {
+                let list = transport
+                    .list_notifications(clan_id, limit, notification_id, category, direction)
+                    .await?;
+                crate::inbox_notifications_from_list(list)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn delete_notifications(&self, ids: &[&str], category: i32) -> Result<()> {
+        let transport = self.inner.clone();
+        let ids: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
+        runtime()
+            .spawn(async move {
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                transport.delete_notifications(&refs, category).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_sd_topics(
+        &self,
+        clan_id: &str,
+        limit: i32,
+    ) -> Result<Vec<crate::TopicDiscussion>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
+        runtime()
+            .spawn(async move {
+                let list = transport.list_sd_topic(clan_id, limit).await?;
+                Ok(crate::topics_from_list(list))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_topic_detail(&self, topic_id: &str) -> Result<crate::TopicDiscussion> {
+        let transport = self.inner.clone();
+        let topic_id = topic_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid topic_id {topic_id:?}: {e}"))?;
+        runtime()
+            .spawn(async move {
+                let topic = transport.get_topic_detail(topic_id).await?;
+                Ok(crate::topic_discussion_from_api(topic))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Close the connection.
+    ///
+    /// Spawns the close operation on the dedicated transport runtime.
     pub async fn close(&self) -> Result<()> {
         let transport = self.inner.clone();
 

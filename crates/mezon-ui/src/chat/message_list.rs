@@ -35,6 +35,12 @@ impl MessageTimeline {
         let store = MessagesStore::global(cx);
         cx.subscribe(&store, |this, store, event, cx| {
             match event {
+                MessagesEvent::JumpTo { index } => {
+                    this.list_state.scroll_to(gpui::ListOffset {
+                        item_ix: *index,
+                        offset_in_item: px(0.),
+                    });
+                }
                 MessagesEvent::Reset { count } => {
                     this.list_state.reset(*count);
                     this.list_state.set_follow_mode(FollowMode::Tail);

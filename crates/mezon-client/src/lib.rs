@@ -5,6 +5,7 @@ pub mod abridged_tcp_adapter;
 pub mod app_api;
 pub mod auth;
 pub mod image_disk_cache;
+pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
 pub mod session;
@@ -18,6 +19,11 @@ pub use app_api::{AppApi, ConnectionStatus};
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use inbox::{
+    DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
+    InboxMessagePreview, InboxNotification, TopicDiscussion, inbox_notification_from_api,
+    inbox_notifications_from_list, topic_discussion_from_api, topics_from_list,
+};
 pub use network_monitor::NetworkMonitor;
 pub use session::Session;
 pub use transport::MezonTransport;

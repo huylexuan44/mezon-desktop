@@ -28,6 +28,7 @@ where
         .map_err(|e| anyhow::anyhow!("invalid id {value:?}: {e}"))
 }
 
+
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
@@ -62,6 +63,7 @@ pub enum RealtimeEvent {
     /// Server-pushed session refresh over the socket (`refresh_session_event`, field 96).
     /// The native equivalent of mezon-js `client.onrefreshsession`.
     SessionRefreshed(api::Session),
+    Notifications(realtime::Notifications),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -98,6 +100,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
+            realtime::envelope::Message::Notifications(n) => Ok(Self::Notifications(n)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -1328,12 +1331,17 @@ impl MezonTransport {
         &self,
         clan_id: i64,
         limit: i32,
+        notification_id: i64,
+        category: i32,
+        direction: i32,
     ) -> Result<api::NotificationList> {
         let cid = self.generate_cid();
         let body = api::ListNotificationsRequest {
             clan_id,
             limit,
-            ..Default::default()
+            notification_id,
+            category,
+            direction,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -3206,14 +3214,14 @@ impl MezonTransport {
     }
 
     /// Delete notifications.
-    pub async fn delete_notifications(&self, ids: &[&str]) -> Result<()> {
+    pub async fn delete_notifications(&self, ids: &[&str], category: i32) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteNotificationsRequest {
             ids: ids
                 .iter()
                 .map(|s| parse_id(s))
                 .collect::<Result<Vec<_>>>()?,
-            ..Default::default()
+            category,
         }
         .encode_to_vec();
         let (code, _) = self

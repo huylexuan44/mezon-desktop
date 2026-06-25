@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
-use gpui::{AnyView, App, Context, Entity, Window, div, prelude::*};
+use gpui::{AnyView, App, Context, Entity, SharedString, Window, div, prelude::*};
 use mezon_store::Settings;
+use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChannelHeader;
+use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::message_list::MessageTimeline;
@@ -92,9 +94,13 @@ impl ChatArea {
         layout_entity: Entity<crate::ChatLayout>,
         channel_name: &str,
         is_dm: bool,
-        typing_label: Option<gpui::SharedString>,
         show_members_button: bool,
         show_member_panel: bool,
+        typing_label: Option<SharedString>,
+        clan_id: Option<&str>,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        window: &mut Window,
+        cx: &App,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
             Some(s) => s,
@@ -120,8 +126,9 @@ impl ChatArea {
             .on_send(on_send)
             .typing_label(typing_label);
 
-        let header = ChannelHeader::new(channel_name)
+        let mut header = ChannelHeader::new(channel_name)
             .dm(is_dm)
+            .show_inbox(!is_dm)
             .members_action(show_members_button)
             .members_active(show_member_panel)
             .on_toggle_members({
@@ -130,6 +137,10 @@ impl ChatArea {
                     handle.update(cx, |this, cx| this.toggle_member_list(cx));
                 })
             });
+
+        if let (Some(clan_id), Some(handle)) = (clan_id, inbox_handle) {
+            header = header.inbox_popover(handle).inbox_context(clan_id, locale);
+        }
 
         let message_column = div()
             .flex()
@@ -160,8 +171,11 @@ impl ChatArea {
             .flex()
             .flex_col()
             .flex_1()
+            .min_w_0()
             .min_h_0()
-            .child(header.render(theme))
+            .w_full()
+            .overflow_hidden()
+            .child(header.render(theme, window, cx))
             .child(body)
             .into_any_element()
     }

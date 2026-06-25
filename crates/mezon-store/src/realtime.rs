@@ -35,6 +35,7 @@ pub enum RealtimeKind {
     MarkAsRead,
     UserChannelAdded,
     UserChannelRemoved,
+    Notifications,
 }
 
 impl RealtimeKind {
@@ -59,6 +60,7 @@ impl RealtimeKind {
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
+            RealtimeEvent::Notifications(_) => Self::Notifications,
             _ => return None,
         })
     }

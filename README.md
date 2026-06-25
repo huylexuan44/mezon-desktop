@@ -32,7 +32,7 @@ sudo apt install -y pkg-config libcairo2-dev libjpeg-dev libgif-dev
 sudo apt install libgdk-pixbuf2.0-dev pkg-config
 sudo apt install libgtk-3-dev
 sudo apt install libasound2-dev
-sudo apt install libxdo-dev libxkbcommon-x11-dev
+sudo apt install libxdo-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev
 ```
 
 ## Quick Start

@@ -10,6 +10,7 @@ pub mod connection;
 pub mod direct;
 pub mod group_members;
 pub mod ids;
+pub mod inbox;
 pub mod login;
 pub mod messages;
 pub mod platform;
@@ -18,6 +19,7 @@ pub mod realtime;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
+pub mod topics;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -41,8 +43,10 @@ pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, ParseIdError, RoleId, UserId};
+pub use inbox::{InboxEvent, InboxStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use messages::*;
+pub use mezon_client::{InboxCategory, InboxNotification, TopicDiscussion};
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
@@ -54,6 +58,7 @@ pub use voice::{
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     preload_screen_share_options,
 };
+pub use topics::{TopicsEvent, TopicsStore};
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 

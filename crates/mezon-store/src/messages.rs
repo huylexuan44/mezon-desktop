@@ -1,10 +1,13 @@
 use crate::ids::{ChannelId, ClanId};
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::ApiMessage;
-use mezon_client::{AppApi, ConnectionStatus, MezonTransport, RealtimeEvent};
+use mezon_client::{
+    AppApi, ConnectionStatus, DIRECTION_AROUND_TIMESTAMP, MezonTransport, RealtimeEvent,
+};
 
 use crate::AppConfig;
 use crate::KeyedCache;
@@ -25,6 +28,7 @@ pub enum MessagesEvent {
     Reset { count: usize },
     Appended,
     OlderPrepended { count: usize },
+    JumpTo { index: usize },
 }
 
 struct ChannelMessages {
@@ -44,6 +48,7 @@ pub struct MessagesStore {
     loading: bool,
     loading_more: bool,
     fetch_generation: u64,
+    pending_jump_message_id: Option<String>,
     joined_channels: HashSet<ChannelId>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
@@ -91,6 +96,7 @@ impl MessagesStore {
             loading: false,
             loading_more: false,
             fetch_generation: 0,
+            pending_jump_message_id: None,
             joined_channels: HashSet::new(),
             api,
             _channel_sub: channel_sub,
@@ -469,6 +475,7 @@ impl MessagesStore {
                 if is_current {
                     self.loading = false;
                     cx.emit(MessagesEvent::Reset { count });
+                    self.try_emit_jump(cx);
                     cx.notify();
                 }
             }
@@ -478,10 +485,86 @@ impl MessagesStore {
                     self.loading = false;
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
+                    self.try_emit_jump(cx);
                     cx.notify();
                 }
             }
         }
+    }
+
+    pub fn jump_to_message(
+        &mut self,
+        clan_id: &str,
+        channel_id: &str,
+        message_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(clan_id) = ClanId::from_str(clan_id) else {
+            tracing::warn!("jump_to_message: invalid clan_id");
+            return;
+        };
+        let Ok(channel_id) = ChannelId::from_str(channel_id) else {
+            tracing::warn!("jump_to_message: invalid channel_id");
+            return;
+        };
+        self.pending_jump_message_id = Some(message_id.to_string());
+        if self.active_channel_id == Some(channel_id) && self.active_clan_id == Some(clan_id) {
+            if self.try_emit_jump(cx) {
+                return;
+            }
+            self.fetch_around_message(clan_id, channel_id, message_id, cx);
+            return;
+        }
+        self.open_channel(channel_id, cx);
+        self.fetch_around_message(clan_id, channel_id, message_id, cx);
+    }
+
+    fn try_emit_jump(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(message_id) = self.pending_jump_message_id.clone() else {
+            return false;
+        };
+        if let Some(index) = self.messages().iter().position(|m| m.id == message_id) {
+            self.pending_jump_message_id = None;
+            cx.emit(MessagesEvent::JumpTo { index });
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn fetch_around_message(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        message_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(anchor_id) = message_id.parse::<i64>() else {
+            tracing::warn!("jump_to_message: invalid message_id");
+            return;
+        };
+        self.loading = true;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        let generation = self.fetch_generation;
+        cx.notify();
+
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .list_channel_messages(
+                    clan_id.get(),
+                    channel_id.get(),
+                    anchor_id,
+                    DIRECTION_AROUND_TIMESTAMP,
+                    MESSAGE_PAGE_LIMIT,
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_initial_fetch_result(channel_id, generation, result, cx);
+            });
+        })
+        .detach();
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
