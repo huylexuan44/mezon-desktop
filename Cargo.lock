@@ -5100,6 +5100,7 @@ dependencies = [
  "mezon-proto",
  "mezon-voice",
  "parking_lot",
+ "prost 0.13.5",
  "serde",
  "serde_json",
  "smallvec",

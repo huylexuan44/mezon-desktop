@@ -3,25 +3,30 @@ use std::rc::Rc;
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, ListAlignment, ListState, MouseButton, MouseDownEvent, Render,
-    SharedString, Subscription, Window, div, list, prelude::*, px,
+    SharedString, Subscription, Window, div, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelId, ChannelType, ClanId, ClanList, InboxCategory, InboxEvent, InboxNotification,
-    InboxStore, MessagesStore, TopicDiscussion, TopicsEvent, TopicsStore,
+    ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore,
+    InboxCategory, InboxEvent, InboxNotification, InboxStore, MessagesStore, TopicBadgeEvent,
+    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{h_flex, v_flex};
 
-use crate::chat::inbox::InboxTab;
+use crate::chat::inbox::row::{
+    notification_copy_text, render_notification_body, render_topic_body,
+};
+use crate::chat::inbox::{InboxTab, MESSAGE_ROW_HEIGHT, row_height_for_tab};
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
 const PANEL_WIDTH: f32 = 480.;
 const LIST_BODY_HEIGHT: f32 = 520.;
-const ROW_HEIGHT: f32 = 104.;
+const LIST_OVERDRAW: f32 = MESSAGE_ROW_HEIGHT + 40.;
 const PREFETCH_THRESHOLD: usize = 5;
+const EMPTY_PROTIP_COLOR: u32 = 0x2dc770;
 
 pub struct InboxPopoverPanel {
     tab: InboxTab,
@@ -33,6 +38,10 @@ pub struct InboxPopoverPanel {
     cached_items: Rc<Vec<ListRow>>,
     _inbox_sub: Subscription,
     _topics_sub: Subscription,
+    _members_sub: Subscription,
+    _channel_obs: Subscription,
+    _topic_badge_sub: Subscription,
+    _users_sub: Subscription,
 }
 
 impl InboxPopoverPanel {
@@ -43,14 +52,10 @@ impl InboxPopoverPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let list_state = ListState::new(0, ListAlignment::Top, px(ROW_HEIGHT));
+        let list_state =
+            ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
         let weak = cx.weak_entity();
-        list_state.set_scroll_handler(move |event, _window, cx| {
-            weak.update(cx, |panel, cx| {
-                panel.maybe_load_more(event.visible_range.end, cx);
-            })
-            .ok();
-        });
+        Self::attach_list_scroll_handler(&list_state, weak);
 
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
@@ -58,6 +63,24 @@ impl InboxPopoverPanel {
 
         let inbox_store = InboxStore::global(cx);
         let topics_store = TopicsStore::global(cx);
+        let members_store = ClanMembersStore::global(cx);
+        let channel_list = ChannelList::global(cx);
+        let topic_badge_store = TopicBadgeStore::global(cx);
+        let users_store = UsersByUserStore::global(cx);
+        let panel_clan_id = clan_id.clone();
+
+        UsersByUserStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(cx);
+        });
+
+        if let Ok(clan) = clan_id.parse::<ClanId>() {
+            ClanMembersStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(clan, cx);
+            });
+            ChannelList::global(cx).update(cx, |store, cx| {
+                store.load_for_clan(clan, cx);
+            });
+        }
 
         if let Some(category) = InboxTab::Mentions.category() {
             inbox_store.update(cx, |store, cx| {
@@ -68,12 +91,37 @@ impl InboxPopoverPanel {
         let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
             if matches!(event, InboxEvent::Updated) {
                 this.sync_from_store(cx);
+                if this.tab == InboxTab::Mentions {
+                    this.prefetch_mention_channels(cx);
+                }
                 cx.notify();
             }
         });
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
                 this.sync_from_store(cx);
+                cx.notify();
+            }
+        });
+        let _members_sub = cx.subscribe(&members_store, |this, _, event, cx| {
+            if let ClanMembersEvent::Changed { clan_id } = event
+                && this.clan_id == clan_id.to_string()
+            {
+                cx.notify();
+            }
+        });
+        let _channel_obs = cx.observe(&channel_list, move |_, _, cx| {
+            if panel_clan_id.parse::<ClanId>().is_ok() {
+                cx.notify();
+            }
+        });
+        let _topic_badge_sub = cx.subscribe(&topic_badge_store, |_, _, event, cx| {
+            if matches!(event, TopicBadgeEvent::Updated) {
+                cx.notify();
+            }
+        });
+        let _users_sub = cx.subscribe(&users_store, |_, _, event, cx| {
+            if matches!(event, UsersByUserEvent::Changed) {
                 cx.notify();
             }
         });
@@ -88,17 +136,91 @@ impl InboxPopoverPanel {
             cached_items: Rc::new(Vec::new()),
             _inbox_sub,
             _topics_sub,
+            _members_sub,
+            _channel_obs,
+            _topic_badge_sub,
+            _users_sub,
         };
         this.sync_from_store(cx);
+        this.prefetch_mention_channels(cx);
         this
+    }
+
+    fn attach_list_scroll_handler(
+        list_state: &ListState,
+        weak: gpui::WeakEntity<InboxPopoverPanel>,
+    ) {
+        list_state.set_scroll_handler(move |event, _window, cx| {
+            weak.update(cx, |panel, cx| {
+                panel.maybe_load_more(event.visible_range.end, cx);
+            })
+            .ok();
+        });
+    }
+
+    fn sync_list_state(&mut self, tab_changed: bool) {
+        let count = self.cached_items.len();
+        if self.list_state.item_count() != count {
+            self.list_state.reset(count);
+        } else if tab_changed && count > 0 {
+            self.list_state.remeasure();
+        }
+        if tab_changed {
+            self.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+        }
+    }
+
+    fn prefetch_context_for_tab(&self, cx: &mut Context<Self>) {
+        if let Ok(clan) = self.clan_id.parse::<ClanId>() {
+            ClanMembersStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(clan, cx);
+            });
+            ChannelList::global(cx).update(cx, |store, cx| {
+                store.load_for_clan(clan, cx);
+            });
+        }
+        if self.tab == InboxTab::Topics {
+            TopicsStore::global(cx).update(cx, |store, cx| {
+                store.fetch_if_needed(&self.clan_id, cx);
+            });
+        } else if let Some(category) = self.tab.category() {
+            InboxStore::global(cx).update(cx, |store, cx| {
+                store.fetch_if_empty(&self.clan_id, category, cx);
+            });
+        }
+        if self.tab == InboxTab::Mentions {
+            self.prefetch_mention_channels(cx);
+        }
     }
 
     fn sync_from_store(&mut self, cx: &App) {
         self.cached_items = Self::build_items(self.tab, &self.clan_id, cx);
-        let count = self.cached_items.len();
-        if self.list_state.item_count() != count {
-            self.list_state.reset(count);
+        self.sync_list_state(false);
+    }
+
+    fn prefetch_mention_channels(&self, cx: &mut Context<Self>) {
+        use std::collections::HashSet;
+        let mut clan_ids = HashSet::new();
+        if let Ok(clan) = self.clan_id.parse::<ClanId>() {
+            clan_ids.insert(clan);
         }
+        for row in self.cached_items.iter() {
+            if let ListRow::Notification(notification) = row
+                && let Some(clan_id) = notification
+                    .effective_clan_id()
+                    .and_then(|id| id.parse::<ClanId>().ok())
+            {
+                clan_ids.insert(clan_id);
+            }
+        }
+        ChannelList::global(cx).update(cx, |list, cx| {
+            for clan_id in clan_ids {
+                list.load_for_clan(clan_id, cx);
+            }
+        });
     }
 
     fn build_items(tab: InboxTab, clan_id: &str, cx: &App) -> Rc<Vec<ListRow>> {
@@ -121,16 +243,9 @@ impl InboxPopoverPanel {
             return;
         }
         self.tab = tab;
-        if tab == InboxTab::Topics {
-            TopicsStore::global(cx).update(cx, |store, cx| {
-                store.fetch_if_needed(&self.clan_id, cx);
-            });
-        } else if let Some(category) = tab.category() {
-            InboxStore::global(cx).update(cx, |store, cx| {
-                store.fetch_if_empty(&self.clan_id, category, cx);
-            });
-        }
+        self.prefetch_context_for_tab(cx);
         self.sync_from_store(cx);
+        self.sync_list_state(true);
         cx.notify();
     }
 
@@ -184,7 +299,11 @@ impl Render for InboxPopoverPanel {
         let locale = self.locale.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_tab = self.tab;
-        let topic_badge = TopicsStore::global(cx).read(cx).badge_label();
+        let topic_badge = self.clan_id.parse::<ClanId>().ok().and_then(|_| {
+            TopicBadgeStore::global(cx)
+                .read(cx)
+                .badge_label_for_clan(&self.clan_id)
+        });
         let is_loading = if active_tab == InboxTab::Topics {
             TopicsStore::global(cx).read(cx).is_loading()
         } else if let Some(category) = active_tab.category() {
@@ -201,36 +320,38 @@ impl Render for InboxPopoverPanel {
         let list_body: gpui::AnyElement = if items.is_empty() && is_loading {
             render_loading(theme_ref, &locale).into_any_element()
         } else if items.is_empty() {
-            render_empty(theme_ref, &locale, active_tab).into_any_element()
+            render_empty(theme_ref, &locale, active_tab)
         } else {
             let items_for_list = items;
             let locale_for_list = locale.clone();
             let inbox_handle_for_list = inbox_handle.clone();
             let panel_weak = this.clone();
-            let list_state_for_scroll = list_state.clone();
             let theme_for_list = theme.clone();
             div()
                 .size_full()
                 .overflow_hidden()
                 .child(
-                    list(list_state.clone(), move |ix, _window, _cx| {
+                    list(list_state, move |ix, _window, cx| {
                         let Some(row) = items_for_list.get(ix).cloned() else {
                             return div().into_any_element();
                         };
+                        let row_height = row_height_for_item(active_tab, &row);
                         render_row(
                             theme_for_list.as_ref(),
                             &locale_for_list,
                             row,
                             active_tab,
+                            row_height,
                             panel_weak.clone(),
                             inbox_handle_for_list.clone(),
+                            cx,
                         )
                     })
                     .size_full(),
                 )
                 .custom_scrollbars(
                     Scrollbars::new(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&list_state_for_scroll),
+                        .tracked_scroll_handle(&self.list_state),
                     window,
                     cx,
                 )
@@ -322,7 +443,7 @@ fn render_tabs(
                 .py_1()
                 .rounded(px(4.))
                 .cursor_pointer()
-                .when(is_active, |d| d.bg(theme.bg_hover))
+                .when(is_active, |d| d.bg(theme.brand))
                 .text_base()
                 .font_weight(if is_active {
                     gpui::FontWeight::MEDIUM
@@ -330,7 +451,7 @@ fn render_tabs(
                     gpui::FontWeight::NORMAL
                 })
                 .text_color(if is_active {
-                    theme.text_primary
+                    gpui::rgb(0xffffff)
                 } else {
                     theme.text_muted
                 })
@@ -390,38 +511,136 @@ fn render_loading(theme: &Theme, locale: &SharedString) -> impl IntoElement {
         )
 }
 
-fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> impl IntoElement {
-    let (title_key, desc_key, icon) = match tab {
-        InboxTab::ForYou => (
-            "notifications.empty.forYou.title",
-            "notifications.empty.forYou.description",
-            IconName::Inbox,
-        ),
-        InboxTab::Messages => (
-            "notifications.empty.messages.title",
-            "notifications.empty.messages.description",
+fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::AnyElement {
+    match tab {
+        InboxTab::Messages => render_empty_with_protip(
+            theme,
+            mezon_i18n::t(locale, "notifications.empty.messages.title").into(),
+            mezon_i18n::t(locale, "notifications.empty.messages.protip")
+                .to_uppercase()
+                .into(),
+            mezon_i18n::t(locale, "notifications.empty.messages.description").into(),
             IconName::EmptyUnread,
-        ),
-        InboxTab::Mentions | InboxTab::Topics => (
-            "notifications.empty.mentions.title",
-            "notifications.empty.mentions.description",
+        )
+        .into_any_element(),
+        InboxTab::Mentions => render_empty_with_protip(
+            theme,
+            mezon_i18n::t(locale, "notifications.empty.mentions.title").into(),
+            mezon_i18n::t(locale, "notifications.empty.mentions.protip")
+                .to_uppercase()
+                .into(),
+            mezon_i18n::t(locale, "notifications.empty.mentions.description").into(),
             IconName::EmptyMention,
-        ),
-    };
+        )
+        .into_any_element(),
+        InboxTab::ForYou => render_empty_simple(
+            theme,
+            mezon_i18n::t(locale, "notifications.empty.forYou.title").into(),
+            mezon_i18n::t(locale, "notifications.empty.forYou.description").into(),
+            IconName::Inbox,
+        )
+        .into_any_element(),
+        InboxTab::Topics => render_empty_simple(
+            theme,
+            mezon_i18n::t(locale, "notifications.empty.topics.title").into(),
+            mezon_i18n::t(locale, "notifications.empty.topics.description").into(),
+            IconName::EmptyMention,
+        )
+        .into_any_element(),
+    }
+}
 
+fn render_empty_icon_cluster(theme: &Theme, icon: IconName) -> impl IntoElement {
+    div()
+        .relative()
+        .mb_4()
+        .p(px(22.))
+        .rounded_full()
+        .child(
+            Icon::new(icon)
+                .size(px(36.))
+                .text_color(theme.text_muted),
+        )
+        .child(
+            svg()
+                .path(IconName::EmptyUnreadStyle.path())
+                .absolute()
+                .top_0()
+                .left(px(-10.))
+                .w(px(104.))
+                .h(px(80.)),
+        )
+}
+
+fn render_empty_with_protip(
+    theme: &Theme,
+    title: SharedString,
+    protip: SharedString,
+    description: SharedString,
+    icon: IconName,
+) -> impl IntoElement {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .py(px(80.))
+        .px_4()
+        .child(render_empty_icon_cluster(theme, icon))
+        .child(
+            div()
+                .text_2xl()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_center()
+                .mb_2()
+                .text_color(theme.text_primary)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_center()
+                .max_w(px(360.))
+                .text_color(theme.text_primary)
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(EMPTY_PROTIP_COLOR))
+                                .child(protip),
+                        )
+                        .child(description),
+                ),
+        )
+}
+
+fn render_empty_simple(
+    theme: &Theme,
+    title: SharedString,
+    description: SharedString,
+    icon: IconName,
+) -> impl IntoElement {
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
         .gap_3()
         .p_8()
-        .child(Icon::new(icon).size(px(36.)).text_color(theme.text_muted))
+        .child(
+            Icon::new(icon)
+                .size(px(36.))
+                .text_color(theme.text_muted),
+        )
         .child(
             div()
                 .text_lg()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text_primary)
-                .child(mezon_i18n::t(locale, title_key)),
+                .child(title),
         )
         .child(
             div()
@@ -429,7 +648,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> impl Int
                 .text_center()
                 .text_color(theme.text_muted)
                 .max_w(px(360.))
-                .child(mezon_i18n::t(locale, desc_key)),
+                .child(description),
         )
 }
 
@@ -438,14 +657,25 @@ fn render_row(
     locale: &SharedString,
     row: ListRow,
     tab: InboxTab,
+    row_height: f32,
     this: gpui::WeakEntity<InboxPopoverPanel>,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
+    cx: &App,
 ) -> gpui::AnyElement {
     match row {
-        ListRow::Notification(notification) => {
-            render_notification_item(theme, locale, notification, tab, this, inbox_handle)
+        ListRow::Notification(notification) => render_notification_item(
+            theme,
+            locale,
+            notification,
+            tab,
+            row_height,
+            this,
+            inbox_handle,
+            cx,
+        ),
+        ListRow::Topic(topic) => {
+            render_topic_item(theme, locale, topic, row_height, inbox_handle, cx)
         }
-        ListRow::Topic(topic) => render_topic_item(theme, locale, topic, inbox_handle),
     }
 }
 
@@ -457,20 +687,14 @@ fn schedule_inbox_jump(
     channel_id: String,
     message_id: String,
 ) {
-    cx.defer(move |cx| {
-        navigate(cx, route);
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.jump_to_message(&clan_id, &channel_id, &message_id, cx);
-        });
-        inbox_handle.hide(cx);
+    MessagesStore::global(cx).update(cx, |store, cx| {
+        store.jump_to_message(&clan_id, &channel_id, &message_id, cx);
     });
+    navigate(cx, route);
+    inbox_handle.hide(cx);
 }
 
-fn schedule_notification_jump(
-    cx: &mut App,
-    inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
-    notification: InboxNotification,
-) {
+fn notification_jump_route(notification: &InboxNotification) -> Option<Route> {
     let message_id = notification
         .message
         .as_ref()
@@ -478,30 +702,50 @@ fn schedule_notification_jump(
         .filter(|id| !id.is_empty())
         .unwrap_or("");
     if message_id.is_empty() {
-        return;
+        return None;
     }
-    let clan_id = notification.clan_id.clone();
-    let channel_id = notification.channel_id.clone();
-    let message_id = message_id.to_string();
-    let Ok(clan) = clan_id.parse::<ClanId>() else {
-        return;
-    };
+    let channel_id = notification.effective_channel_id()?;
     let Ok(channel) = channel_id.parse::<ChannelId>() else {
+        return None;
+    };
+    let clan_id = notification.effective_clan_id();
+    if clan_id.as_deref().is_none_or(|id| id.is_empty() || id == "0") {
+        return Some(Route::DirectMessage {
+            direct_id: channel,
+            message_type: "3".into(),
+        });
+    }
+    let Ok(clan) = clan_id.unwrap().parse::<ClanId>() else {
+        return None;
+    };
+    Some(Route::Channel {
+        clan_id: clan,
+        channel_id: channel,
+    })
+}
+
+fn schedule_notification_jump(
+    cx: &mut App,
+    inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
+    notification: InboxNotification,
+) {
+    let Some(route) = notification_jump_route(&notification) else {
         return;
     };
-    let route = if ChannelType::from_raw(notification.channel_type as u32) == ChannelType::Thread {
-        Route::Thread {
-            clan_id: clan,
-            channel_id: channel,
-            thread_id: channel,
-        }
-    } else {
-        Route::Channel {
-            clan_id: clan,
-            channel_id: channel,
-        }
-    };
-    schedule_inbox_jump(cx, inbox_handle, route, clan_id, channel_id, message_id);
+    let message_id = notification
+        .message
+        .as_ref()
+        .map(|m| m.message_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_default();
+    schedule_inbox_jump(
+        cx,
+        inbox_handle,
+        route,
+        notification.effective_clan_id().unwrap_or_default(),
+        notification.effective_channel_id().unwrap_or_default(),
+        message_id,
+    );
 }
 
 fn schedule_topic_jump(
@@ -531,33 +775,52 @@ fn schedule_topic_jump(
     );
 }
 
+fn row_height_for_item(tab: InboxTab, row: &ListRow) -> f32 {
+    match (tab, row) {
+        (InboxTab::Messages, ListRow::Notification(notification)) => {
+            if notification
+                .message
+                .as_ref()
+                .is_some_and(|m| !m.attachment_link.is_empty())
+            {
+                return MESSAGE_ROW_HEIGHT + 40.;
+            }
+            row_height_for_tab(tab)
+        }
+        _ => row_height_for_tab(tab),
+    }
+}
+
 fn render_notification_item(
     theme: &Theme,
     locale: &SharedString,
     notification: InboxNotification,
     tab: InboxTab,
+    row_height: f32,
     this: gpui::WeakEntity<InboxPopoverPanel>,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
+    cx: &App,
 ) -> gpui::AnyElement {
     let category = notification.category;
     let id: SharedString = notification.id.clone().into();
-    let preview: SharedString = notification.preview_text().into();
+    let copy_text = notification_copy_text(&notification);
     let show_jump = tab == InboxTab::Mentions;
-    let show_copy = tab == InboxTab::Messages && !preview.is_empty();
-    let copy_text = preview.clone();
-    let jump_notification = notification;
+    let show_copy = tab == InboxTab::Messages && copy_text.is_some();
+    let copy_text = copy_text.unwrap_or_default();
+    let jump_notification = notification.clone();
     let this_delete = this.clone();
     let this_copy = this.clone();
     let inbox_handle_jump = inbox_handle.clone();
     let jump_label = mezon_i18n::t(locale, "channelTopbar.tooltips.jump");
+    let outer_py = if tab == InboxTab::ForYou { px(4.) } else { px(8.) };
 
     div()
-        .h(px(ROW_HEIGHT))
+        .h(px(row_height))
         .overflow_hidden()
         .flex()
         .flex_col()
         .px_3()
-        .py_2()
+        .py(outer_py)
         .w_full()
         .child(
             div()
@@ -566,7 +829,7 @@ fn render_notification_item(
                 .w_full()
                 .relative()
                 .group("inbox-item")
-                .p_2()
+                .p(if tab == InboxTab::ForYou { px(8.) } else { px(8.) })
                 .rounded(px(8.))
                 .bg(theme.bg_secondary)
                 .child(
@@ -591,6 +854,7 @@ fn render_notification_item(
                         .on_mouse_down(MouseButton::Left, {
                             let id = id.clone();
                             move |_, _, cx| {
+                                cx.stop_propagation();
                                 this_delete
                                     .update(cx, |panel, cx| {
                                         panel.delete_notification(&id, category, cx);
@@ -622,7 +886,9 @@ fn render_notification_item(
                                     .text_color(theme.text_muted),
                             )
                             .on_mouse_down(MouseButton::Left, {
+                                let copy_text = copy_text.clone();
                                 move |_, _, cx| {
+                                    cx.stop_propagation();
                                     this_copy
                                         .update(cx, |panel, cx| {
                                             panel.copy_message(&copy_text, cx);
@@ -652,6 +918,7 @@ fn render_notification_item(
                             .child(jump_label)
                             .on_mouse_down(MouseButton::Left, {
                                 move |_, _, cx| {
+                                    cx.stop_propagation();
                                     schedule_notification_jump(
                                         cx,
                                         inbox_handle_jump.clone(),
@@ -665,15 +932,7 @@ fn render_notification_item(
                     div()
                         .pr(if show_copy { px(52.) } else { px(28.) })
                         .when(show_jump, |content| content.pb(px(28.)))
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_primary)
-                        .overflow_hidden()
-                        .child(if preview.is_empty() {
-                            SharedString::from("—")
-                        } else {
-                            preview
-                        }),
+                        .child(render_notification_body(theme, locale, notification, cx)),
                 ),
         )
         .into_any_element()
@@ -683,28 +942,21 @@ fn render_topic_item(
     theme: &Theme,
     locale: &SharedString,
     topic: TopicDiscussion,
+    row_height: f32,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
+    cx: &App,
 ) -> gpui::AnyElement {
-    let reply_preview: SharedString = if topic.reply_is_attachment() {
-        mezon_i18n::t(locale, "message.clickToSeeAttachment").into()
-    } else if topic.reply_preview_text().is_empty() {
-        SharedString::from("—")
-    } else {
-        topic.reply_preview_text().into()
-    };
-    let jump_topic = topic;
+    let jump_topic = topic.clone();
     let inbox_handle_jump = inbox_handle.clone();
     let jump_label = mezon_i18n::t(locale, "channelTopbar.tooltips.jump");
-    let replied_label = mezon_i18n::t(locale, "notification.repliedTo");
-    let topic_title = mezon_i18n::t(locale, "notification.topicAndYou");
 
     div()
-        .h(px(ROW_HEIGHT))
+        .h(px(row_height))
         .overflow_hidden()
         .flex()
         .flex_col()
         .px_3()
-        .py_2()
+        .py(px(4.))
         .w_full()
         .child(
             div()
@@ -735,6 +987,7 @@ fn render_topic_item(
                         .child(jump_label)
                         .on_mouse_down(MouseButton::Left, {
                             move |_, _, cx| {
+                                cx.stop_propagation();
                                 schedule_topic_jump(
                                     cx,
                                     inbox_handle_jump.clone(),
@@ -743,21 +996,7 @@ fn render_topic_item(
                             }
                         }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(theme.text_primary)
-                        .child(topic_title),
-                )
-                .child(
-                    h_flex()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(theme.text_muted)
-                        .child(replied_label)
-                        .child(reply_preview),
-                ),
+                .child(render_topic_body(theme, locale, &topic, cx)),
         )
         .into_any_element()
 }

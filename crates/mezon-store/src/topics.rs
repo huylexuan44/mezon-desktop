@@ -53,16 +53,6 @@ impl TopicsStore {
         self.loading
     }
 
-    pub fn badge_label(&self) -> Option<String> {
-        if self.topics.is_empty() {
-            None
-        } else if self.topics.len() > 9 {
-            Some("9+".into())
-        } else {
-            Some(self.topics.len().to_string())
-        }
-    }
-
     fn is_fresh(&self, clan_id: &str) -> bool {
         self.clan_id.as_deref() == Some(clan_id)
             && self.fetched_at.is_some_and(|t| t.elapsed() < CACHE_TTL)
@@ -120,35 +110,5 @@ impl TopicsStore {
                 cx.notify();
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn badge_count_caps_at_nine_plus() {
-        let store = TopicsStore {
-            topics: (0..12)
-                .map(|i| TopicDiscussion {
-                    id: i.to_string(),
-                    message_id: String::new(),
-                    clan_id: String::new(),
-                    channel_id: String::new(),
-                    content: String::new(),
-                    last_message_preview: String::new(),
-                    last_message_timestamp: 0,
-                })
-                .collect(),
-            clan_id: None,
-            loading: false,
-            fetch_generation: 0,
-            fetched_at: None,
-            api: Arc::new(AppApi::new(Arc::new(mezon_client::TransportClient::new(
-                String::new(),
-            )))),
-        };
-        assert_eq!(store.badge_label(), Some("9+".into()));
     }
 }

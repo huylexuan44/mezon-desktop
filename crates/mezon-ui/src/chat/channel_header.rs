@@ -134,11 +134,7 @@ impl ChannelHeader {
                             .map(|(id, icon)| {
                                 let is_members = id == "hdr-members";
                                 let active = is_members && self.members_active;
-                                let tint = if active {
-                                    icon_active
-                                } else {
-                                    icon_color
-                                };
+                                let tint = if active { icon_active } else { icon_color };
                                 let mut button = div()
                                     .id(id)
                                     .flex()
@@ -153,8 +149,7 @@ impl ChannelHeader {
                                 if active {
                                     button = button.bg(bg_active);
                                 }
-                                if is_members
-                                    && let Some(handler) = self.on_toggle_members.clone()
+                                if is_members && let Some(handler) = self.on_toggle_members.clone()
                                 {
                                     button =
                                         button.on_click(move |_, window, cx| handler(window, cx));

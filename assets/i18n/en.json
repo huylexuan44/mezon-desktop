@@ -3350,6 +3350,8 @@
   "notifications.empty.mentions.description": "Whenever someone mentions you it will be saved here for 7 days.",
   "notifications.empty.mentions.protip": "Protip:",
   "notifications.empty.mentions.title": "You made it through everything!",
+  "notifications.empty.topics.description": "When someone replies to a topic you're in, it will show up here.",
+  "notifications.empty.topics.title": "No topic updates yet",
   "notifications.empty.messages.description": "Open the Inbox by pressing CTRL+I, and mark your top message as read with CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Protip:",
   "notifications.empty.messages.title": "You're all caught up!",

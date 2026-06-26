@@ -26,13 +26,66 @@ impl InboxCategory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxMentionSpan {
+    pub start: i32,
+    pub end: i32,
+    pub user_id: String,
+    pub role_id: String,
+    pub is_role: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxMessagePreview {
     pub message_id: String,
     pub channel_id: String,
     pub clan_id: String,
     pub sender_id: String,
     pub content: String,
+    pub raw_content: String,
     pub avatar: String,
+    pub display_name: String,
+    pub username: String,
+    pub create_time_seconds: u32,
+    pub attachment_link: String,
+    pub attachment_type: String,
+    pub has_more_attachment: bool,
+    pub mention_spans: Vec<InboxMentionSpan>,
+}
+
+impl InboxMessagePreview {
+    pub fn body_text(&self) -> String {
+        if !self.content.is_empty() {
+            self.content.clone()
+        } else {
+            display_text_from_message_content(&self.raw_content)
+        }
+    }
+
+    pub fn mention_spans_for_render(&self) -> Vec<InboxMentionSpan> {
+        if !self.mention_spans.is_empty() {
+            return self.mention_spans.clone();
+        }
+        mention_spans_from_json_content(&self.raw_content)
+    }
+
+    fn empty_content(content: String) -> Self {
+        Self {
+            message_id: String::new(),
+            channel_id: String::new(),
+            clan_id: String::new(),
+            sender_id: String::new(),
+            content: display_text_from_message_content(&content),
+            raw_content: content,
+            avatar: String::new(),
+            display_name: String::new(),
+            username: String::new(),
+            create_time_seconds: 0,
+            attachment_link: String::new(),
+            attachment_type: String::new(),
+            has_more_attachment: false,
+            mention_spans: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +110,8 @@ pub struct TopicDiscussion {
     pub message_id: String,
     pub clan_id: String,
     pub channel_id: String,
+    pub creator_id: String,
+    pub last_sender_id: String,
     pub content: String,
     pub last_message_preview: String,
     pub last_message_timestamp: u32,
@@ -87,6 +142,94 @@ pub fn display_text_from_message_content(content: &str) -> String {
     trimmed.to_string()
 }
 
+pub fn attachment_link_is_image(link: &str, filetype: &str) -> bool {
+    if filetype.starts_with("image/") {
+        return true;
+    }
+    link.rsplit('.').next().is_some_and(|ext| {
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif"
+        )
+    })
+}
+
+fn mention_spans_from_fcm(fcm: &api::DirectFcmProto) -> Vec<InboxMentionSpan> {
+    fcm.mention_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let is_role = fcm.is_mention_role.get(index).copied().unwrap_or(false);
+            InboxMentionSpan {
+                start: fcm.position_s.get(index).copied().unwrap_or(0),
+                end: fcm.position_e.get(index).copied().unwrap_or(0),
+                user_id: if is_role {
+                    String::new()
+                } else {
+                    id.to_string()
+                },
+                role_id: if is_role {
+                    id.to_string()
+                } else {
+                    String::new()
+                },
+                is_role,
+            }
+        })
+        .collect()
+}
+
+fn mention_spans_from_json_content(content: &str) -> Vec<InboxMentionSpan> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    value
+        .get("mk")
+        .and_then(|mk| mk.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    Some(InboxMentionSpan {
+                        start: item.get("s")?.as_i64()? as i32,
+                        end: item.get("e")?.as_i64()? as i32,
+                        user_id: item
+                            .get("user_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        role_id: item
+                            .get("role_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        is_role: item.get("type").and_then(|v| v.as_str()) == Some("role"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn preview_from_fcm(fcm: api::DirectFcmProto) -> InboxMessagePreview {
+    let mention_spans = mention_spans_from_fcm(&fcm);
+    InboxMessagePreview {
+        message_id: id_str(fcm.message_id),
+        channel_id: id_str(fcm.channel_id),
+        clan_id: id_str(fcm.clan_id),
+        sender_id: id_str(fcm.sender_id),
+        content: display_text_from_message_content(&fcm.content),
+        raw_content: fcm.content.clone(),
+        avatar: fcm.avatar,
+        display_name: fcm.display_name,
+        username: fcm.username,
+        create_time_seconds: fcm.create_time_seconds.max(0) as u32,
+        attachment_link: fcm.attachment_link,
+        attachment_type: fcm.attachment_type,
+        has_more_attachment: fcm.has_more_attachment,
+        mention_spans,
+    }
+}
 pub fn message_content_is_attachment(content: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(content.trim())
         .ok()
@@ -112,27 +255,15 @@ fn parse_notification_content(bytes: &[u8]) -> Option<InboxMessagePreview> {
             }
             let content = display_text_from_message_content(text);
             if !content.is_empty() || message_content_is_attachment(text) {
-                return Some(InboxMessagePreview {
-                    message_id: String::new(),
-                    channel_id: String::new(),
-                    clan_id: String::new(),
-                    sender_id: String::new(),
-                    content,
-                    avatar: String::new(),
-                });
+                let mut preview = InboxMessagePreview::empty_content(text.to_string());
+                preview.mention_spans = mention_spans_from_json_content(text);
+                return Some(preview);
             }
         }
         return parse_message_preview_json(bytes);
     }
     if let Ok(fcm) = api::DirectFcmProto::decode(bytes) {
-        return Some(InboxMessagePreview {
-            message_id: id_str(fcm.message_id),
-            channel_id: id_str(fcm.channel_id),
-            clan_id: id_str(fcm.clan_id),
-            sender_id: id_str(fcm.sender_id),
-            content: display_text_from_message_content(&fcm.content),
-            avatar: fcm.avatar,
-        });
+        return Some(preview_from_fcm(fcm));
     }
     parse_message_preview_json(bytes)
 }
@@ -152,6 +283,18 @@ fn parse_message_preview_json(bytes: &[u8]) -> Option<InboxMessagePreview> {
         content: String,
         #[serde(default)]
         avatar: String,
+        #[serde(default)]
+        display_name: String,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        create_time_seconds: u32,
+        #[serde(default)]
+        attachment_link: String,
+        #[serde(default)]
+        attachment_type: String,
+        #[serde(default)]
+        has_more_attachment: bool,
     }
 
     fn json_id(value: &serde_json::Value) -> String {
@@ -163,17 +306,55 @@ fn parse_message_preview_json(bytes: &[u8]) -> Option<InboxMessagePreview> {
     }
 
     let raw: Raw = serde_json::from_slice(bytes).ok()?;
-    Some(InboxMessagePreview {
+    let mut preview = InboxMessagePreview {
         message_id: json_id(&raw.message_id),
         channel_id: json_id(&raw.channel_id),
         clan_id: json_id(&raw.clan_id),
         sender_id: json_id(&raw.sender_id),
         content: display_text_from_message_content(&raw.content),
+        raw_content: raw.content.clone(),
         avatar: raw.avatar,
-    })
+        display_name: raw.display_name,
+        username: raw.username,
+        create_time_seconds: raw.create_time_seconds,
+        attachment_link: raw.attachment_link,
+        attachment_type: raw.attachment_type,
+        has_more_attachment: raw.has_more_attachment,
+        mention_spans: mention_spans_from_json_content(&raw.content),
+    };
+    if preview.content.is_empty() && !preview.raw_content.is_empty() {
+        preview.content = display_text_from_message_content(&preview.raw_content);
+    }
+    Some(preview)
 }
 
 impl InboxNotification {
+    pub fn effective_clan_id(&self) -> Option<String> {
+        if !self.clan_id.is_empty() && self.clan_id != "0" {
+            return Some(self.clan_id.clone());
+        }
+        self.message.as_ref().and_then(|m| {
+            if !m.clan_id.is_empty() && m.clan_id != "0" {
+                Some(m.clan_id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn effective_channel_id(&self) -> Option<String> {
+        if !self.channel_id.is_empty() && self.channel_id != "0" {
+            return Some(self.channel_id.clone());
+        }
+        self.message.as_ref().and_then(|m| {
+            if !m.channel_id.is_empty() && m.channel_id != "0" {
+                Some(m.channel_id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn preview_text(&self) -> String {
         if let Some(message) = &self.message
             && !message.content.is_empty()
@@ -184,6 +365,14 @@ impl InboxNotification {
             return self.subject.clone();
         }
         String::new()
+    }
+
+    pub fn message_timestamp(&self) -> u32 {
+        self.message
+            .as_ref()
+            .map(|m| m.create_time_seconds)
+            .filter(|ts| *ts > 0)
+            .unwrap_or(self.create_time_seconds)
     }
 }
 
@@ -222,13 +411,13 @@ pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotifica
         let raw = std::str::from_utf8(&n.content).unwrap_or("");
         let content = display_text_from_message_content(raw);
         if !content.is_empty() || message_content_is_attachment(raw) {
-            message = Some(InboxMessagePreview {
-                message_id: String::new(),
-                channel_id: id_str(n.channel_id),
-                clan_id: id_str(n.clan_id),
-                sender_id: id_str(n.sender_id),
-                content,
-                avatar: n.avatar_url.clone(),
+            message = Some({
+                let mut preview = InboxMessagePreview::empty_content(raw.to_string());
+                preview.channel_id = id_str(n.channel_id);
+                preview.clan_id = id_str(n.clan_id);
+                preview.sender_id = id_str(n.sender_id);
+                preview.avatar = n.avatar_url.clone();
+                preview
             });
         }
     }
@@ -248,6 +437,15 @@ pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotifica
         if message.content.is_empty() {
             let raw = std::str::from_utf8(&n.content).unwrap_or("");
             message.content = display_text_from_message_content(raw);
+            if message.raw_content.is_empty() {
+                message.raw_content = raw.to_string();
+            }
+            if message.mention_spans.is_empty() {
+                message.mention_spans = mention_spans_from_json_content(raw);
+            }
+        }
+        if message.create_time_seconds == 0 && n.create_time_seconds > 0 {
+            message.create_time_seconds = n.create_time_seconds;
         }
     }
     Ok(InboxNotification {
@@ -291,11 +489,19 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
         .as_ref()
         .map(|m| m.timestamp_seconds)
         .unwrap_or(t.update_time_seconds);
+    let last_sender_id = t
+        .last_sent_message
+        .as_ref()
+        .map(|m| m.sender_id)
+        .filter(|id| *id != 0)
+        .unwrap_or(t.creator_id);
     TopicDiscussion {
         id: id_str(t.id),
         message_id: id_str(t.message_id),
         clan_id: id_str(t.clan_id),
         channel_id: id_str(t.channel_id),
+        creator_id: id_str(t.creator_id),
+        last_sender_id: id_str(last_sender_id),
         content: display_text_from_message_content(&t.content),
         last_message_preview,
         last_message_timestamp,

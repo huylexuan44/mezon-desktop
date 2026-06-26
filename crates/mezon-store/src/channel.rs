@@ -780,6 +780,13 @@ impl ChannelList {
             .find(|channel| channel.id == channel_id)
     }
 
+    pub fn find_channel_in_clan(&self, clan_id: ClanId, channel_id: ChannelId) -> Option<&Channel> {
+        self.categories_for_clan(clan_id)
+            .iter()
+            .flat_map(|category| &category.channels)
+            .find(|channel| channel.id == channel_id)
+    }
+
     pub fn clan_id_for_channel(&self, channel_id: ChannelId) -> Option<ClanId> {
         for (clan_id, cats) in self.cache.iter() {
             let found = cats

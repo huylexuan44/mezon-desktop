@@ -21,8 +21,10 @@ pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
 pub use inbox::{
     DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
-    InboxMessagePreview, InboxNotification, TopicDiscussion, inbox_notification_from_api,
-    inbox_notifications_from_list, topic_discussion_from_api, topics_from_list,
+    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    attachment_link_is_image, display_text_from_message_content, inbox_notification_from_api,
+    inbox_notifications_from_list, message_content_is_attachment, topic_discussion_from_api,
+    topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
 pub use session::Session;

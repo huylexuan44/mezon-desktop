@@ -12,14 +12,15 @@ use mezon_client::{
 use crate::AppConfig;
 use crate::KeyedCache;
 use crate::channel::{
-    ChannelEvent, ChannelList, Message, MessageAttachment, message_combined_with_prev,
-    recompute_message_grouping,
+    Channel, ChannelEvent, ChannelList, ChannelType, Message, MessageAttachment,
+    message_combined_with_prev, recompute_message_grouping,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MESSAGE_PAGE_LIMIT: u32 = 50;
 const DIRECTION_BEFORE: i32 = 3;
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
+const CHANNEL_TYPE_THREAD: i32 = 7;
 const MAX_MESSAGES_PER_CHANNEL: usize = 2_000;
 const MAX_CACHED_CHANNELS: usize = 30;
 
@@ -313,6 +314,17 @@ impl MessagesStore {
     /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
     pub fn open_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if self.active_channel_id == Some(channel_id) && !self.is_dm {
+            if self.pending_jump_message_id.is_some() {
+                if let Some(clan_id) = self.active_clan_id {
+                    if self.try_emit_jump(cx) {
+                        return;
+                    }
+                    if let Some(message_id) = self.pending_jump_message_id.clone() {
+                        self.fetch_around_message(clan_id, channel_id, &message_id, cx);
+                    }
+                }
+                return;
+            }
             if self.loading {
                 return;
             }
@@ -327,19 +339,16 @@ impl MessagesStore {
             self.refetch_current_messages(cx);
             return;
         }
-        let Some(channel) = ChannelList::global(cx)
-            .read(cx)
-            .find_channel(channel_id)
-            .cloned()
-        else {
+        let Some(channel) = lookup_channel(channel_id, cx) else {
             return;
         };
+        let join_type = channel_join_type(&channel);
         self.activate(
             channel.clan_id,
             channel_id,
             !channel.private,
             false,
-            CHANNEL_TYPE_CHANNEL,
+            join_type,
             STREAM_MODE_CHANNEL,
             cx,
         );
@@ -395,6 +404,13 @@ impl MessagesStore {
         if !self.joined_channels.contains(&channel_id) {
             self.joined_channels.insert(channel_id);
             self.spawn_join(clan_id, channel_id, join_type, is_public, cx);
+        }
+
+        if let Some(message_id) = self.pending_jump_message_id.clone() {
+            self.loading = true;
+            cx.notify();
+            self.fetch_around_message(clan_id, channel_id, &message_id, cx);
+            return;
         }
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
@@ -507,39 +523,19 @@ impl MessagesStore {
             tracing::warn!("jump_to_message: invalid channel_id");
             return;
         };
+        if message_id.is_empty() {
+            return;
+        }
         self.pending_jump_message_id = Some(message_id.to_string());
+        ChannelList::global(cx).update(cx, |list, cx| {
+            list.load_for_clan(clan_id, cx);
+        });
         if self.active_channel_id == Some(channel_id) && self.active_clan_id == Some(clan_id) {
             if self.try_emit_jump(cx) {
                 return;
             }
             self.fetch_around_message(clan_id, channel_id, message_id, cx);
-            return;
         }
-        let Some(channel) = ChannelList::global(cx)
-            .read(cx)
-            .find_channel(channel_id)
-            .cloned()
-        else {
-            return;
-        };
-        self.active_channel_id = Some(channel_id);
-        self.active_clan_id = Some(channel.clan_id);
-        self.is_public = !channel.private;
-        self.is_dm = false;
-        self.mode = STREAM_MODE_CHANNEL;
-        self.loading_more = false;
-        if !self.joined_channels.contains(&channel_id) {
-            self.joined_channels.insert(channel_id);
-            self.spawn_join(
-                channel.clan_id,
-                channel_id,
-                CHANNEL_TYPE_CHANNEL,
-                !channel.private,
-                cx,
-            );
-        }
-        cx.emit(MessagesEvent::Reset { count: 0 });
-        self.fetch_around_message(channel.clan_id, channel_id, message_id, cx);
     }
 
     fn try_emit_jump(&mut self, cx: &mut Context<Self>) -> bool {
@@ -777,6 +773,24 @@ impl MessageAttachment {
             display_width,
             display_height,
         }
+    }
+}
+
+fn lookup_channel(channel_id: ChannelId, cx: &App) -> Option<Channel> {
+    let list = ChannelList::global(cx).read(cx);
+    list.find_channel(channel_id)
+        .cloned()
+        .or_else(|| {
+            list.clan_id_for_channel(channel_id)
+                .and_then(|clan_id| list.find_channel_in_clan(clan_id, channel_id).cloned())
+        })
+}
+
+fn channel_join_type(channel: &Channel) -> i32 {
+    if channel.channel_type == ChannelType::Thread {
+        CHANNEL_TYPE_THREAD
+    } else {
+        CHANNEL_TYPE_CHANNEL
     }
 }
 

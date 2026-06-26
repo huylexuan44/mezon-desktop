@@ -414,6 +414,7 @@ fn open_main_window(
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
+    mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);

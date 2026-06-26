@@ -28,7 +28,6 @@ where
         .map_err(|e| anyhow::anyhow!("invalid id {value:?}: {e}"))
 }
 
-
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,

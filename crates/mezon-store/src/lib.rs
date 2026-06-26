@@ -16,10 +16,11 @@ pub mod messages;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
+pub mod topic_badges;
+pub mod topics;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
-pub mod topics;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
@@ -46,10 +47,15 @@ pub use ids::{ChannelId, ClanId, ParseIdError, RoleId, UserId};
 pub use inbox::{InboxEvent, InboxStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use messages::*;
-pub use mezon_client::{InboxCategory, InboxNotification, TopicDiscussion};
+pub use mezon_client::{
+    InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    attachment_link_is_image, message_content_is_attachment,
+};
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
+pub use topics::{TopicsEvent, TopicsStore};
 pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
@@ -58,7 +64,6 @@ pub use voice::{
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     preload_screen_share_options,
 };
-pub use topics::{TopicsEvent, TopicsStore};
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 

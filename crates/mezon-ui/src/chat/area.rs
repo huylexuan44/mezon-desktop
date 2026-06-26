@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
-use gpui::{AnyView, App, Context, Entity, StyleRefinement, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyView, App, Context, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px,
+};
 use mezon_store::Settings;
 use ui::PopoverMenuHandle;
 
