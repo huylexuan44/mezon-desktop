@@ -16,7 +16,7 @@ pub enum InboxEvent {
     Updated,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct CategoryBucket {
     items: Vec<InboxNotification>,
     last_id: Option<String>,
@@ -24,6 +24,19 @@ struct CategoryBucket {
     has_more: bool,
     fetch_generation: u64,
     fetched_at: Option<Instant>,
+}
+
+impl Default for CategoryBucket {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            last_id: None,
+            loading: false,
+            has_more: true,
+            fetch_generation: 0,
+            fetched_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -137,12 +150,16 @@ impl InboxStore {
         if self.is_fresh(clan_id, category) {
             return;
         }
-        let empty = self
+        let never_fetched = self
             .bucket(clan_id, category)
-            .map(|b| b.items.is_empty())
-            .unwrap_or(true);
-        if !empty {
-            return;
+            .is_none_or(|b| b.fetched_at.is_none());
+        if !never_fetched {
+            let empty = self
+                .bucket(clan_id, category)
+                .is_none_or(|b| b.items.is_empty());
+            if !empty {
+                return;
+            }
         }
         self.fetch_page(clan_id, category, None, cx);
     }

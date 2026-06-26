@@ -1,9 +1,8 @@
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PresenceEvent, PresenceStore, Settings,
-    VoiceStore,
-
+    DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PresenceEvent, PresenceStore,
+    Settings, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 

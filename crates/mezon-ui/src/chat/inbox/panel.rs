@@ -30,6 +30,7 @@ pub struct InboxPopoverPanel {
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     list_state: ListState,
     focus_handle: FocusHandle,
+    cached_items: Rc<Vec<ListRow>>,
     _inbox_sub: Subscription,
     _topics_sub: Subscription,
 }
@@ -66,13 +67,13 @@ impl InboxPopoverPanel {
 
         let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
             if matches!(event, InboxEvent::Updated) {
-                this.sync_list_count(cx);
+                this.sync_from_store(cx);
                 cx.notify();
             }
         });
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
-                this.sync_list_count(cx);
+                this.sync_from_store(cx);
                 cx.notify();
             }
         });
@@ -84,42 +85,33 @@ impl InboxPopoverPanel {
             inbox_handle,
             list_state,
             focus_handle,
+            cached_items: Rc::new(Vec::new()),
             _inbox_sub,
             _topics_sub,
         };
-        this.sync_list_count(cx);
+        this.sync_from_store(cx);
         this
     }
 
-    fn sync_list_count(&mut self, cx: &mut Context<Self>) {
-        let count = self.current_count(cx);
+    fn sync_from_store(&mut self, cx: &App) {
+        self.cached_items = Self::build_items(self.tab, &self.clan_id, cx);
+        let count = self.cached_items.len();
         if self.list_state.item_count() != count {
             self.list_state.reset(count);
         }
     }
 
-    fn current_count(&self, cx: &App) -> usize {
-        if self.tab == InboxTab::Topics {
-            return TopicsStore::global(cx).read(cx).topics().len();
-        }
-        let Some(category) = self.tab.category() else {
-            return 0;
-        };
-        InboxStore::global(cx)
-            .read(cx)
-            .items(&self.clan_id, category)
-            .len()
-    }
-
-    fn current_items(&self, cx: &App) -> Rc<Vec<ListRow>> {
-        if self.tab == InboxTab::Topics {
+    fn build_items(tab: InboxTab, clan_id: &str, cx: &App) -> Rc<Vec<ListRow>> {
+        if tab == InboxTab::Topics {
             let topics = TopicsStore::global(cx).read(cx).topics().to_vec();
             return Rc::new(topics.into_iter().map(ListRow::Topic).collect());
         }
-        let category = self.tab.category().expect("notification tab");
+        let Some(category) = tab.category() else {
+            return Rc::new(Vec::new());
+        };
         let items = InboxStore::global(cx)
             .read(cx)
-            .items(&self.clan_id, category)
+            .items(clan_id, category)
             .to_vec();
         Rc::new(items.into_iter().map(ListRow::Notification).collect())
     }
@@ -138,7 +130,7 @@ impl InboxPopoverPanel {
                 store.fetch_if_empty(&self.clan_id, category, cx);
             });
         }
-        self.sync_list_count(cx);
+        self.sync_from_store(cx);
         cx.notify();
     }
 
@@ -156,7 +148,7 @@ impl InboxPopoverPanel {
         if self.tab == InboxTab::Topics {
             return;
         }
-        let count = self.current_count(cx);
+        let count = self.cached_items.len();
         if count == 0 || count.saturating_sub(visible_end) > PREFETCH_THRESHOLD {
             return;
         }
@@ -188,7 +180,7 @@ impl Render for InboxPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let theme_ref = theme.as_ref();
-        let items = self.current_items(cx);
+        let items = self.cached_items.clone();
         let locale = self.locale.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_tab = self.tab;
@@ -551,7 +543,7 @@ fn render_notification_item(
     let id: SharedString = notification.id.clone().into();
     let preview: SharedString = notification.preview_text().into();
     let show_jump = tab == InboxTab::Mentions;
-    let show_copy = tab == InboxTab::Messages;
+    let show_copy = tab == InboxTab::Messages && !preview.is_empty();
     let copy_text = preview.clone();
     let jump_notification = notification;
     let this_delete = this.clone();

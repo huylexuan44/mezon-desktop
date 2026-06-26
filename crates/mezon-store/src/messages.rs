@@ -515,8 +515,31 @@ impl MessagesStore {
             self.fetch_around_message(clan_id, channel_id, message_id, cx);
             return;
         }
-        self.open_channel(channel_id, cx);
-        self.fetch_around_message(clan_id, channel_id, message_id, cx);
+        let Some(channel) = ChannelList::global(cx)
+            .read(cx)
+            .find_channel(channel_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.active_channel_id = Some(channel_id);
+        self.active_clan_id = Some(channel.clan_id);
+        self.is_public = !channel.private;
+        self.is_dm = false;
+        self.mode = STREAM_MODE_CHANNEL;
+        self.loading_more = false;
+        if !self.joined_channels.contains(&channel_id) {
+            self.joined_channels.insert(channel_id);
+            self.spawn_join(
+                channel.clan_id,
+                channel_id,
+                CHANNEL_TYPE_CHANNEL,
+                !channel.private,
+                cx,
+            );
+        }
+        cx.emit(MessagesEvent::Reset { count: 0 });
+        self.fetch_around_message(channel.clan_id, channel_id, message_id, cx);
     }
 
     fn try_emit_jump(&mut self, cx: &mut Context<Self>) -> bool {
