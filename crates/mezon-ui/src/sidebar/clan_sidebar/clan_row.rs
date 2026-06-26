@@ -99,17 +99,18 @@ pub(super) fn render_clan_row(
         .read(cx)
         .is_active_clan(clan.id.parse().unwrap_or_default())
         && !dm_active;
-    let show_badge = clan.badge_count > 0 && !clan.muted;
+    let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
     let badge_count = clan.badge_count;
     let muted = clan.muted;
     let pill_color = theme.tokens.text_theme_primary;
 
     let avatar: AnyElement = if let Some(ref url) = clan.avatar_url {
-        let proxied = crate::util::imgproxy::proxied(cx, url, 100, 100, "fill-down");
+        let proxied = crate::util::imgproxy::proxied(cx, url, 100, 100, "fill");
         let mut el = img(SharedString::from(proxied))
             .size(px(40.))
             .rounded(px(8.))
+            .overflow_hidden()
             .object_fit(gpui::ObjectFit::Cover);
         if muted {
             el = el.grayscale(true);

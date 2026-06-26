@@ -25,6 +25,8 @@ pub use sidebar::direct_sidebar::DirectSidebar;
 pub use theme::Theme;
 pub use theme::tokens::ThemeTokens;
 
+pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = false;
+
 gpui::actions!(mezon, [ToggleInspector, Quit]);
 
 #[macro_export]

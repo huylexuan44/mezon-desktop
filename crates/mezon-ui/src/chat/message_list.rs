@@ -8,7 +8,8 @@ use mezon_store::{ChannelId, ChannelList, Message, MessagesEvent, MessagesStore,
 
 use crate::chat::message_row::{MessageAttachmentView, MessageRow};
 use crate::image_cache::{
-    AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache, MESSAGE_IMAGE_CACHE_CAPACITY,
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+    MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -70,11 +71,10 @@ impl MessageTimeline {
                 MessagesStore::global(cx).update(cx, |store, cx| store.load_more(cx));
             }
             let _ = timeline.update(cx, |this, cx| {
-                let was_suppressed = this.suppress_hover;
                 this.suppress_hover = true;
-                if !was_suppressed {
-                    cx.notify();
-                }
+                // Re-render on every scroll tick so the image cache sweep runs
+                // and releases attachments that just left the viewport.
+                cx.notify();
                 this._hover_release_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(SCROLL_HOVER_RELEASE_MS))
@@ -88,8 +88,24 @@ impl MessageTimeline {
                 }));
             });
         });
-        let image_cache = cx.new(|cx| LruImageCache::new(MESSAGE_IMAGE_CACHE_CAPACITY, cx));
-        let avatar_image_cache = cx.new(|cx| LruImageCache::new(AVATAR_IMAGE_CACHE_CAPACITY, cx));
+        let image_cache = cx.new(|cx| {
+            LruImageCache::labeled(
+                "msg-image",
+                MESSAGE_IMAGE_CACHE_CAPACITY,
+                MESSAGE_IMAGE_CACHE_BYTES,
+                MESSAGE_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        let avatar_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "msg-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             list_state,
             settings,
@@ -125,6 +141,10 @@ impl Render for MessageTimeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("MessageTimeline");
         self.clear_image_cache_if_channel_changed(window, cx);
+        // Keep only the images visible this frame; anything scrolled out of the
+        // viewport stops being requested and is dropped here on the next render.
+        self.image_cache
+            .update(cx, |cache, cx| cache.sweep(window, cx));
 
         let store = MessagesStore::global(cx);
         let channel_id = ChannelList::global(cx).read(cx).active_channel_id;

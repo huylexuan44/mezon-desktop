@@ -10,6 +10,9 @@ use mezon_store::{
 };
 
 use crate::components::primitives::Avatar;
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
@@ -52,6 +55,7 @@ pub struct MemberListPanel {
     settings: Entity<Settings>,
     rows: Derived<Vec<Row>>,
     list_scroll: UniformListScrollHandle,
+    avatar_image_cache: Entity<LruImageCache>,
 }
 
 impl MemberListPanel {
@@ -100,11 +104,21 @@ impl MemberListPanel {
             }
         }
 
+        let avatar_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "member-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         let mut this = Self {
             source,
             settings,
             rows: Derived::default(),
             list_scroll: UniformListScrollHandle::new(),
+            avatar_image_cache,
         };
         this.rebuild(cx);
         this
@@ -267,8 +281,17 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
 }
 
 fn make_member_row(cx: &App, raw: RawMember) -> Row {
+    // The dev image proxy 404s on avatar source URLs, forcing a fallback to the
+    // raw (full-resolution) file. For the member list we skip the proxy on dev
+    // and use the raw URL directly: it avoids the wasted 404 round-trip, and the
+    // dev server already serves avatars at avatar size.
+    let skip_proxy = mezon_store::AppConfig::try_global(cx)
+        .map(|cfg| cfg.is_dev_imgproxy())
+        .unwrap_or(false);
     let avatar_src = if raw.avatar_raw.is_empty() {
         SharedString::default()
+    } else if skip_proxy {
+        SharedString::from(raw.avatar_raw.clone())
     } else {
         SharedString::from(crate::util::imgproxy::avatar_url(cx, &raw.avatar_raw))
     };
@@ -307,16 +330,20 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
         .into_any_element()
 }
 
-fn render_member(theme: &Theme, member: &MemberRow) -> AnyElement {
-    let avatar = {
-        let base = Avatar::new().name(member.name.clone()).size_px(px(32.));
-        if member.avatar_src.is_empty() {
-            base
-        } else {
-            base.src(member.avatar_src.clone())
-                .fallback_src(member.avatar_raw.clone())
-        }
-    };
+fn render_member(
+    theme: &Theme,
+    member: &MemberRow,
+    avatar_image_cache: &Entity<LruImageCache>,
+) -> AnyElement {
+    let mut avatar = Avatar::new()
+        .name(member.name.clone())
+        .size_px(px(32.))
+        .image_cache(avatar_image_cache.clone());
+    if !member.avatar_src.is_empty() {
+        avatar = avatar
+            .src(member.avatar_src.clone())
+            .fallback_src(member.avatar_raw.clone());
+    }
 
     let dot_color = if member.online {
         theme.status_online
@@ -358,10 +385,14 @@ fn render_member(theme: &Theme, member: &MemberRow) -> AnyElement {
 impl Render for MemberListPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("MemberListPanel");
+        // Avatars use a plain byte-budget LRU (no per-frame viewport sweep):
+        // they are small, disk-cached, and reused, so sweeping them would force
+        // constant re-fetches (and re-trigger failed loads) on every re-render.
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let count = self.rows.get().len();
         let entity = cx.entity();
+        let avatar_image_cache = self.avatar_image_cache.clone();
 
         let list = uniform_list("member-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -372,7 +403,7 @@ impl Render for MemberListPanel {
                     Some(Row::Header { kind, count }) => {
                         render_header(&theme, &locale, kind, *count)
                     }
-                    Some(Row::Member(member)) => render_member(&theme, member),
+                    Some(Row::Member(member)) => render_member(&theme, member, &avatar_image_cache),
                     None => div().into_any_element(),
                 })
                 .collect::<Vec<_>>()

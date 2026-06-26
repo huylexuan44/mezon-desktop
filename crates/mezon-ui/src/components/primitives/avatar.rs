@@ -122,6 +122,7 @@ fn clipped_image(
         .size(size)
         .flex_shrink_0()
         .rounded_full()
+        .overflow_hidden()
         .child(
             img(src)
                 .size(size)

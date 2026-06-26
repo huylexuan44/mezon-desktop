@@ -307,6 +307,13 @@ impl AppConfig {
         cx.try_global::<GlobalAppConfig>().map(|g| g.0.as_ref())
     }
 
+    /// Whether we are pointed at the dev image proxy. The dev proxy currently
+    /// rejects avatar source URLs (404 "Invalid source URL"), so callers may
+    /// choose to skip it and use the raw URL directly.
+    pub fn is_dev_imgproxy(&self) -> bool {
+        self.imgproxy_base_url.contains("dev-imgproxy")
+    }
+
     pub fn imgproxy_url(
         &self,
         source_image_url: &str,

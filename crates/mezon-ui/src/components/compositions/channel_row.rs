@@ -105,22 +105,25 @@ impl ChannelRow {
                         })
                         .child(self.name),
                 )
-                .when(self.badge_count > 0 && !self.muted, move |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .min_w(px(16.0))
-                            .h(px(16.0))
-                            .px_1()
-                            .rounded_full()
-                            .bg(brand)
-                            .text_color(text_primary)
-                            .text_xs()
-                            .child(self.badge_label.clone()),
-                    )
-                })
+                .when(
+                    crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0 && !self.muted,
+                    move |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .min_w(px(16.0))
+                                .h(px(16.0))
+                                .px_1()
+                                .rounded_full()
+                                .bg(brand)
+                                .text_color(text_primary)
+                                .text_xs()
+                                .child(self.badge_label.clone()),
+                        )
+                    },
+                )
                 .when(
                     self.badge_count == 0 && self.unread && !self.muted,
                     move |el| el.child(div().size_2().rounded_full().bg(brand)),

@@ -358,7 +358,15 @@ impl Render for ChatLayout {
                             .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
                     .children(voice_mini_bar)
-                    .child(self.user_info_bar.clone()),
+                    .child(
+                        AnyView::from(self.user_info_bar.clone()).cached(
+                            StyleRefinement::default()
+                                .absolute()
+                                .left(px(12.0))
+                                .right(px(8.0))
+                                .bottom(px(12.0)),
+                        ),
+                    ),
             )
             .child(
                 div()
@@ -514,7 +522,10 @@ impl ChatLayout {
                 let channel = ch.clone();
                 let (input_device_id, output_device_id) = {
                     let settings = self.settings.read(cx);
-                    (settings.input_device_id.clone(), settings.output_device_id.clone())
+                    (
+                        settings.input_device_id.clone(),
+                        settings.output_device_id.clone(),
+                    )
                 };
                 return crate::chat::voice::render_voice_channel(
                     theme,

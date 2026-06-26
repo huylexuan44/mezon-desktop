@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, ObjectFit, SharedString,
-    StyledImage, div, img, prelude::*, px,
+    AnyElement, Context, Entity, FontWeight, Hsla, ObjectFit, SharedString, StyledImage, div, img,
+    prelude::*, px,
 };
 use mezon_store::{
     Channel, Settings, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
@@ -33,9 +33,10 @@ pub fn render_voice_channel(
     }
 
     let error = match store.connection() {
-        VoiceConnection::Failed { channel_id, message } if *channel_id == channel.id.to_string() => {
-            Some(message.clone())
-        }
+        VoiceConnection::Failed {
+            channel_id,
+            message,
+        } if *channel_id == channel.id.to_string() => Some(message.clone()),
         _ => None,
     };
 
@@ -307,12 +308,7 @@ fn render_pre_join(
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
-            this.child(
-                div()
-                    .text_color(theme.status_dnd)
-                    .text_sm()
-                    .child(message),
-            )
+            this.child(div().text_color(theme.status_dnd).text_sm().child(message))
         })
         .child(join);
 
@@ -405,16 +401,12 @@ fn render_in_call(
     } else {
         match store.call_status() {
             VoiceCallStatus::Reconnecting => Some((
-                SharedString::from(
-                    mezon_i18n::t(locale, "channelVoice.reconnecting").to_string(),
-                ),
+                SharedString::from(mezon_i18n::t(locale, "channelVoice.reconnecting").to_string()),
                 theme.status_idle.into(),
                 theme.bg_hover.into(),
             )),
             VoiceCallStatus::WeakNetwork => Some((
-                SharedString::from(
-                    mezon_i18n::t(locale, "channelVoice.weakNetwork").to_string(),
-                ),
+                SharedString::from(mezon_i18n::t(locale, "channelVoice.weakNetwork").to_string()),
                 theme.status_idle.into(),
                 theme.bg_hover.into(),
             )),
@@ -456,7 +448,9 @@ fn render_grid(
                 .p_3()
                 .bg(theme.bg_tertiary)
                 .children(room_members.iter().map(|member| {
-                    let mut avatar = Avatar::new().name(member.display_name.clone()).size_px(px(80.));
+                    let mut avatar = Avatar::new()
+                        .name(member.display_name.clone())
+                        .size_px(px(80.));
                     if !member.avatar_url.is_empty() {
                         avatar = avatar.src(member.avatar_url.clone());
                     }
@@ -481,7 +475,11 @@ fn render_grid(
                 .into_any_element();
         }
 
-        let key = if connecting { "channelVoice.connecting" } else { "channelVoice.noOneInRoom" };
+        let key = if connecting {
+            "channelVoice.connecting"
+        } else {
+            "channelVoice.noOneInRoom"
+        };
         return div()
             .flex()
             .flex_col()
@@ -665,12 +663,7 @@ fn video_tile(
         .into_any_element()
 }
 
-fn tile_inner(
-    theme: &Theme,
-    store: &VoiceStore,
-    cell: &VideoCell,
-    large: bool,
-) -> AnyElement {
+fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) -> AnyElement {
     if let Some(key) = cell.key
         && let Some(image) = store.render_image(key)
     {
@@ -689,9 +682,10 @@ fn tile_inner(
             .into_any_element();
     }
 
-    let mut avatar = Avatar::new()
-        .name(cell.name.clone())
-        .size_px(if large { px(120.) } else { px(80.) });
+    let mut avatar =
+        Avatar::new()
+            .name(cell.name.clone())
+            .size_px(if large { px(120.) } else { px(80.) });
     if cell.speaking {
         avatar = avatar.border_color(theme.status_online);
     }
@@ -731,12 +725,7 @@ fn tile_label(theme: &Theme, cell: &VideoCell) -> AnyElement {
                     .text_color(gpui::rgb(0xffffff)),
             )
         })
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui::rgb(0xffffff))
-                .child(label),
-        )
+        .child(div().text_xs().text_color(gpui::rgb(0xffffff)).child(label))
         .into_any_element()
 }
 
@@ -897,11 +886,7 @@ fn decorative_circle(theme: &Theme, icon: IconName) -> AnyElement {
         .h(px(44.))
         .rounded_full()
         .bg(theme.bg_secondary)
-        .child(
-            Icon::new(icon)
-                .size(px(20.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(icon).size(px(20.)).text_color(theme.text_muted))
         .into_any_element()
 }
 

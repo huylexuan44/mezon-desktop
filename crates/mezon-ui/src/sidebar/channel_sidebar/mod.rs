@@ -183,7 +183,10 @@ impl ChannelSidebar {
                                 SharedString::from("")
                             };
                             items.push(SidebarItem::Channel {
-                                elem_id: SharedString::from(format!("ch-{}", &ch.id)),
+                                elem_id: SharedString::from(format!(
+                                    "ch-{}-{}",
+                                    &category.id, &ch.id
+                                )),
                                 id: ch.id.to_string(),
                                 name: truncate_channel_label(&ch.name),
                                 channel_type: ch.channel_type,
@@ -413,7 +416,7 @@ fn render_banner_and_events(
 
     if let Some(url) = banner_url {
         col = col.child(
-            div().w_full().h(px(136.)).mb_2().child(
+            div().w_full().h(px(136.)).mb_2().overflow_hidden().child(
                 gpui::img(crate::util::imgproxy::proxied(cx, url, 300, 300, "fit"))
                     .w_full()
                     .h_full()
@@ -662,22 +665,25 @@ fn render_sidebar_item(
                                 el.font_weight(gpui::FontWeight::BOLD)
                             })
                             .child(div().flex_1().child(name.clone()))
-                            .when(*badge_count > 0 && !*muted, move |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .min_w(px(16.))
-                                        .h(px(16.))
-                                        .px_1()
-                                        .rounded_full()
-                                        .bg(brand)
-                                        .text_color(text_primary)
-                                        .text_xs()
-                                        .child(badge_label.clone()),
-                                )
-                            }),
+                            .when(
+                                crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0 && !*muted,
+                                move |el| {
+                                    el.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .min_w(px(16.))
+                                            .h(px(16.))
+                                            .px_1()
+                                            .rounded_full()
+                                            .bg(brand)
+                                            .text_color(text_primary)
+                                            .text_xs()
+                                            .child(badge_label.clone()),
+                                    )
+                                },
+                            ),
                     )
                     .into_any_element()
             } else {

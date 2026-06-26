@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::components::primitives::{InputEvent, InputState};
-use gpui::{AnyView, App, Context, Entity, SharedString, Window, div, prelude::*};
+use gpui::{AnyView, App, Context, Entity, StyleRefinement, SharedString, Window, div, prelude::*, px};
 use mezon_store::Settings;
 use ui::PopoverMenuHandle;
 
@@ -148,12 +148,15 @@ impl ChatArea {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(AnyView::from(self.timeline.clone())),
-            )
+            .child(div().flex_1().min_h_0().child(
+                // Cache the message list so an unrelated sibling/parent notify
+                // (presence in the member panel, typing indicator, user info
+                // bar, theme change…) does not force a full re-layout of every
+                // row. It self-invalidates whenever the timeline itself
+                // notifies (scroll, new message, GIF animation), so behaviour
+                // is unchanged — only redundant re-renders are skipped.
+                AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
+            ))
             .child(input_bar.render(theme, locale));
 
         let body = div()
@@ -163,7 +166,20 @@ impl ChatArea {
             .min_h_0()
             .child(message_column)
             .when(show_member_panel, |row| match &self.member_panel {
-                Some(panel) => row.child(panel.clone()),
+                // Cache the member panel so it is not re-rendered (and its avatars
+                // re-painted) every frame the message timeline notifies during
+                // scroll/load-more. GPUI marks the whole ancestor chain of a
+                // notified view dirty, so the timeline's churn forces chat_layout
+                // to re-render its subtree; caching keeps the panel reused unless
+                // the panel itself is notified (member/presence change or scroll).
+                Some(panel) => row.child(
+                    AnyView::from(panel.clone()).cached(
+                        StyleRefinement::default()
+                            .w(px(245.))
+                            .h_full()
+                            .flex_shrink_0(),
+                    ),
+                ),
                 None => row,
             });
 

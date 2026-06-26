@@ -137,6 +137,7 @@ impl DmRow {
                 .size(size)
                 .flex_shrink_0()
                 .rounded_full()
+                .overflow_hidden()
                 .child(
                     gpui::img(crate::util::assets::AVATAR_GROUP)
                         .size(size)

@@ -192,9 +192,10 @@ impl ScreenShareModal {
     fn set_tab(&mut self, tab: ShareTab, cx: &mut Context<Self>) {
         self.tab = tab;
         if let Some(selected) = self.selected {
-            let still_valid = self.options.iter().any(|option| {
-                option_kind(option) == selected.kind && option.id == selected.id
-            });
+            let still_valid = self
+                .options
+                .iter()
+                .any(|option| option_kind(option) == selected.kind && option.id == selected.id);
             if !still_valid {
                 self.selected = None;
             }
@@ -206,9 +207,11 @@ impl ScreenShareModal {
         let Some(selected) = self.selected else {
             return;
         };
-        let Some(option) = self.options.iter().find(|option| {
-            option_kind(option) == selected.kind && option.id == selected.id
-        }) else {
+        let Some(option) = self
+            .options
+            .iter()
+            .find(|option| option_kind(option) == selected.kind && option.id == selected.id)
+        else {
             return;
         };
         let pick = PickedScreen::Target(option.target.clone());
@@ -231,9 +234,9 @@ impl ScreenShareModal {
 
 fn preview_to_render_image(preview: ScreenSharePreview) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba)?;
-    Some(Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
-        buffer,
-    )])))
+    Some(Arc::new(RenderImage::new(smallvec::smallvec![
+        image::Frame::new(buffer,)
+    ])))
 }
 
 fn option_kind(option: &ScreenShareOption) -> ScreenShareKind {
@@ -262,8 +265,7 @@ impl Render for ScreenShareModal {
             mezon_i18n::t(&locale, "screenShare.alsoShareSystemAudio").into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
         let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
-        let loading_label: SharedString =
-            mezon_i18n::t(&locale, "screenShare.loading").into();
+        let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
         let empty_label: SharedString = mezon_i18n::t(&locale, "screenShare.selectScreen").into();
 
         let filtered = self.filtered_options();
@@ -360,33 +362,25 @@ impl Render for ScreenShareModal {
                         this.flex()
                             .items_center()
                             .justify_center()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(text_muted)
-                                    .child(loading_label),
-                            )
+                            .child(div().text_sm().text_color(text_muted).child(loading_label))
                     })
                     .when(!self.loading, |this| {
                         this.when_some(self.load_error.clone(), |el, message| {
                             el.flex()
                                 .items_center()
                                 .justify_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(status_dnd)
-                                        .child(message),
-                                )
+                                .child(div().text_sm().text_color(status_dnd).child(message))
                         })
                         .when(self.load_error.is_none(), |el| {
                             el.when(filtered.is_empty(), |empty| {
-                                empty.flex().items_center().justify_center().py(px(40.)).child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(text_muted)
-                                        .child(empty_label),
-                                )
+                                empty
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .py(px(40.))
+                                    .child(
+                                        div().text_sm().text_color(text_muted).child(empty_label),
+                                    )
                             })
                             .when(!filtered.is_empty(), |grid| {
                                 grid.child(target_grid(
@@ -441,9 +435,7 @@ impl Render for ScreenShareModal {
                                 Button::new("screen-share-cancel")
                                     .label(cancel_label)
                                     .ghost()
-                                    .on_click(
-                                    cx.listener(|this, _, _window, cx| this.close(cx)),
-                                ),
+                                    .on_click(cx.listener(|this, _, _window, cx| this.close(cx))),
                             )
                             .child(
                                 Button::new("screen-share-confirm")
@@ -475,7 +467,8 @@ fn tab_button(
         .rounded(px(8.))
         .cursor_pointer()
         .when(active, |this| {
-            this.bg(accent).text_color(gpui::Hsla::from(gpui::rgb(0xffffff)))
+            this.bg(accent)
+                .text_color(gpui::Hsla::from(gpui::rgb(0xffffff)))
         })
         .when(!active, |this| {
             this.text_color(text_muted)
@@ -510,10 +503,11 @@ fn target_grid(
                 kind,
                 id: option.id,
             };
-            let is_selected = selected == Some(SelectedTarget {
-                kind,
-                id: option.id,
-            });
+            let is_selected = selected
+                == Some(SelectedTarget {
+                    kind,
+                    id: option.id,
+                });
             let title = option.title.clone();
             let id = option.id;
             let tile_id = SharedString::from(format!("screen-share-tile-{index}"));

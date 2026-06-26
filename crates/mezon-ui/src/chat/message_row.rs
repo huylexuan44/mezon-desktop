@@ -207,7 +207,7 @@ impl<'a> MessageRow<'a> {
             })
             .when(!self.attachments.is_empty(), |d| {
                 d.child(div().flex().flex_col().gap_2().mt_1().children(
-                    self.attachments.iter().map(|view| {
+                    self.attachments.iter().enumerate().map(|(i, view)| {
                         match view {
                             MessageAttachmentView::Image {
                                 src,
@@ -225,7 +225,12 @@ impl<'a> MessageRow<'a> {
                                     )
                                     .into_any_element()
                                 } else {
+                                    // A stable id makes the img stateful, which is
+                                    // what lets GPUI advance animated GIF/WebP
+                                    // frames (a stateless img only ever shows the
+                                    // first frame).
                                     img(src.clone())
+                                        .id(SharedString::from(format!("msg-img-{}-{}", msg.id, i)))
                                         .w(*width)
                                         .h(*height)
                                         .max_w(px(400.))
