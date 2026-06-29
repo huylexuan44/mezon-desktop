@@ -34,6 +34,7 @@ pub struct ThreadsPopoverPanel {
 enum ThreadRow {
     SectionHeader(String),
     Card(ThreadSummary),
+    LoadingMore,
 }
 
 struct ThreadsScrollBody {
@@ -44,8 +45,15 @@ struct ThreadsScrollBody {
 impl ThreadsScrollBody {
     fn new(layout: Entity<ChatLayout>, cx: &mut Context<Self>) -> Self {
         cx.observe(&ThreadsStore::global(cx), |_, _, cx| cx.notify()).detach();
+        let list_state = ListState::new(0, ListAlignment::Top, px(400.)).measure_all();
+        list_state.set_scroll_handler(move |event, _window, cx| {
+            let visible_end = event.visible_range.end;
+            ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.maybe_load_more(visible_end, cx);
+            });
+        });
         Self {
-            list_state: ListState::new(0, ListAlignment::Top, px(400.)),
+            list_state,
             layout,
         }
     }
@@ -61,12 +69,20 @@ impl Render for ThreadsScrollBody {
         let search_results = store_ref.search_results();
         let search_query = store_ref.search_query();
         let loading = store_ref.is_loading();
-        let searching = store_ref.is_searching();
+        let loading_more = store_ref.is_loading_more();
         let layout = self.layout.clone();
         let query = search_query.trim();
+        let show_search_no_results = !query.is_empty()
+            && !store_ref.is_searching()
+            && search_results.is_some_and(|results| results.is_empty());
 
-        let rows = build_rows(threads, search_results, query, &locale);
-        let show_spinner = (!query.is_empty() && (searching || search_results.is_none()))
+        if show_search_no_results {
+            return render_search_no_results(&locale, theme.as_ref(), query)
+                .into_any_element();
+        }
+
+        let rows = build_rows(threads, search_results, query, &locale, loading_more);
+        let show_spinner = (!query.is_empty() && (store_ref.is_searching() || search_results.is_none()))
             || (query.is_empty() && loading && threads.is_empty());
 
         if let Some(rows) = rows {
@@ -100,8 +116,10 @@ impl Render for ThreadsScrollBody {
 
         if show_spinner {
             centered_spinner().into_any_element()
-        } else {
+        } else if query.is_empty() {
             render_empty_body(&locale, &theme, layout).into_any_element()
+        } else {
+            centered_spinner().into_any_element()
         }
     }
 }
@@ -300,12 +318,10 @@ fn build_rows(
     search_results: Option<&[ThreadSummary]>,
     query: &str,
     locale: &str,
+    loading_more: bool,
 ) -> Option<Vec<ThreadRow>> {
     if !query.is_empty() {
         let results = search_results?;
-        if results.is_empty() {
-            return None;
-        }
         let title = format!(
             "{} ({})",
             mezon_i18n::t(locale, "channelTopbar.modals.threads.results"),
@@ -340,7 +356,59 @@ fn build_rows(
         rows.extend(bucket.into_iter().cloned().map(ThreadRow::Card));
     }
 
+    if loading_more {
+        rows.push(ThreadRow::LoadingMore);
+    }
+
     if rows.is_empty() { None } else { Some(rows) }
+}
+
+fn render_search_no_results(locale: &str, theme: &Theme, query: &str) -> impl IntoElement {
+    let tokens = &theme.tokens;
+    let title = mezon_i18n::t(locale, "searchMessageChannel.noResults");
+    let description = mezon_i18n::t(locale, "searchMessageChannel.emptySearch.title");
+    let search_for = format!(
+        "{} {}",
+        mezon_i18n::t(locale, "searchMessageChannel.searchFor"),
+        query
+    );
+
+    v_flex()
+        .w_full()
+        .h(px(LIST_BODY_HEIGHT))
+        .items_center()
+        .justify_center()
+        .gap_4()
+        .p_8()
+        .child(
+            Icon::new(IconName::Search)
+                .size(px(48.))
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tokens.text_theme_primary)
+                .text_center()
+                .child(title),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_center()
+                .text_color(tokens.text_theme_message)
+                .max_w(px(280.))
+                .child(description),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_center()
+                .text_color(tokens.text_theme_message)
+                .max_w(px(280.))
+                .child(search_for),
+        )
 }
 
 fn render_empty_body(
@@ -420,6 +488,14 @@ fn render_row(
             .w_full()
             .px_4()
             .child(thread_card(thread, theme, locale, layout))
+            .into_any_element(),
+        ThreadRow::LoadingMore => div()
+            .w_full()
+            .py_3()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(Spinner::new().with_size(Size::Small))
             .into_any_element(),
     }
 }

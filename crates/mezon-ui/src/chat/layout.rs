@@ -83,9 +83,6 @@ impl ChatLayout {
         let direct_store = DirectMessageStore::global(cx);
         cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
 
-        let messages_store = MessagesStore::global(cx);
-        cx.observe(&messages_store, |_, _, cx| cx.notify()).detach();
-
         let threads_store = ThreadsStore::global(cx);
         cx.observe(&threads_store, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&threads_store, |this, _, event, cx| {
@@ -493,12 +490,14 @@ impl ChatLayout {
             .read(cx)
             .name_error()
             .map(|s| s.to_string());
+        let submitting = ThreadsStore::global(cx).read(cx).is_submitting();
 
         Some(
             crate::chat::create_thread_panel::render_create_thread_panel(
                 name_input,
                 message_input,
                 name_error.as_deref(),
+                submitting,
                 locale,
                 &theme,
                 cx.entity(),
@@ -551,9 +550,6 @@ impl ChatLayout {
         let theme = cx.theme().clone();
         let thread_handle = self.thread_popover_handle.clone();
         let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
-        if show_threads {
-            self.ensure_thread_search_input(window, cx);
-        }
 
         let chat = |content: gpui::AnyElement| {
             if let Some(panel) = create_panel {

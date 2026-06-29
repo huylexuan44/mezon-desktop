@@ -1,7 +1,7 @@
 use gpui::{AnyElement, ClickEvent, Entity, FontWeight, div, prelude::*, px};
 
 use crate::chat::layout::ChatLayout;
-use crate::components::primitives::{Icon, IconName, Input, InputState, h_flex, v_flex};
+use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, Input, InputState, h_flex, v_flex};
 use crate::theme::Theme;
 
 const PANEL_WIDTH: f32 = 510.;
@@ -10,6 +10,7 @@ pub fn render_create_thread_panel(
     thread_name_input: Entity<InputState>,
     message_input: Entity<InputState>,
     name_error: Option<&str>,
+    submitting: bool,
     locale: &str,
     theme: &Theme,
     layout: Entity<ChatLayout>,
@@ -158,18 +159,11 @@ pub fn render_create_thread_panel(
                         }),
                 )
                 .child(
-                    div()
-                        .id("create-thread-send")
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(theme.brand)
-                        .cursor_pointer()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(gpui::white())
-                        .hover(|s| s.bg(theme.brand_hover))
-                        .child(mezon_i18n::t(locale, "channelTopbar.threads.createThread"))
+                    Button::new("create-thread-send")
+                        .label(mezon_i18n::t(locale, "channelTopbar.threads.createThread"))
+                        .primary()
+                        .loading(submitting)
+                        .disabled(submitting)
                         .on_click(move |_: &ClickEvent, window, cx| {
                             let name = name_input.read(cx).value().to_string();
                             let message = msg_input.read(cx).value().to_string();

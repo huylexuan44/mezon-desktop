@@ -3,8 +3,10 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription};
 use mezon_client::AppApi;
-use mezon_client::transport::ApiThreadDesc;
+use mezon_client::MezonTransport;
+use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_client::RealtimeEvent;
+use mezon_proto::{api, realtime};
 
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -19,6 +21,9 @@ pub const CHANNEL_TYPE_THREAD: u32 = 7;
 pub const MIN_THREAD_NAME_LEN: usize = 3;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(500);
+const LOAD_MORE_THRESHOLD: usize = 6;
+const MESSAGE_CODE_CHAT: i32 = 0;
+const MESSAGE_CODE_CHAT_UPDATE: i32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct ThreadSummary {
@@ -54,9 +59,13 @@ pub struct ThreadsStore {
     search_results: Option<Vec<ThreadSummary>>,
     search_generation: u64,
     loaded_channel: Option<String>,
+    current_page: i32,
+    has_more: bool,
     loading: bool,
+    loading_more: bool,
     searching: bool,
     creating: bool,
+    submitting: bool,
     name_error: Option<String>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
@@ -94,9 +103,13 @@ impl ThreadsStore {
             search_results: None,
             search_generation: 0,
             loaded_channel: None,
+            current_page: 0,
+            has_more: false,
             loading: false,
+            loading_more: false,
             searching: false,
             creating: false,
+            submitting: false,
             name_error: None,
             api,
             _channel_sub: channel_sub,
@@ -127,33 +140,97 @@ impl ThreadsStore {
         let Some(list_id) = self.list_channel_id.clone() else {
             return;
         };
-        let relevant = match event {
+        match event {
             RealtimeEvent::ChannelCreated(ev) => {
-                ev.parent_id != 0 && ev.parent_id.to_string() == list_id
+                if ev.parent_id != 0 && ev.parent_id.to_string() == list_id {
+                    self.apply_thread_created(ev, cx);
+                }
             }
-            RealtimeEvent::ChannelUpdated(ev) => self
-                .threads
-                .iter()
-                .any(|t| t.channel_id == ev.channel_id.to_string()),
-            RealtimeEvent::ChannelMessage(msg) => self
-                .threads
-                .iter()
-                .any(|t| t.channel_id == msg.channel_id.to_string()),
-            RealtimeEvent::ChannelDeleted(ev) => self
-                .threads
-                .iter()
-                .any(|t| t.channel_id == ev.channel_id.to_string()),
-            _ => false,
-        };
-        if relevant {
-            self.invalidate_loaded(cx);
+            RealtimeEvent::ChannelUpdated(ev) => {
+                if ev.channel_type == CHANNEL_TYPE_THREAD as i32 {
+                    self.apply_thread_updated(ev, cx);
+                }
+            }
+            RealtimeEvent::ChannelMessage(msg) => self.apply_thread_message(msg, cx),
+            RealtimeEvent::ChannelDeleted(ev) => {
+                self.apply_thread_deleted(&ev.channel_id.to_string(), cx);
+            }
+            _ => {}
         }
     }
 
-    fn invalidate_loaded(&mut self, cx: &mut Context<Self>) {
-        self.loaded_channel = None;
-        if self.list_channel_id.is_some() {
-            self.ensure_loaded(cx);
+    fn apply_thread_message(&mut self, msg: &api::ChannelMessage, cx: &mut Context<Self>) {
+        let channel_id = msg.channel_id.to_string();
+        if !self.threads.iter().any(|t| t.channel_id == channel_id)
+            && !self
+                .search_results
+                .as_ref()
+                .is_some_and(|results| results.iter().any(|t| t.channel_id == channel_id))
+        {
+            return;
+        }
+        let mut changed = false;
+        if patch_thread_in_list(&mut self.threads, &channel_id, msg) {
+            changed = true;
+        }
+        if let Some(results) = self.search_results.as_mut()
+            && patch_thread_in_list(results, &channel_id, msg)
+        {
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn apply_thread_updated(&mut self, ev: &realtime::ChannelUpdatedEvent, cx: &mut Context<Self>) {
+        let channel_id = ev.channel_id.to_string();
+        let mut changed = false;
+        for thread in self
+            .threads
+            .iter_mut()
+            .filter(|t| t.channel_id == channel_id)
+        {
+            patch_thread_from_updated(thread, ev);
+            changed = true;
+        }
+        if let Some(results) = self.search_results.as_mut() {
+            for thread in results.iter_mut().filter(|t| t.channel_id == channel_id) {
+                patch_thread_from_updated(thread, ev);
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn apply_thread_deleted(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+        let before = self.threads.len();
+        self.threads.retain(|t| t.channel_id != channel_id);
+        if let Some(results) = self.search_results.as_mut() {
+            results.retain(|t| t.channel_id != channel_id);
+        }
+        if self.threads.len() != before {
+            cx.notify();
+        }
+    }
+
+    fn apply_thread_created(&mut self, ev: &realtime::ChannelCreatedEvent, cx: &mut Context<Self>) {
+        if ev.channel_type != CHANNEL_TYPE_THREAD as i32 {
+            return;
+        }
+        let Some(summary) = filter_threads(vec![thread_from_created_event(ev)]).into_iter().next()
+        else {
+            return;
+        };
+        let before = self.threads.len();
+        merge_threads(&mut self.threads, vec![summary.clone()]);
+        if let Some(results) = self.search_results.as_mut() {
+            merge_threads(results, vec![summary]);
+        }
+        if self.threads.len() != before {
+            cx.notify();
         }
     }
 
@@ -173,12 +250,24 @@ impl ThreadsStore {
         self.loading
     }
 
+    pub fn is_loading_more(&self) -> bool {
+        self.loading_more
+    }
+
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+
     pub fn is_searching(&self) -> bool {
         self.searching
     }
 
     pub fn is_creating(&self) -> bool {
         self.creating
+    }
+
+    pub fn is_submitting(&self) -> bool {
+        self.submitting
     }
 
     pub fn name_error(&self) -> Option<&str> {
@@ -227,6 +316,10 @@ impl ThreadsStore {
         self.search_generation = self.search_generation.wrapping_add(1);
         self.searching = false;
         self.loaded_channel = None;
+        self.current_page = 0;
+        self.has_more = false;
+        self.loading_more = false;
+        self.submitting = false;
         self.name_error = None;
         cx.notify();
     }
@@ -243,7 +336,27 @@ impl ThreadsStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.loaded_channel = None;
+        self.current_page = 0;
+        self.has_more = false;
         self.fetch(cx);
+    }
+
+    pub fn maybe_load_more(&mut self, visible_end: usize, cx: &mut Context<Self>) {
+        if !self.search_query.trim().is_empty() {
+            return;
+        }
+        let count = self.threads.len();
+        if count == 0 || count.saturating_sub(visible_end) > LOAD_MORE_THRESHOLD {
+            return;
+        }
+        self.fetch_more(cx);
+    }
+
+    pub fn fetch_more(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.loading_more || !self.has_more {
+            return;
+        }
+        self.fetch_page(self.current_page + 1, true, cx);
     }
 
     pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
@@ -315,34 +428,59 @@ impl ThreadsStore {
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.fetch_page(1, false, cx);
+    }
+
+    fn fetch_page(&mut self, page: i32, append: bool, cx: &mut Context<Self>) {
         let Some(channel_id) = self.list_channel_id.clone() else {
             return;
         };
         let Some(clan_id) = self.clan_id.clone() else {
             return;
         };
-        if self.loading {
+        if append {
+            if self.loading_more || !self.has_more {
+                return;
+            }
+            self.loading_more = true;
+        } else if self.loading {
             return;
+        } else {
+            self.loading = true;
         }
-        self.loading = true;
         cx.notify();
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api.list_thread_descs(&channel_id, &clan_id, 1).await;
+            let result = api.list_thread_descs(&channel_id, &clan_id, page).await;
             let _ = this.update(cx, |this, cx| {
-                this.loading = false;
+                if append {
+                    this.loading_more = false;
+                } else {
+                    this.loading = false;
+                }
                 if this.list_channel_id.as_deref() != Some(channel_id.as_str()) {
                     cx.notify();
                     return;
                 }
                 match result {
                     Ok(list) => {
-                        this.threads =
+                        let page_full = page_has_more(list.len());
+                        let batch =
                             filter_threads(list.into_iter().map(thread_from_api).collect());
-                        this.loaded_channel = Some(channel_id);
+                        if append {
+                            merge_threads(&mut this.threads, batch);
+                        } else {
+                            this.threads = batch;
+                            this.loaded_channel = Some(channel_id);
+                        }
+                        this.current_page = page;
+                        this.has_more = page_full;
                     }
-                    Err(e) => tracing::error!("list_thread_descs failed: {e}"),
+                    Err(e) => tracing::error!("list_thread_descs page {page} failed: {e}"),
                 }
                 cx.notify();
             });
@@ -352,17 +490,22 @@ impl ThreadsStore {
 
     pub fn start_create(&mut self, cx: &mut Context<Self>) {
         self.creating = true;
+        self.submitting = false;
         self.name_error = None;
         cx.notify();
     }
 
     pub fn cancel_create(&mut self, cx: &mut Context<Self>) {
         self.creating = false;
+        self.submitting = false;
         self.name_error = None;
         cx.notify();
     }
 
     pub fn submit_create(&mut self, name: String, message: String, cx: &mut Context<Self>) {
+        if self.submitting {
+            return;
+        }
         let name = name.trim().to_string();
         let message = message.trim().to_string();
 
@@ -387,18 +530,32 @@ impl ThreadsStore {
 
         self.name_error = None;
         self.creating = true;
+        self.submitting = true;
         cx.notify();
 
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let dup = api.check_duplicate_thread_name(&name, &parent_id).await;
-            if let Ok(true) = dup {
-                let _ = this.update(cx, |this, cx| {
-                    this.creating = false;
-                    this.name_error = Some("thread_name_exists".into());
-                    cx.notify();
-                });
-                return;
+            match api.check_duplicate_thread_name(&name, &parent_id).await {
+                Ok(true) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.submitting = false;
+                        this.name_error = Some("thread_name_exists".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!("check_duplicate_thread_name failed: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.submitting = false;
+                        cx.emit(ThreadsEvent::CreateFailed {
+                            message: e.to_string(),
+                        });
+                        cx.notify();
+                    });
+                    return;
+                }
             }
 
             let create_result = api
@@ -416,7 +573,7 @@ impl ThreadsStore {
                 Err(e) => {
                     tracing::error!("create_channel (thread) failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.creating = false;
+                        this.submitting = false;
                         cx.emit(ThreadsEvent::CreateFailed {
                             message: e.to_string(),
                         });
@@ -444,6 +601,7 @@ impl ThreadsStore {
 
             let _ = this.update(cx, |this, cx| {
                 this.creating = false;
+                this.submitting = false;
                 this.loaded_channel = None;
                 ChannelList::global(cx).update(cx, |list, cx| {
                     list.refresh_clan(clan_id.clone(), cx);
@@ -467,6 +625,21 @@ fn list_channel_id_for(channel: &Channel) -> String {
             .unwrap_or_else(|| channel.id.clone())
     } else {
         channel.id.clone()
+    }
+}
+
+fn page_has_more(batch_len: usize) -> bool {
+    batch_len >= THREAD_LIST_LIMIT as usize
+}
+
+fn merge_threads(into: &mut Vec<ThreadSummary>, batch: Vec<ThreadSummary>) {
+    for thread in batch {
+        if !into
+            .iter()
+            .any(|existing| existing.channel_id == thread.channel_id)
+        {
+            into.push(thread);
+        }
     }
 }
 
@@ -498,6 +671,50 @@ fn thread_from_api(t: ApiThreadDesc) -> ThreadSummary {
     }
 }
 
+fn thread_from_created_event(ev: &realtime::ChannelCreatedEvent) -> ThreadSummary {
+    ThreadSummary {
+        channel_id: ev.channel_id.to_string(),
+        channel_label: ev.channel_label.clone(),
+        clan_id: ev.clan_id.to_string(),
+        parent_id: ev.parent_id.to_string(),
+        channel_private: ev.channel_private,
+        active: ev.status,
+        last_message_content: String::new(),
+        last_message_sender_id: ev.creator_id.to_string(),
+        last_sent_timestamp: 0,
+        member_count: 0,
+    }
+}
+
+fn patch_thread_from_updated(thread: &mut ThreadSummary, ev: &realtime::ChannelUpdatedEvent) {
+    if !ev.channel_label.is_empty() {
+        thread.channel_label = ev.channel_label.clone();
+    }
+    thread.active = ev.status;
+    thread.channel_private = i32::from(ev.channel_private);
+}
+
+fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessage) {
+    thread.last_sent_timestamp = i64::from(msg.create_time_seconds);
+    if msg.code == MESSAGE_CODE_CHAT || msg.code == MESSAGE_CODE_CHAT_UPDATE {
+        let api_msg = MezonTransport::message_from_proto(msg.clone());
+        thread.last_message_content = api_msg.content;
+        thread.last_message_sender_id = api_msg.sender_id;
+    }
+}
+
+fn patch_thread_in_list(
+    threads: &mut [ThreadSummary],
+    channel_id: &str,
+    msg: &api::ChannelMessage,
+) -> bool {
+    let Some(thread) = threads.iter_mut().find(|t| t.channel_id == channel_id) else {
+        return false;
+    };
+    patch_thread_from_message(thread, msg);
+    true
+}
+
 pub fn group_threads(
     threads: &[ThreadSummary],
 ) -> (
@@ -525,4 +742,120 @@ pub fn group_threads(
     sort(&mut older);
 
     (joined, active, older)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_has_more_when_batch_full() {
+        assert!(page_has_more(THREAD_LIST_LIMIT as usize));
+    }
+
+    #[test]
+    fn page_has_more_false_when_batch_partial() {
+        assert!(!page_has_more(10));
+    }
+
+    #[test]
+    fn merge_threads_dedupes_by_channel_id() {
+        let mut threads = vec![ThreadSummary {
+            channel_id: "1".into(),
+            channel_label: "a".into(),
+            clan_id: "c".into(),
+            parent_id: "p".into(),
+            channel_private: 0,
+            active: THREAD_STATUS_JOINED,
+            last_message_content: String::new(),
+            last_message_sender_id: String::new(),
+            last_sent_timestamp: 0,
+            member_count: 0,
+        }];
+        merge_threads(
+            &mut threads,
+            vec![
+                ThreadSummary {
+                    channel_id: "1".into(),
+                    channel_label: "dup".into(),
+                    clan_id: "c".into(),
+                    parent_id: "p".into(),
+                    channel_private: 0,
+                    active: THREAD_STATUS_JOINED,
+                    last_message_content: String::new(),
+                    last_message_sender_id: String::new(),
+                    last_sent_timestamp: 0,
+                    member_count: 0,
+                },
+                ThreadSummary {
+                    channel_id: "2".into(),
+                    channel_label: "b".into(),
+                    clan_id: "c".into(),
+                    parent_id: "p".into(),
+                    channel_private: 0,
+                    active: THREAD_STATUS_JOINED,
+                    last_message_content: String::new(),
+                    last_message_sender_id: String::new(),
+                    last_sent_timestamp: 0,
+                    member_count: 0,
+                },
+            ],
+        );
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].channel_label, "a");
+    }
+
+    #[test]
+    fn patch_thread_from_message_updates_preview_on_chat() {
+        let mut thread = ThreadSummary {
+            channel_id: "1".into(),
+            channel_label: "t".into(),
+            clan_id: "c".into(),
+            parent_id: "p".into(),
+            channel_private: 0,
+            active: THREAD_STATUS_JOINED,
+            last_message_content: "old".into(),
+            last_message_sender_id: "9".into(),
+            last_sent_timestamp: 1,
+            member_count: 0,
+        };
+        let msg = api::ChannelMessage {
+            channel_id: 1,
+            sender_id: 42,
+            content: r#"{"t":"hello"}"#.into(),
+            create_time_seconds: 99,
+            code: MESSAGE_CODE_CHAT,
+            ..Default::default()
+        };
+        patch_thread_from_message(&mut thread, &msg);
+        assert_eq!(thread.last_sent_timestamp, 99);
+        assert_eq!(thread.last_message_content, "hello");
+        assert_eq!(thread.last_message_sender_id, "42");
+    }
+
+    #[test]
+    fn patch_thread_from_message_keeps_preview_on_remove() {
+        let mut thread = ThreadSummary {
+            channel_id: "1".into(),
+            channel_label: "t".into(),
+            clan_id: "c".into(),
+            parent_id: "p".into(),
+            channel_private: 0,
+            active: THREAD_STATUS_JOINED,
+            last_message_content: "keep".into(),
+            last_message_sender_id: "9".into(),
+            last_sent_timestamp: 1,
+            member_count: 0,
+        };
+        let msg = api::ChannelMessage {
+            channel_id: 1,
+            create_time_seconds: 50,
+            code: 2,
+            ..Default::default()
+        };
+        patch_thread_from_message(&mut thread, &msg);
+        assert_eq!(thread.last_sent_timestamp, 50);
+        assert_eq!(thread.last_message_content, "keep");
+        assert_eq!(thread.last_message_sender_id, "9");
+    }
 }
