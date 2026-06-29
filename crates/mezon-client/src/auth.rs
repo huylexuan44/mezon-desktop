@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::{Session, decode_jwt_claims};
 
-// ─── Default connection constants (fallback when `.env` is absent) ───────────
-// Override via `.env` — loaded into [`mezon_store::AppConfig`] at startup.
+// ─── Default connection constants ────────────────────────────────────────────
+// Defaults for `MezonClient::default()`. Per-deployment config lives in
+// [`mezon_store::AppConfig`] (`NX_*` baked at build time via `option_env!`).
 
 /// Default REST API host (`NX_CHAT_APP_API_HOST`)
 pub const DEFAULT_API_HOST: &str = "dev-mezon.nccsoft.vn";
@@ -396,8 +397,12 @@ fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Optio
 
     let endpoint = if endpoint.contains("://") {
         endpoint.to_owned()
-    } else {
+    } else if endpoint.contains(':') {
         format!("tcp://{endpoint}")
+    } else {
+        // Bare hostname (e.g. `sock.mezon.ai`) — host-only endpoint; port comes from
+        // session/config or TLS implicit default at connect time, not URL parsing.
+        return (Some(endpoint.to_owned()), None, Some(true));
     };
 
     let parsed = url::Url::parse(&endpoint);
@@ -411,7 +416,11 @@ fn parse_endpoint(endpoint: Option<&str>) -> (Option<String>, Option<u16>, Optio
         _ => None,
     };
 
-    (parsed.host_str().map(str::to_owned), parsed.port(), secure)
+    (
+        parsed.host_str().map(str::to_owned),
+        parsed.port_or_known_default(),
+        secure,
+    )
 }
 
 #[cfg(test)]
@@ -429,7 +438,7 @@ mod tests {
 
         let (host, port, secure) = parse_endpoint(Some("https://example.com"));
         assert_eq!(host, Some("example.com".to_string()));
-        assert_eq!(port, None);
+        assert_eq!(port, Some(443));
         assert_eq!(secure, Some(true));
 
         let (host, port, secure) = parse_endpoint(Some("http://127.0.0.1:8080"));
@@ -441,6 +450,11 @@ mod tests {
         assert_eq!(host, Some("example.com".to_string()));
         assert_eq!(port, Some(9000));
         assert_eq!(secure, Some(false));
+
+        let (host, port, secure) = parse_endpoint(Some("sock.mezon.ai"));
+        assert_eq!(host, Some("sock.mezon.ai".to_string()));
+        assert_eq!(port, None);
+        assert_eq!(secure, Some(true));
     }
 
     #[test]

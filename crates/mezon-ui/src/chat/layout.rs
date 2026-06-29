@@ -1,8 +1,7 @@
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PresenceEvent, PresenceStore,
-    Settings, VoiceStore,
+    DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 
@@ -26,6 +25,7 @@ pub struct ChatLayout {
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
     pending_channel_id: Option<ChannelId>,
+    prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
 }
@@ -63,20 +63,8 @@ impl ChatLayout {
 
         let user_info_bar = cx.new(|cx| UserInfoBar::new(auth_state.clone(), cx));
 
-        cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
-            if let PresenceEvent::TypingChanged { channel_id } = event
-                && this.active_typing_channel(cx) == Some(*channel_id)
-            {
-                cx.notify();
-            }
-        })
-        .detach();
-
         let direct_store = DirectMessageStore::global(cx);
         cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
-
-        let messages_store = MessagesStore::global(cx);
-        cx.observe(&messages_store, |_, _, cx| cx.notify()).detach();
 
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |_, _, cx| cx.notify()).detach();
@@ -118,6 +106,7 @@ impl ChatLayout {
             settings,
             voice_store,
             pending_channel_id: None,
+            prefetched_voice_channel: None,
             show_member_list: true,
             inbox_handle: PopoverMenuHandle::default(),
         };
@@ -238,9 +227,6 @@ impl ChatLayout {
                     channel_list.select_channel(channel_id, cx);
                 });
             }
-            // Force the messages store onto this channel even when it's already the active
-            // `ChannelList` selection — covers returning from a DM (where `ChannelList` never
-            // re-emits) so the timeline switches back instead of showing the DM.
             MessagesStore::global(cx).update(cx, |store, cx| store.open_channel(channel_id, cx));
         } else {
             self.pending_channel_id = Some(channel_id);
@@ -307,26 +293,47 @@ impl ChatLayout {
             },
         );
     }
+
+    fn maybe_prefetch_voice_token(&mut self, cx: &mut Context<Self>) {
+        let active_voice_channel = self
+            .channel_list
+            .read(cx)
+            .active_channel()
+            .filter(|ch| ch.channel_type == ChannelType::Voice)
+            .map(|ch| ch.id);
+
+        if active_voice_channel == self.prefetched_voice_channel {
+            return;
+        }
+        self.prefetched_voice_channel = active_voice_channel;
+
+        if let Some(channel_id) = active_voice_channel {
+            self.voice_store.update(cx, |store, cx| {
+                store.prefetch_meet_token(channel_id.to_string(), cx);
+            });
+        }
+    }
 }
 
 impl Render for ChatLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
+        self.maybe_prefetch_voice_token(cx);
 
         if let Some(ch) = self.channel_list.read(cx).active_channel()
             && ch.channel_type == ChannelType::Voice
         {
-            let channel_id = ch.id.clone();
+            let channel_id = ch.id;
             self.voice_store.update(cx, |store, cx| {
                 store.prefetch_meet_token(channel_id.to_string(), cx);
             });
         }
 
-        let theme = cx.theme();
         let nav_body = self.render_nav_body(cx);
+        let content = self.render_content(cx);
         let voice_mini_bar = self.render_voice_mini_bar(cx);
-        let content = self.render_content(window, cx);
+        let theme = cx.theme();
 
         div()
             .flex()
@@ -364,7 +371,8 @@ impl Render for ChatLayout {
                                 .absolute()
                                 .left(px(12.0))
                                 .right(px(8.0))
-                                .bottom(px(12.0)),
+                                .bottom(px(12.0))
+                                .h(px(56.0)),
                         ),
                     ),
             )
@@ -390,18 +398,38 @@ impl ChatLayout {
             return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
-
-        let (uid, uname) = match self.auth_state.read(cx) {
-            AuthState::Authenticated(session) => {
-                (session.user_id.clone(), session.username.clone())
-            }
-            _ => (String::new(), String::new()),
-        };
-
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_message(content, uid, uname, cx);
-        });
+        crate::chat::ChatSending::send_text(
+            content,
+            mezon_store::OutgoingContent::default(),
+            Vec::new(),
+            &self.auth_state,
+            cx,
+        );
     }
+
+    // composer: restore by swapping send_current_message for the MentionInput payload
+    // path and re-adding send_sticker:
+    // pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    //     let Some(mention_input) = self.chat_area.mention_input.clone() else {
+    //         return;
+    //     };
+    //     let Some((content, content_tokens, attachments)) = mention_input
+    //         .update(cx, |mention_input, cx| mention_input.take_payload(window, cx))
+    //     else {
+    //         return;
+    //     };
+    //     crate::chat::ChatSending::send_text(
+    //         content,
+    //         content_tokens,
+    //         attachments,
+    //         &self.auth_state,
+    //         cx,
+    //     );
+    // }
+    //
+    // pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+    //     crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
+    // }
 
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
@@ -415,14 +443,6 @@ impl ChatLayout {
             Router::global(cx).read(cx).route(),
             Route::Direct | Route::Friends | Route::DirectMessage { .. }
         )
-    }
-
-    fn active_typing_channel(&self, cx: &Context<Self>) -> Option<ChannelId> {
-        if self.is_dm_route(cx) {
-            self.current_dm(cx).map(|dm| dm.id)
-        } else {
-            self.channel_list.read(cx).active_channel().map(|ch| ch.id)
-        }
     }
 
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
@@ -449,46 +469,47 @@ impl ChatLayout {
             .into_any_element()
     }
 
-    fn typing_label_for_channel(
-        &self,
-        channel_id: ChannelId,
-        locale: &str,
-        cx: &Context<Self>,
-    ) -> Option<gpui::SharedString> {
-        let users = PresenceStore::global(cx).read(cx).typing_users(channel_id);
-        let label = match users.len() {
-            0 => return None,
-            1 => format!("{} {}", users[0], mezon_i18n::t(locale, "common.isTyping")),
-            _ => mezon_i18n::t(locale, "common.severalPeopleTyping").to_string(),
-        };
-        Some(gpui::SharedString::from(label))
-    }
-
-    fn render_content(&self, window: &mut Window, cx: &Context<Self>) -> gpui::AnyElement {
+    fn render_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_clan_id = self.active_clan_id(cx);
-        let clan_id = active_clan_id.as_deref();
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
-                let typing = self.typing_label_for_channel(dm.id, &locale, cx);
                 let is_group = dm.kind == DirectKind::Group;
                 return self
                     .chat_area
                     .render(
-                        theme,
                         &locale,
-                        cx.entity(),
-                        &dm.label,
+                        Some(dm.label.as_str()),
                         true,
+                        Some(dm.id),
                         is_group,
                         is_group && self.show_member_list,
-                        typing,
+                        false,
                         None,
                         None,
-                        window,
+                        cx,
+                    )
+                    .into_any_element();
+            }
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::DirectMessage { .. }
+            ) {
+                return self
+                    .chat_area
+                    .render(
+                        &locale,
+                        None,
+                        true,
+                        None,
+                        false,
+                        false,
+                        false,
+                        None,
+                        None,
                         cx,
                     )
                     .into_any_element();
@@ -540,21 +561,19 @@ impl ChatLayout {
             }
 
             let channel_name = ch.name.clone();
-            let typing = self.typing_label_for_channel(ch.id, &locale, cx);
+            let channel_id = ch.id;
             return self
                 .chat_area
                 .render(
-                    theme,
                     &locale,
-                    cx.entity(),
-                    &channel_name,
+                    Some(channel_name.as_str()),
                     false,
+                    Some(channel_id),
                     true,
                     self.show_member_list,
-                    typing,
-                    clan_id,
+                    true,
                     Some(inbox_handle),
-                    window,
+                    active_clan_id,
                     cx,
                 )
                 .into_any_element();
@@ -562,6 +581,28 @@ impl ChatLayout {
 
         let router = Router::global(cx);
         let route = router.read(cx).route();
+
+        let has_active_clan = self.clan_list.read(cx).active_clan_id.is_some();
+        if matches!(route, Route::Channel { .. })
+            || (matches!(route, Route::Chat) && has_active_clan)
+        {
+            return self
+                .chat_area
+                .render(
+                    &locale,
+                    None,
+                    false,
+                    None,
+                    true,
+                    self.show_member_list,
+                    true,
+                    Some(inbox_handle),
+                    active_clan_id,
+                    cx,
+                )
+                .into_any_element();
+        }
+
         let current_path = router.read(cx).current_path();
 
         let placeholder = match route {

@@ -19,7 +19,6 @@ mezon-store.workspace = true
 mezon-native.workspace = true
 mezon-updater.workspace = true
 mezon-client.workspace = true
-dotenvy = "0.15"
 flume.workspace = true
 reqwest_client.workspace = true
 tokio.workspace = true
@@ -28,8 +27,13 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+tracing-tracy = { version = "0.11.4", features = ["enable", "ondemand"], optional = true }
+tracy-client = { version = "0.18.2", features = ["enable", "ondemand"], optional = true }
 dirs.workspace = true
 serde.workspace = true
+
+[features]
+tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 
 [build-dependencies]
 woff2-patched = "0.4.0"
@@ -42,7 +46,7 @@ priority = "optional"
 extended-description = "Mezon desktop client (Rust/GPUI) for voice, video and text chat."
 assets = [
     ["target/release/mezon", "usr/bin/", "755"],
-    ["../../scripts/linux/mezon.desktop", "usr/share/applications/", "644"],
-    ["../../scripts/linux/mezon.png", "usr/share/icons/hicolor/512x512/apps/mezon.png", "644"],
+    ["../../packaging/linux/mezon.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/512x512/apps/mezon.png", "644"],
 ]
 

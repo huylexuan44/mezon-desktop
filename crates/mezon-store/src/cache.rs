@@ -129,9 +129,50 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
     }
 }
 
+pub struct Freshness {
+    fetched_at: Option<Instant>,
+}
+
+impl Freshness {
+    pub fn new() -> Self {
+        Self { fetched_at: None }
+    }
+
+    pub fn is_fresh(&self, ttl: Duration) -> bool {
+        self.fetched_at.is_some_and(|t| t.elapsed() < ttl)
+    }
+
+    pub fn mark_fetched(&mut self) {
+        self.fetched_at = Some(Instant::now());
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.fetched_at = None;
+    }
+}
+
+impl Default for Freshness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freshness_starts_stale_then_tracks_fetch_and_stale() {
+        let mut f = Freshness::new();
+        assert!(!f.is_fresh(Duration::from_secs(60)));
+
+        f.mark_fetched();
+        assert!(f.is_fresh(Duration::from_secs(60)));
+        assert!(!f.is_fresh(Duration::from_millis(0)));
+
+        f.mark_stale();
+        assert!(!f.is_fresh(Duration::from_secs(60)));
+    }
 
     #[test]
     fn fresh_then_stale_keeps_value() {

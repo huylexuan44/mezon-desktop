@@ -62,12 +62,12 @@ fn fetch_screen_share_options() -> Result<Vec<ScreenShareOption>, String> {
 
     #[cfg(target_os = "macos")]
     {
-        return list_macos_options();
+        list_macos_options()
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        return list_scap_options();
+        list_scap_options()
     }
 }
 
@@ -102,7 +102,7 @@ fn list_scap_options() -> Result<Vec<ScreenShareOption>, String> {
 
 #[cfg(target_os = "macos")]
 fn list_macos_options() -> Result<Vec<ScreenShareOption>, String> {
-    use core_graphics_helmer_fork::display::{CGDisplay, CGDirectDisplayID};
+    use core_graphics_helmer_fork::display::{CGDirectDisplayID, CGDisplay};
     use core_graphics_helmer_fork::window::CGWindowID;
     use scap::{Display, Window};
     use screencapturekit::sc_shareable_content::SCShareableContent;

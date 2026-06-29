@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
+use tokio::sync::Notify;
 
 #[derive(Clone)]
 pub struct VideoFrameData {
@@ -18,6 +19,7 @@ pub struct VideoFrameData {
 pub struct VideoFrameStore {
     frames: Mutex<HashMap<u64, Arc<VideoFrameData>>>,
     seq: AtomicU64,
+    frame_notify: Notify,
 }
 
 impl VideoFrameStore {
@@ -30,6 +32,11 @@ impl VideoFrameStore {
             seq,
         });
         self.frames.lock().insert(key, frame);
+        self.frame_notify.notify_one();
+    }
+
+    pub async fn frame_changed(&self) {
+        self.frame_notify.notified().await;
     }
 
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {
@@ -128,36 +135,6 @@ fn pack_to_i420(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn rgb_to_i420(
-    rgb: &[u8],
-    width: usize,
-    height: usize,
-    y_plane: &mut [u8],
-    u_plane: &mut [u8],
-    v_plane: &mut [u8],
-    stride_y: usize,
-    stride_u: usize,
-    stride_v: usize,
-) {
-    pack_to_i420(
-        rgb,
-        width,
-        height,
-        3,
-        width * 3,
-        0,
-        1,
-        2,
-        y_plane,
-        u_plane,
-        v_plane,
-        stride_y,
-        stride_u,
-        stride_v,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn bgra_to_i420(
     bgra: &[u8],
     width: usize,
@@ -186,33 +163,6 @@ pub fn bgra_to_i420(
         stride_u,
         stride_v,
     );
-}
-
-
-#[allow(clippy::too_many_arguments)]
-pub fn i420_to_bgra(
-    y_plane: &[u8],
-    u_plane: &[u8],
-    v_plane: &[u8],
-    stride_y: usize,
-    stride_u: usize,
-    stride_v: usize,
-    width: usize,
-    height: usize,
-) -> Vec<u8> {
-    let mut out = vec![0u8; width * height * 4];
-    i420_to_bgra_into(
-        &mut out,
-        y_plane,
-        u_plane,
-        v_plane,
-        stride_y,
-        stride_u,
-        stride_v,
-        width,
-        height,
-    );
-    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,6 +202,36 @@ pub fn i420_to_bgra_into(
             out[o + 3] = 255;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn rgb_to_i420(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    y_plane: &mut [u8],
+    u_plane: &mut [u8],
+    v_plane: &mut [u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+) {
+    pack_to_i420(
+        rgb,
+        width,
+        height,
+        3,
+        width * 3,
+        0,
+        1,
+        2,
+        y_plane,
+        u_plane,
+        v_plane,
+        stride_y,
+        stride_u,
+        stride_v,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

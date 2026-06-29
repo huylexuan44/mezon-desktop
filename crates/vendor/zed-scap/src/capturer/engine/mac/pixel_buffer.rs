@@ -40,7 +40,7 @@ impl PixelBuffer {
         self.bytes_per_row
     }
 
-    pub fn data(&self) -> PixelBufferData {
+    pub fn data(&self) -> PixelBufferData<'_> {
         unsafe {
             let pixel_buffer = sample_buffer_to_pixel_buffer(&self.buffer);
 
@@ -127,7 +127,7 @@ impl Plane {
         self.bytes_per_row
     }
 
-    pub fn data(&self) -> PixelBufferData {
+    pub fn data(&self) -> PixelBufferData<'_> {
         unsafe {
             CVPixelBufferLockBaseAddress(self.buffer, 0);
 

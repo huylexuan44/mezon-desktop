@@ -5,6 +5,7 @@ use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AppConfig, AuthState, Settings};
+use mezon_ui::app::window_controls::{main_window_decorations, window_title_options};
 use mezon_ui::{RootView, TitleBar, init as init_ui};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -12,9 +13,39 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-fn main() -> Result<()> {
-    load_dotenv();
+#[cfg(feature = "tracy")]
+#[global_allocator]
+static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
+    tracy_client::ProfiledAllocator::new(std::alloc::System, 16);
 
+#[cfg(feature = "tracy")]
+#[derive(Default)]
+struct TracyConfig {
+    fmt: tracing_subscriber::fmt::format::DefaultFields,
+}
+
+#[cfg(feature = "tracy")]
+impl tracing_tracy::Config for TracyConfig {
+    type Formatter = tracing_subscriber::fmt::format::DefaultFields;
+
+    fn formatter(&self) -> &Self::Formatter {
+        &self.fmt
+    }
+
+    fn stack_depth(&self, _: &tracing::Metadata<'_>) -> u16 {
+        16
+    }
+
+    fn format_fields_in_zone_name(&self) -> bool {
+        true
+    }
+
+    fn on_error(&self, client: &tracy_client::Client, error: &'static str) {
+        client.color_message(error, 0xFF000000, 0);
+    }
+}
+
+fn main() -> Result<()> {
     init_logging();
     install_panic_hook();
 
@@ -42,15 +73,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load `.env` from the current working directory or workspace root.
-fn load_dotenv() {
-    if dotenvy::dotenv().is_ok() {
-        return;
-    }
-    let workspace_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
-    let _ = dotenvy::from_path(workspace_env);
-}
-
 /// Directory for rotated log files (alongside the app's config dir).
 fn log_dir() -> std::path::PathBuf {
     dirs::config_dir()
@@ -63,28 +85,31 @@ fn log_dir() -> std::path::PathBuf {
 /// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
 fn init_logging() {
     let env_filter =
-        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
 
     let dir = log_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing_subscriber::registry()
-            .with(env_filter())
-            .with(fmt::layer())
-            .init();
+    let dir_err = std::fs::create_dir_all(&dir).err();
+    let file_layer = dir_err.is_none().then(|| {
+        let file_appender = tracing_appender::rolling::daily(&dir, "mezon.log");
+        fmt::layer().with_ansi(false).with_writer(file_appender)
+    });
+
+    let subscriber = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_writer(std::io::stdout))
+        .with(file_layer);
+
+    #[cfg(feature = "tracy")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::new(TracyConfig::default()));
+
+    subscriber.init();
+
+    if let Some(e) = dir_err {
         tracing::warn!(
             "File logging disabled (cannot create {}): {e}",
             dir.display()
         );
-        return;
     }
-
-    let file_appender = tracing_appender::rolling::daily(&dir, "mezon.log");
-
-    tracing_subscriber::registry()
-        .with(env_filter())
-        .with(fmt::layer().with_writer(std::io::stdout))
-        .with(fmt::layer().with_ansi(false).with_writer(file_appender))
-        .init();
 }
 
 /// Log panics (location + backtrace) before delegating to the default hook, so a crash leaves
@@ -159,193 +184,191 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     }));
 
     let app_config_handle = app_config.clone();
-    application()
+    let app = application()
         .with_http_client(Arc::new(
             mezon_client::image_disk_cache::DiskImageCacheClient::new(
                 mezon_client::transport_runtime::new_http_client(),
             ),
         ))
-        .with_assets(mezon_ui::util::assets::Assets)
-        .run(move |cx: &mut App| {
-            tracing::debug!("App started");
+        .with_assets(mezon_ui::util::assets::Assets);
 
-            // Register gg sans font (TTFs pre-decompressed by build.rs)
-            let gg_sans_paths: &[(&[u8], &str)] = &[
-                (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Normal.ttf")),
-                    "Normal",
-                ),
-                (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Medium.ttf")),
-                    "Medium",
-                ),
-                (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Semibold.ttf")),
-                    "Semibold",
-                ),
-                (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Bold.ttf")),
-                    "Bold",
-                ),
-                (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
-                    "ExtraBold",
-                ),
-            ];
-            let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
-                .iter()
-                .map(|(data, _)| Cow::Borrowed(*data))
-                .collect();
-            if !fonts.is_empty() {
-                if let Err(e) = cx.text_system().add_fonts(fonts) {
-                    tracing::error!("Failed to register gg sans fonts: {e}");
-                } else {
-                    tracing::info!("Registered gg sans font ({} weights)", gg_sans_paths.len());
-                }
+    #[cfg(target_os = "macos")]
+    app.on_reopen(show_main_window);
+
+    app.run(move |cx: &mut App| {
+        tracing::debug!("App started");
+
+        // Register gg sans font (TTFs pre-decompressed by build.rs)
+        let gg_sans_paths: &[(&[u8], &str)] = &[
+            (
+                include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Normal.ttf")),
+                "Normal",
+            ),
+            (
+                include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Medium.ttf")),
+                "Medium",
+            ),
+            (
+                include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Semibold.ttf")),
+                "Semibold",
+            ),
+            (
+                include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-Bold.ttf")),
+                "Bold",
+            ),
+            (
+                include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
+                "ExtraBold",
+            ),
+        ];
+        let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
+            .iter()
+            .map(|(data, _)| Cow::Borrowed(*data))
+            .collect();
+        if !fonts.is_empty() {
+            if let Err(e) = cx.text_system().add_fonts(fonts) {
+                tracing::error!("Failed to register gg sans fonts: {e}");
+            } else {
+                tracing::info!("Registered gg sans font ({} weights)", gg_sans_paths.len());
             }
+        }
 
-            init_ui(cx);
+        init_ui(cx);
 
-            AppConfig::init_global(app_config_handle, cx);
+        AppConfig::init_global(app_config_handle, cx);
 
-            mezon_ui::theme::set_theme(mezon_ui::theme::resolve_theme(&settings.theme), cx);
+        mezon_ui::theme::set_theme(mezon_ui::theme::resolve_theme(&settings.theme), cx);
 
-            if std::env::var("MEZON_DEV_GALLERY").is_ok() {
-                open_dev_gallery_window(cx);
-                return;
-            }
+        if std::env::var("MEZON_DEV_GALLERY").is_ok() {
+            open_dev_gallery_window(cx);
+            return;
+        }
 
-            // Shared channel so background threads can send deep link URLs to the GPUI main thread.
-            let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
+        // Shared channel so background threads can send deep link URLs to the GPUI main thread.
+        let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
 
-            // Listen for deep link URLs forwarded from secondary instances.
-            {
-                let tx = url_tx.clone();
-                lock.listen_for_urls(move |url| {
-                    let _ = tx.unbounded_send(url);
-                });
-            }
+        // Listen for deep link URLs forwarded from secondary instances.
+        {
+            let tx = url_tx.clone();
+            lock.listen_for_urls(move |url| {
+                let _ = tx.unbounded_send(url);
+            });
+        }
 
-            // If we were launched with a deep link, inject it immediately.
-            if let Some(url) = initial_url {
-                let _ = url_tx.unbounded_send(url);
-            }
+        // If we were launched with a deep link, inject it immediately.
+        if let Some(url) = initial_url {
+            let _ = url_tx.unbounded_send(url);
+        }
 
-            let settings_entity = cx.new(|_| settings.clone());
+        let settings_entity = cx.new(|_| settings.clone());
 
-            let (auth_state_handle, window_handle) = open_main_window(
-                cx,
-                &settings,
-                settings_entity,
-                client.clone(),
-                api.clone(),
-                initial_auth_state,
-            );
+        let (auth_state_handle, window_handle) = open_main_window(
+            cx,
+            &settings,
+            settings_entity,
+            client.clone(),
+            api.clone(),
+            transport.clone(),
+            initial_auth_state,
+        );
 
-            let deep_link_task = {
-                let auth_state = auth_state_handle.clone();
-                cx.spawn(async move |cx: &mut AsyncApp| {
-                    while let Some(url) = url_rx.next().await {
-                        tracing::info!(
-                            "Received deep link: {}",
-                            url.split(['?', '#']).next().unwrap_or_default()
-                        );
-                        if url.starts_with("mezonapp://callback") {
-                            if let Some(token) = mezon_store::token_from_oauth_callback_url(&url) {
-                                let client = cx.update(|cx| {
-                                    mezon_store::LoginStore::global(cx).read(cx).client()
-                                });
-                                let auth = auth_state.clone();
-                                match client.authenticate_mezon(&token).await {
-                                    Ok(session) if !session.token.is_empty() => {
-                                        let session_kc = session.clone();
-                                        cx.background_executor()
-                                            .spawn(async move {
-                                                if let Err(e) =
-                                                    mezon_store::LoginStore::persist_session(
-                                                        &session_kc,
-                                                    )
-                                                {
-                                                    tracing::warn!(
-                                                        "Failed to save OAuth session: {e}"
-                                                    );
-                                                }
-                                            })
-                                            .detach();
-                                        cx.update(|cx| {
-                                            auth.update(cx, |state, cx| {
-                                                *state = AuthState::Connecting(session);
-                                                cx.notify();
-                                            });
-                                            mezon_ui::router::replace(
-                                                cx,
-                                                mezon_ui::router::Route::Chat,
-                                            );
+        cx.set_global(MainWindowGlobal(window_handle));
+
+        let deep_link_task = {
+            let auth_state = auth_state_handle.clone();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                while let Some(url) = url_rx.next().await {
+                    tracing::info!(
+                        "Received deep link: {}",
+                        url.split(['?', '#']).next().unwrap_or_default()
+                    );
+                    if url.starts_with("mezonapp://callback") {
+                        if let Some(token) = mezon_store::token_from_oauth_callback_url(&url) {
+                            let client = cx
+                                .update(|cx| mezon_store::LoginStore::global(cx).read(cx).client());
+                            let auth = auth_state.clone();
+                            match client.authenticate_mezon(&token).await {
+                                Ok(session) if !session.token.is_empty() => {
+                                    let session_kc = session.clone();
+                                    cx.background_executor()
+                                        .spawn(async move {
+                                            if let Err(e) =
+                                                mezon_store::LoginStore::persist_session(
+                                                    &session_kc,
+                                                )
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to save OAuth session: {e}"
+                                                );
+                                            }
+                                        })
+                                        .detach();
+                                    cx.update(|cx| {
+                                        auth.update(cx, |state, cx| {
+                                            *state = AuthState::Connecting(session);
+                                            cx.notify();
                                         });
-                                    }
-                                    Ok(_) => {
-                                        tracing::warn!(
-                                            "OAuth callback returned a session without a token"
+                                        mezon_ui::router::replace(
+                                            cx,
+                                            mezon_ui::router::Route::Chat,
                                         );
-                                        cx.update(|cx| {
-                                            auth.update(cx, |state, cx| {
-                                                *state = AuthState::NotAuthenticated;
-                                                cx.notify();
-                                            });
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("OAuth callback token exchange failed: {e}");
-                                        cx.update(|cx| {
-                                            auth.update(cx, |state, cx| {
-                                                *state = AuthState::NotAuthenticated;
-                                                cx.notify();
-                                            });
-                                        });
-                                    }
-                                }
-                            } else {
-                                cx.update(|cx| {
-                                    auth_state.update(cx, |state, cx| {
-                                        *state = AuthState::AwaitingCallback;
-                                        cx.notify();
                                     });
-                                    mezon_ui::router::replace(cx, mezon_ui::router::Route::Chat);
-                                });
+                                }
+                                Ok(_) => {
+                                    tracing::warn!(
+                                        "OAuth callback returned a session without a token"
+                                    );
+                                    cx.update(|cx| {
+                                        auth.update(cx, |state, cx| {
+                                            *state = AuthState::NotAuthenticated;
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!("OAuth callback token exchange failed: {e}");
+                                    cx.update(|cx| {
+                                        auth.update(cx, |state, cx| {
+                                            *state = AuthState::NotAuthenticated;
+                                            cx.notify();
+                                        });
+                                    });
+                                }
                             }
                         } else {
                             cx.update(|cx| {
-                                if let Some(route) = mezon_ui::router::parse_link(&url) {
-                                    mezon_ui::router::navigate(cx, route);
-                                }
+                                auth_state.update(cx, |state, cx| {
+                                    *state = AuthState::AwaitingCallback;
+                                    cx.notify();
+                                });
+                                mezon_ui::router::replace(cx, mezon_ui::router::Route::Chat);
                             });
                         }
+                    } else {
+                        cx.update(|cx| {
+                            if let Some(route) = mezon_ui::router::parse_link(&url) {
+                                mezon_ui::router::navigate(cx, route);
+                            }
+                        });
                     }
-                })
-            };
+                }
+            })
+        };
 
-            mezon_store::ConnectionStore::init(
-                transport.clone(),
-                api.clone(),
-                auth_state_handle.clone(),
-                cx,
-            );
+        if let Some((tray, tray_tasks)) = setup_tray(cx, rt_handle.clone()) {
+            cx.set_global(TrayGlobal(tray));
+            cx.set_global(TrayTasksGlobal {
+                _deep_link: deep_link_task,
+                _tray_tasks: tray_tasks,
+            });
+        } else {
+            deep_link_task.detach();
+        }
 
-            if let Some((tray, tray_tasks)) = setup_tray(cx, rt_handle.clone(), window_handle) {
-                cx.set_global(TrayGlobal(tray));
-                cx.set_global(TrayTasksGlobal {
-                    _deep_link: deep_link_task,
-                    _tray_tasks: tray_tasks,
-                });
-            } else {
-                deep_link_task.detach();
-            }
-
-            cx.activate(true);
-        });
+        cx.activate(true);
+    });
 }
 
-/// Open the main window and return a cloneable handle to the `AuthState` entity.
 fn open_dev_gallery_window(cx: &mut App) {
     let options = WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
@@ -378,6 +401,7 @@ fn open_main_window(
     settings_entity: Entity<Settings>,
     client: Arc<MezonClient>,
     api: Arc<AppApi>,
+    transport: Arc<TransportClient>,
     initial_auth: AuthState,
 ) -> (Entity<AuthState>, gpui::AnyWindowHandle) {
     let window_bounds = if let Some([x, y, w, h]) = settings.window_bounds {
@@ -390,16 +414,13 @@ fn open_main_window(
     };
 
     let options = WindowOptions {
-        titlebar: Some(gpui::TitlebarOptions {
-            title: None,
-            appears_transparent: true,
-            traffic_light_position: Some(gpui::point(px(-100.0), px(-100.0))),
-        }),
+        titlebar: Some(window_title_options()),
         window_bounds: Some(window_bounds),
         window_min_size: Some(size(px(950.0), px(500.0))),
         kind: gpui::WindowKind::Normal,
         focus: true,
         show: true,
+        window_decorations: main_window_decorations(),
         ..Default::default()
     };
 
@@ -408,9 +429,11 @@ fn open_main_window(
 
     mezon_store::LoginStore::init(client, api.clone(), auth_state.clone(), cx);
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
+    mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::DirectMessageStore::init(api.clone(), cx);
+    mezon_store::BadgeService::init(auth_state.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
@@ -418,9 +441,12 @@ fn open_main_window(
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
+    mezon_store::EmojiStore::init(api.clone(), cx);
+    mezon_store::StickerStore::init(api.clone(), cx);
     mezon_store::ChannelMembersStore::init(api.clone(), cx);
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
+    mezon_store::RolesStore::init(api.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
     let platform_store = mezon_store::PlatformStore::init(cx);
@@ -480,7 +506,25 @@ fn open_main_window(
             std::process::exit(1);
         });
 
+    #[cfg(target_os = "macos")]
+    mezon_ui::app::window_controls::macos::configure_window(cx, window_handle);
+
     (auth_state, window_handle.into())
+}
+
+struct MainWindowGlobal(gpui::AnyWindowHandle);
+impl gpui::Global for MainWindowGlobal {}
+
+fn show_main_window(cx: &mut App) {
+    let Some(handle) = cx.try_global::<MainWindowGlobal>().map(|global| global.0) else {
+        return;
+    };
+    if cx
+        .update_window(handle, |_, window, _| window.activate_window())
+        .is_err()
+    {
+        tracing::warn!("Failed to show main window");
+    }
 }
 
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
@@ -500,16 +544,13 @@ struct TrayTasks {
 fn setup_tray(
     cx: &mut App,
     rt_handle: Arc<tokio::runtime::Handle>,
-    window: gpui::AnyWindowHandle,
 ) -> Option<(mezon_native::tray::MezonTray, TrayTasks)> {
     let (show_tx, mut show_rx) = futures::channel::mpsc::unbounded::<()>();
     let (quit_tx, mut quit_rx) = futures::channel::mpsc::unbounded::<()>();
 
     let show_task = cx.spawn(async move |cx: &mut AsyncApp| {
         while show_rx.next().await.is_some() {
-            let _ = cx.update_window(window, |_, window, _| {
-                window.activate_window();
-            });
+            cx.update(show_main_window);
         }
     });
 

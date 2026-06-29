@@ -398,8 +398,7 @@ impl Asset for AvatarImageLoader {
                 let side = decoded
                     .width()
                     .min(decoded.height())
-                    .min(AVATAR_DECODE_MAX_PX)
-                    .max(1);
+                    .clamp(1, AVATAR_DECODE_MAX_PX);
                 let mut data = decoded
                     .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
                     .into_rgba8();

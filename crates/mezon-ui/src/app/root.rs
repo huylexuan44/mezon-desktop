@@ -3,9 +3,10 @@ use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
     StyleRefinement, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ClanList, Settings};
+use mezon_store::{AuthState, ClanList, ConnectionStore, Settings};
 
 use crate::app::title_bar::TitleBar;
+use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
@@ -104,6 +105,9 @@ impl RootView {
         })
         .detach();
 
+        cx.observe(&ConnectionStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
+
         let clan_list: Entity<ClanList> = ClanList::global(cx);
 
         let clan_list_for_chat = clan_list.clone();
@@ -188,7 +192,10 @@ impl Render for RootView {
                 cached_fill(self.login_view.clone())
             }
             AuthState::AwaitingCallback => render_awaiting_callback(theme, &locale),
-            AuthState::Connecting(_) => render_connecting(theme, &locale),
+            AuthState::Connecting(_) => {
+                let attempt = ConnectionStore::global(cx).read(cx).connecting_attempt();
+                render_connecting(theme, &locale, attempt)
+            }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
                 match route {
@@ -214,11 +221,13 @@ impl Render for RootView {
             .render_overlay();
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.bg_primary)
             .text_color(theme.text_primary)
+            .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
                 window.toggle_inspector(cx);
@@ -231,15 +240,23 @@ impl Render for RootView {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 |_, _, cx| crate::router::go_forward(cx),
             )
-            .when(cfg!(not(target_os = "macos")), |this| {
-                this.child(
-                    AnyView::from(self.title_bar.clone())
-                        .cached(StyleRefinement::default().w_full().h_8()),
-                )
+            .when(window_controls::HAS_CUSTOM_TITLE_BAR, |this| {
+                this.child(render_title_bar(self.title_bar.clone()))
             })
             .child(content)
+            .when(window_controls::is_edge_resizable(), |this| {
+                this.child(window_controls::render_resize_edges(_window))
+            })
             .child(overlay)
     }
+}
+
+fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
+    let view = AnyView::from(title_bar);
+    #[cfg(not(target_os = "windows"))]
+    return view.cached(StyleRefinement::default().w_full().h_8());
+    #[cfg(target_os = "windows")]
+    view
 }
 
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
@@ -278,7 +295,12 @@ fn render_awaiting_callback(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
+fn render_connecting(theme: &Theme, locale: &str, attempt: u32) -> gpui::AnyElement {
+    let label = if attempt > 0 {
+        mezon_i18n::t(locale, "root.reconnectingAttempt").replace("{{count}}", &attempt.to_string())
+    } else {
+        mezon_i18n::t(locale, "root.loading").to_string()
+    };
     div()
         .flex()
         .flex_1()
@@ -296,7 +318,7 @@ fn render_connecting(theme: &Theme, locale: &str) -> gpui::AnyElement {
                 .text_xl()
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme.text_primary)
-                .child(mezon_i18n::t(locale, "root.loading")),
+                .child(label),
         )
         .into_any_element()
 }

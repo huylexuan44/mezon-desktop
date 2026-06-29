@@ -13,7 +13,7 @@ const PREVIEW_MAX_HEIGHT: u32 = 236;
 pub fn capture_screen_share_preview(kind: ScreenShareKind, id: u32) -> Option<ScreenSharePreview> {
     #[cfg(target_os = "macos")]
     {
-        return capture_macos_preview(kind, id);
+        capture_macos_preview(kind, id)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -49,7 +49,9 @@ fn capture_macos_preview(kind: ScreenShareKind, id: u32) -> Option<ScreenSharePr
 }
 
 #[cfg(target_os = "macos")]
-fn cg_image_to_preview(image: &core_graphics_helmer_fork::image::CGImageRef) -> Option<ScreenSharePreview> {
+fn cg_image_to_preview(
+    image: &core_graphics_helmer_fork::image::CGImageRef,
+) -> Option<ScreenSharePreview> {
     let width = image.width() as u32;
     let height = image.height() as u32;
     if width == 0 || height == 0 {
@@ -57,7 +59,7 @@ fn cg_image_to_preview(image: &core_graphics_helmer_fork::image::CGImageRef) -> 
     }
 
     let (thumb_w, thumb_h) = preview_dimensions(width, height);
-    let bytes_per_row = image.bytes_per_row() as usize;
+    let bytes_per_row = image.bytes_per_row();
     if bytes_per_row < (width as usize * 4) {
         return None;
     }
@@ -75,9 +77,9 @@ fn cg_image_to_preview(image: &core_graphics_helmer_fork::image::CGImageRef) -> 
             if src_offset + 3 >= bytes.len() {
                 continue;
             }
-            rgba[dst_offset] = bytes[src_offset + 2];
+            rgba[dst_offset] = bytes[src_offset];
             rgba[dst_offset + 1] = bytes[src_offset + 1];
-            rgba[dst_offset + 2] = bytes[src_offset];
+            rgba[dst_offset + 2] = bytes[src_offset + 2];
             rgba[dst_offset + 3] = bytes[src_offset + 3];
         }
     }

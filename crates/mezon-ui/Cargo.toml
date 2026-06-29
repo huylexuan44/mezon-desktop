@@ -3,6 +3,9 @@ name = "mezon-ui"
 version.workspace = true
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 futures.workspace = true
 gpui = { workspace = true, features = ["inspector"] }
@@ -25,3 +28,8 @@ indexmap.workspace = true
 image.workspace = true
 qrcode.workspace = true
 smallvec.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block = "0.1"
+objc.workspace = true
+raw-window-handle.workspace = true

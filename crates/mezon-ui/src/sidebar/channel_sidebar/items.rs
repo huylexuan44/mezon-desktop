@@ -33,7 +33,6 @@ impl From<&AppChannel> for AppChannelSlot {
 
 #[derive(Clone, PartialEq)]
 pub(super) enum SidebarItem {
-    Skeleton,
     BannerAndEvents {
         banner_url: Option<String>,
         app_channels: Vec<AppChannelSlot>,

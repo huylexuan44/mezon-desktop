@@ -329,13 +329,11 @@ impl ChannelList {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             for kind in [
-                RealtimeKind::ChannelMessage,
                 RealtimeKind::ChannelCreated,
                 RealtimeKind::ChannelUpdated,
                 RealtimeKind::ChannelDeleted,
                 RealtimeKind::VoiceJoined,
                 RealtimeKind::VoiceLeaved,
-                RealtimeKind::MarkAsRead,
                 RealtimeKind::UserChannelAdded,
                 RealtimeKind::UserChannelRemoved,
             ] {
@@ -398,8 +396,9 @@ impl ChannelList {
                 }
                 Err(e) => {
                     tracing::error!("Failed to load channels for clan {clan_id}: {e}");
-                    let _ = this.update(cx, |this, _| {
+                    let _ = this.update(cx, |this, cx| {
                         this.loading.remove(&clan_id);
+                        cx.notify();
                     });
                 }
             }
@@ -489,51 +488,93 @@ impl ChannelList {
         ))
     }
 
+    fn notify_if_active(&self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if self.active_clan_id == Some(clan_id) {
+            cx.notify();
+        }
+    }
+
+    pub fn note_channel_message(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        is_mention: bool,
+        seen: bool,
+        ts: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let mut visible_changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id)
+            && let Some(ch) = categories
+                .iter_mut()
+                .flat_map(|c| &mut c.channels)
+                .find(|ch| ch.id == channel_id)
+        {
+            let was_unread = ch.is_unread();
+            let was_badge_zero = ch.badge_count == 0;
+            if ts > 0 {
+                ch.last_sent_timestamp = ts;
+                if seen {
+                    ch.last_seen_timestamp = ts;
+                }
+            }
+            if is_mention && !seen {
+                ch.badge_count = ch.badge_count.saturating_add(1);
+            }
+            visible_changed =
+                was_unread != ch.is_unread() || was_badge_zero != (ch.badge_count == 0);
+        }
+        if visible_changed {
+            self.notify_if_active(clan_id, cx);
+        }
+    }
+
+    pub fn apply_read(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let mut became_read = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id)
+            && let Some(ch) = categories
+                .iter_mut()
+                .flat_map(|c| &mut c.channels)
+                .find(|ch| ch.id == channel_id)
+        {
+            became_read = ch.is_unread();
+            ch.badge_count = 0;
+            ch.last_seen_timestamp = ch.last_sent_timestamp;
+        }
+        if became_read {
+            self.notify_if_active(clan_id, cx);
+        }
+    }
+
+    pub fn apply_last_seen(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        new_badge: u32,
+        seen_ts: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let mut visible_changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id)
+            && let Some(ch) = categories
+                .iter_mut()
+                .flat_map(|c| &mut c.channels)
+                .find(|ch| ch.id == channel_id)
+        {
+            let was_unread = ch.is_unread();
+            ch.badge_count = new_badge;
+            if seen_ts > ch.last_seen_timestamp {
+                ch.last_seen_timestamp = seen_ts;
+            }
+            visible_changed = was_unread != ch.is_unread();
+        }
+        if visible_changed {
+            self.notify_if_active(clan_id, cx);
+        }
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
-            RealtimeEvent::ChannelMessage(m) => {
-                let id = ChannelId(m.channel_id);
-                if self.active_channel_id != Some(id) {
-                    let mut changed = false;
-                    for cats in self.cache.values_mut() {
-                        if let Some(ch) = cats
-                            .iter_mut()
-                            .flat_map(|c| &mut c.channels)
-                            .find(|ch| ch.id == id)
-                        {
-                            ch.badge_count = ch.badge_count.saturating_add(1);
-                            if m.create_time_seconds > 0 {
-                                ch.last_sent_timestamp = i64::from(m.create_time_seconds);
-                            }
-                            changed = true;
-                            break;
-                        }
-                    }
-                    if changed {
-                        cx.emit(ChannelEvent::Unread(id));
-                        cx.notify();
-                    }
-                }
-            }
-            RealtimeEvent::MarkAsRead(e) => {
-                let id = ChannelId(e.channel_id);
-                let mut changed = false;
-                for cats in self.cache.values_mut() {
-                    if let Some(ch) = cats
-                        .iter_mut()
-                        .flat_map(|c| &mut c.channels)
-                        .find(|ch| ch.id == id)
-                    {
-                        ch.badge_count = 0;
-                        ch.last_seen_timestamp = ch.last_sent_timestamp;
-                        changed = true;
-                        break;
-                    }
-                }
-                if changed {
-                    cx.notify();
-                }
-            }
             RealtimeEvent::ChannelCreated(e) => {
                 let clan_id = ClanId(e.clan_id);
                 if self.cache.contains(&clan_id) {
@@ -727,6 +768,10 @@ impl ChannelList {
 
     pub fn categories_for_clan(&self, clan_id: ClanId) -> &[Category] {
         self.cache.get(&clan_id).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn is_loading_clan(&self, clan_id: ClanId) -> bool {
+        self.loading.contains(&clan_id)
     }
 
     pub fn app_channels_for_clan(&self, clan_id: ClanId) -> &[AppChannel] {

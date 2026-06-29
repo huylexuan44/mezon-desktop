@@ -6,6 +6,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
+use crate::KeyedCache;
 use crate::channel::{ChannelEvent, ChannelList};
 use crate::clan::ClanList;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -24,28 +25,37 @@ pub enum ChannelMembersEvent {
 #[derive(Default)]
 struct ChannelBucket {
     members: Vec<ChannelMember>,
+    by_id: HashMap<UserId, usize>,
 }
 
 impl ChannelBucket {
     fn upsert(&mut self, member: ChannelMember) {
-        if let Some(existing) = self
-            .members
-            .iter_mut()
-            .find(|m| m.user_id == member.user_id)
-        {
-            *existing = member;
+        if let Some(&idx) = self.by_id.get(&member.user_id) {
+            self.members[idx] = member;
         } else {
+            self.by_id.insert(member.user_id, self.members.len());
             self.members.push(member);
         }
     }
 
     fn remove(&mut self, user_id: UserId) {
-        self.members.retain(|m| m.user_id != user_id);
+        if let Some(idx) = self.by_id.get(&user_id).copied() {
+            self.members.remove(idx);
+            self.reindex();
+        }
+    }
+
+    fn reindex(&mut self) {
+        self.by_id.clear();
+        self.by_id.reserve(self.members.len());
+        for (i, m) in self.members.iter().enumerate() {
+            self.by_id.insert(m.user_id, i);
+        }
     }
 }
 
 pub struct ChannelMembersStore {
-    by_channel: HashMap<ChannelId, ChannelBucket>,
+    cache: KeyedCache<ChannelId, ChannelBucket>,
     loading: HashMap<ChannelId, bool>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
@@ -85,7 +95,7 @@ impl ChannelMembersStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            by_channel: HashMap::new(),
+            cache: KeyedCache::new(None),
             loading: HashMap::new(),
             api,
             _channel_sub: channel_sub,
@@ -119,7 +129,7 @@ impl ChannelMembersStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.refresh_active(cx)).is_err() {
+                    if this.update(cx, |this, _| this.invalidate()).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -130,14 +140,14 @@ impl ChannelMembersStore {
     }
 
     pub fn member_ids(&self, channel_id: ChannelId) -> Vec<UserId> {
-        match self.by_channel.get(&channel_id) {
+        match self.cache.get(&channel_id) {
             Some(bucket) => bucket.members.iter().map(|m| m.user_id).collect(),
             None => Vec::new(),
         }
     }
 
     pub fn has_channel(&self, channel_id: ChannelId) -> bool {
-        self.by_channel.contains_key(&channel_id)
+        self.cache.contains(&channel_id)
     }
 
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
@@ -146,8 +156,12 @@ impl ChannelMembersStore {
         }
     }
 
+    fn invalidate(&mut self) {
+        self.cache.mark_all_stale();
+    }
+
     pub fn ensure_loaded(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if !self.by_channel.contains_key(&channel_id) {
+        if !self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.fetch(channel_id, cx);
         }
     }
@@ -191,7 +205,7 @@ impl ChannelMembersStore {
                         for cu in users {
                             bucket.upsert(channel_member_from_proto(&cu));
                         }
-                        this.by_channel.insert(channel_id, bucket);
+                        this.cache.insert(channel_id, bucket, None);
                         cx.emit(ChannelMembersEvent::Changed { channel_id });
                         cx.notify();
                     }
@@ -211,10 +225,9 @@ impl ChannelMembersStore {
                 else {
                     return;
                 };
-                if !self.by_channel.contains_key(&channel_id) {
+                let Some(bucket) = self.cache.get_mut(&channel_id) else {
                     return;
-                }
-                let bucket = self.by_channel.entry(channel_id).or_default();
+                };
                 for user in &e.users {
                     bucket.upsert(channel_member_from_redis(user));
                 }
@@ -223,7 +236,7 @@ impl ChannelMembersStore {
             }
             RealtimeEvent::UserChannelRemoved(e) => {
                 let channel_id = ChannelId(e.channel_id);
-                let Some(bucket) = self.by_channel.get_mut(&channel_id) else {
+                let Some(bucket) = self.cache.get_mut(&channel_id) else {
                     return;
                 };
                 for uid in &e.user_ids {
@@ -289,6 +302,30 @@ mod tests {
         assert_eq!(bucket.members[0].user_id, UserId(2));
     }
 
+    fn assert_index_consistent(bucket: &ChannelBucket) {
+        assert_eq!(bucket.by_id.len(), bucket.members.len());
+        for (i, m) in bucket.members.iter().enumerate() {
+            assert_eq!(bucket.by_id.get(&m.user_id), Some(&i));
+        }
+    }
+
+    #[test]
+    fn bucket_index_stays_consistent_across_upsert_and_remove() {
+        let mut bucket = ChannelBucket::default();
+        for id in [1, 2, 3, 4] {
+            bucket.upsert(channel_member_from_proto(&proto_channel_user(id)));
+        }
+        assert_index_consistent(&bucket);
+        bucket.upsert(channel_member_from_proto(&proto_channel_user(2)));
+        assert_index_consistent(&bucket);
+        bucket.remove(UserId(1));
+        assert_index_consistent(&bucket);
+        bucket.remove(UserId(3));
+        assert_index_consistent(&bucket);
+        let ids: Vec<UserId> = bucket.members.iter().map(|m| m.user_id).collect();
+        assert_eq!(ids, vec![UserId(2), UserId(4)]);
+    }
+
     #[test]
     fn redis_profile_maps_user_id_only() {
         let redis = realtime::UserProfileRedis {
@@ -298,5 +335,23 @@ mod tests {
         let member = channel_member_from_redis(&redis);
         assert_eq!(member.user_id, UserId(33));
         assert!(member.role_ids.is_empty());
+    }
+
+    #[test]
+    fn mark_all_stale_keeps_members_visible_then_refetch_restores_freshness() {
+        let mut cache: KeyedCache<ChannelId, ChannelBucket> = KeyedCache::new(None);
+        let mut bucket = ChannelBucket::default();
+        bucket.upsert(channel_member_from_proto(&proto_channel_user(1)));
+        cache.insert(ChannelId(7), bucket, None);
+        assert!(cache.is_fresh(&ChannelId(7), crate::CACHE_TTL));
+
+        cache.mark_all_stale();
+        assert!(!cache.is_fresh(&ChannelId(7), crate::CACHE_TTL));
+        assert_eq!(cache.get(&ChannelId(7)).unwrap().members.len(), 1);
+
+        let mut bucket = ChannelBucket::default();
+        bucket.upsert(channel_member_from_proto(&proto_channel_user(1)));
+        cache.insert(ChannelId(7), bucket, None);
+        assert!(cache.is_fresh(&ChannelId(7), crate::CACHE_TTL));
     }
 }

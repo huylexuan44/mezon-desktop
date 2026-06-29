@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task};
 use mezon_client::AppApi;
-use mezon_voice::{VoiceEvent, VoiceSession};
+use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 pub use mezon_voice::{
@@ -15,7 +15,6 @@ pub use mezon_voice::{
 
 use crate::AppConfig;
 
-const VIDEO_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
 
 struct CachedMeetToken {
@@ -70,6 +69,7 @@ pub struct VoiceStore {
     call_status: VoiceCallStatus,
     channel_label: String,
     mic_enabled: bool,
+    mic_permission_denied: bool,
     camera_enabled: bool,
     screen_share_enabled: bool,
     focused_tile: Option<String>,
@@ -79,6 +79,7 @@ pub struct VoiceStore {
     render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
+    last_repaint_seq: Option<u64>,
     _events_task: Option<Task<()>>,
     _repaint_task: Option<Task<()>>,
 }
@@ -108,6 +109,7 @@ impl VoiceStore {
             call_status: VoiceCallStatus::Stable,
             channel_label: String::new(),
             mic_enabled: false,
+            mic_permission_denied: false,
             camera_enabled: false,
             screen_share_enabled: false,
             focused_tile: None,
@@ -117,9 +119,26 @@ impl VoiceStore {
             render_cache: Mutex::new(HashMap::new()),
             cached_meet_token: None,
             meet_token_prefetching: None,
+            last_repaint_seq: None,
             _events_task: None,
             _repaint_task: None,
         }
+    }
+
+    fn current_max_frame_seq(&self) -> Option<u64> {
+        let store = self.frame_store.as_ref()?;
+        let mut max_seq = None;
+        for participant in &self.participants {
+            for key in [participant.camera, participant.screenshare]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(frame) = store.get(key) {
+                    max_seq = Some(max_seq.map_or(frame.seq, |m: u64| m.max(frame.seq)));
+                }
+            }
+        }
+        max_seq
     }
 
     fn cached_token_for(&self, channel_id: &str) -> Option<String> {
@@ -177,6 +196,17 @@ impl VoiceStore {
         self.mic_enabled
     }
 
+    pub fn mic_permission_denied(&self) -> bool {
+        self.mic_permission_denied
+    }
+
+    pub fn dismiss_mic_permission_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.mic_permission_denied {
+            self.mic_permission_denied = false;
+            cx.notify();
+        }
+    }
+
     pub fn camera_enabled(&self) -> bool {
         self.camera_enabled
     }
@@ -210,6 +240,23 @@ impl VoiceStore {
             },
         );
         Some(image)
+    }
+
+    fn evict_stale_render_cache(&self) {
+        let mut cache = self.render_cache.lock();
+        if cache.is_empty() {
+            return;
+        }
+        let mut live_keys: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for participant in &self.participants {
+            if let Some(key) = participant.camera {
+                live_keys.insert(key);
+            }
+            if let Some(key) = participant.screenshare {
+                live_keys.insert(key);
+            }
+        }
+        cache.retain(|key, _| live_keys.contains(key));
     }
 
     pub fn focused_tile(&self) -> Option<&str> {
@@ -279,8 +326,8 @@ impl VoiceStore {
         };
         self.call_status = VoiceCallStatus::Stable;
         self.mic_enabled = false;
+        self.mic_permission_denied = false;
         self.participants.clear();
-        preload_screen_share_options();
         cx.notify();
 
         let api = self.api.clone();
@@ -340,9 +387,17 @@ impl VoiceStore {
             return;
         }
 
-        let session = VoiceSession::connect(ws_url, token, input_device_id, output_device_id);
+        let ice_servers = Self::ice_servers(cx);
+        let session = VoiceSession::connect(
+            ws_url,
+            token,
+            input_device_id,
+            output_device_id,
+            ice_servers,
+        );
         let events = session.events();
-        self.frame_store = Some(session.frame_store());
+        let frame_store = session.frame_store();
+        self.frame_store = Some(frame_store.clone());
         self.session = Some(session);
 
         let task = cx.spawn(async move |this, cx| {
@@ -359,10 +414,14 @@ impl VoiceStore {
 
         let repaint = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(VIDEO_REPAINT_INTERVAL).await;
+                frame_store.frame_changed().await;
                 let keep_going = this.update(cx, |this, cx| {
                     if this.has_active_video() {
-                        cx.notify();
+                        let seq = this.current_max_frame_seq();
+                        if seq.is_some() && seq != this.last_repaint_seq {
+                            this.last_repaint_seq = seq;
+                            cx.notify();
+                        }
                     }
                     !matches!(this.connection, VoiceConnection::Idle)
                 });
@@ -373,6 +432,18 @@ impl VoiceStore {
         });
         self._repaint_task = Some(repaint);
         cx.notify();
+    }
+
+    fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
+        let config = AppConfig::global(cx);
+        if config.webrtc_ice_servers_url.is_empty() {
+            return Vec::new();
+        }
+        vec![IceServerConfig {
+            urls: vec![config.webrtc_ice_servers_url.clone()],
+            username: config.webrtc_ice_servers_username.clone(),
+            credential: config.webrtc_ice_servers_credential.clone(),
+        }]
     }
 
     fn has_active_video(&self) -> bool {
@@ -416,10 +487,12 @@ impl VoiceStore {
                 }
             }
             VoiceEvent::Participants(list) => {
-                self.participants = list.clone();
-                if let Some(local) = list.iter().find(|p| p.is_local) {
+                self.participants = list;
+                if let Some(local) = self.participants.iter().find(|p| p.is_local) {
+                    self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
+                self.evict_stale_render_cache();
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
@@ -452,6 +525,13 @@ impl VoiceStore {
     }
 
     pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled && mezon_voice::microphone_denied() {
+            self.mic_enabled = false;
+            self.mic_permission_denied = true;
+            cx.notify();
+            return;
+        }
+        self.mic_permission_denied = false;
         self.mic_enabled = enabled;
         if let Some(session) = &self.session {
             session.set_mic_enabled(enabled);
@@ -464,7 +544,6 @@ impl VoiceStore {
     }
 
     pub fn set_camera_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.camera_enabled = enabled;
         if let Some(session) = &self.session {
             session.set_camera_enabled(enabled);
         }
@@ -485,7 +564,6 @@ impl VoiceStore {
         if !self.screen_share_enabled {
             return;
         }
-        self.screen_share_enabled = false;
         if let Some(session) = &self.session {
             session.stop_screen_share();
         }
@@ -502,10 +580,12 @@ impl VoiceStore {
         self.call_status = VoiceCallStatus::Stable;
         self.channel_label.clear();
         self.mic_enabled = false;
+        self.mic_permission_denied = false;
         self.camera_enabled = false;
         self.screen_share_enabled = false;
         self.focused_tile = None;
         self.participants.clear();
         self.meet_token_prefetching = None;
+        self.last_repaint_seq = None;
     }
 }

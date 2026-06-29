@@ -1,5 +1,6 @@
 pub mod account;
 pub mod audio;
+pub mod badge;
 pub mod cache;
 pub mod channel;
 pub mod channel_members;
@@ -8,14 +9,18 @@ pub mod clan_members;
 pub mod config;
 pub mod connection;
 pub mod direct;
+pub mod emoji;
 pub mod group_members;
 pub mod ids;
 pub mod inbox;
 pub mod login;
+pub mod message;
 pub mod messages;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
+pub mod roles;
+pub mod sticker;
 pub mod topic_badges;
 pub mod topics;
 pub mod user_profile;
@@ -25,6 +30,7 @@ pub mod voice;
 use anyhow::{Context, Result};
 use dirs::config_dir;
 pub use mezon_client::Session;
+pub use mezon_client::transport::MENTION_HERE_ID;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -32,7 +38,8 @@ use tokio::fs;
 
 pub use account::*;
 pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
-pub use cache::KeyedCache;
+pub use badge::BadgeService;
+pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use clan::*;
@@ -42,10 +49,16 @@ pub use clan_members::{
 pub use config::AppConfig;
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
+pub use emoji::{Emoji, EmojiEvent, EmojiStore};
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
-pub use ids::{ChannelId, ClanId, ParseIdError, RoleId, UserId};
+pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use inbox::{InboxEvent, InboxStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
+pub use message::*;
+pub use message::{
+    COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
+    recompute_message_grouping,
+};
 pub use messages::*;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
@@ -54,6 +67,8 @@ pub use mezon_client::{
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use roles::{Role, RolesEvent, RolesStore};
+pub use sticker::{Sticker, StickerEvent, StickerStore};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
 pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};

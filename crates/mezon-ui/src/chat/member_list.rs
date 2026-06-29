@@ -1,15 +1,18 @@
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window,
-    div, prelude::*, px, uniform_list,
+    Anchor, AnyElement, App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, Pixels,
+    Point, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    uniform_list,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId, ClanList, ClanMember,
     ClanMembersEvent, ClanMembersStore, DirectKind, DirectMessageStore, GroupMember,
-    GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore, Settings, UserId,
-    split_members_by_status,
+    GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore, ProfileContext, Settings,
+    UserId, split_members_by_status,
 };
 
-use crate::components::primitives::Avatar;
+use crate::app::shell::Shell;
+use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
+use crate::components::primitives::{Avatar, ContextMenu, context_menu_at};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
@@ -38,13 +41,18 @@ enum Row {
 
 #[derive(PartialEq)]
 struct MemberRow {
+    user_id: UserId,
     name: SharedString,
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    rcm_id: SharedString,
+    popover_id: SharedString,
+    trigger_id: SharedString,
 }
 
 struct RawMember {
+    user_id: UserId,
     name: String,
     avatar_raw: String,
     online: bool,
@@ -56,17 +64,30 @@ pub struct MemberListPanel {
     rows: Derived<Vec<Row>>,
     list_scroll: UniformListScrollHandle,
     avatar_image_cache: Entity<LruImageCache>,
+    active_context: Option<ProfileContext>,
+    open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
 }
 
 impl MemberListPanel {
     pub fn new(source: MemberSource, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&Router::global(cx), |this, _, cx| this.rebuild(cx))
             .detach();
-        cx.subscribe(&PresenceStore::global(cx), |this, _, event, cx| {
-            if !matches!(event, PresenceEvent::TypingChanged { .. }) {
-                this.rebuild(cx);
-            }
-        })
+        cx.subscribe(
+            &PresenceStore::global(cx),
+            |this, _, event, cx| match event {
+                PresenceEvent::TypingChanged { .. } => {}
+                PresenceEvent::ChannelPresenceChanged { channel_id } => {
+                    let relevant = match this.source {
+                        MemberSource::Channel => shows_channel(*channel_id, cx),
+                        MemberSource::Group => shows_group(*channel_id, cx),
+                    };
+                    if relevant {
+                        this.rebuild(cx);
+                    }
+                }
+                PresenceEvent::StatusChanged => this.rebuild(cx),
+            },
+        )
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
@@ -119,12 +140,20 @@ impl MemberListPanel {
             rows: Derived::default(),
             list_scroll: UniformListScrollHandle::new(),
             avatar_image_cache,
+            active_context: None,
+            open_menu: None,
         };
         this.rebuild(cx);
         this
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.active_context = match self.source {
+            MemberSource::Channel => {
+                active_channel_context(cx).map(|ctx| ProfileContext::Clan(ctx.clan_id))
+            }
+            MemberSource::Group => active_group_dm(cx).map(ProfileContext::Direct),
+        };
         let rows = compute_rows(self.source, cx);
         self.rows.set(rows, cx);
     }
@@ -240,7 +269,9 @@ fn active_channel_context(cx: &App) -> Option<ChannelContext> {
 }
 
 fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<RawMember>) {
-    let online = PresenceStore::global(cx).read(cx).user_online.clone();
+    let presence = PresenceStore::global(cx);
+    let presence = presence.read(cx);
+    let online = &presence.user_online;
     let store = ClanMembersStore::global(cx);
     let store = store.read(cx);
     let pool: Vec<&ClanMember> = match &ctx.filter_ids {
@@ -250,11 +281,12 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
             .collect(),
         None => store.members(ctx.clan_id),
     };
-    let (online_ids, offline_ids) = split_members_by_status(&pool, &online);
+    let (online_ids, offline_ids) = split_members_by_status(&pool, online);
     let to_raw = |ids: &[UserId], is_online: bool| -> Vec<RawMember> {
         ids.iter()
             .filter_map(|id| store.member(ctx.clan_id, *id))
             .map(|member| RawMember {
+                user_id: member.id(),
                 name: member.name().to_string(),
                 avatar_raw: member.avatar().to_string(),
                 online: is_online,
@@ -265,14 +297,17 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
 }
 
 fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
-    let presence_online = PresenceStore::global(cx).read(cx).user_online.clone();
+    let presence = PresenceStore::global(cx);
+    let presence = presence.read(cx);
+    let presence_online = &presence.user_online;
     let store = GroupMembersStore::global(cx);
     let store = store.read(cx);
     let mut members: Vec<&GroupMember> = store.members(direct_id).iter().collect();
-    members.sort_by_key(|m| m.name().to_lowercase());
+    members.sort_by_cached_key(|m| m.name().to_lowercase());
     members
         .into_iter()
         .map(|member| RawMember {
+            user_id: member.id(),
             name: member.name().to_string(),
             avatar_raw: member.avatar().to_string(),
             online: member.online || presence_online.contains(&member.id()),
@@ -280,22 +315,63 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
         .collect()
 }
 
+#[derive(Clone)]
+pub(crate) struct MentionMemberRaw {
+    pub user_id: String,
+    pub display: String,
+    pub username: String,
+    pub avatar_raw: String,
+}
+
+pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
+    if let Some(direct_id) = active_group_dm(cx) {
+        let store = GroupMembersStore::global(cx);
+        let store = store.read(cx);
+        return store
+            .members(direct_id)
+            .iter()
+            .map(|m| MentionMemberRaw {
+                user_id: m.id().to_string(),
+                display: m.name().to_string(),
+                username: m.user.username.clone(),
+                avatar_raw: m.avatar().to_string(),
+            })
+            .collect();
+    }
+    let Some(ctx) = active_channel_context(cx) else {
+        return Vec::new();
+    };
+    let store = ClanMembersStore::global(cx);
+    let store = store.read(cx);
+    let pool: Vec<&ClanMember> = match &ctx.filter_ids {
+        Some(ids) => ids
+            .iter()
+            .filter_map(|id| store.member(ctx.clan_id, *id))
+            .collect(),
+        None => store.members(ctx.clan_id),
+    };
+    pool.iter()
+        .map(|m| MentionMemberRaw {
+            user_id: m.user.id.to_string(),
+            display: m.name().to_string(),
+            username: m.user.username.clone(),
+            avatar_raw: m.avatar().to_string(),
+        })
+        .collect()
+}
+
 fn make_member_row(cx: &App, raw: RawMember) -> Row {
-    // The dev image proxy 404s on avatar source URLs, forcing a fallback to the
-    // raw (full-resolution) file. For the member list we skip the proxy on dev
-    // and use the raw URL directly: it avoids the wasted 404 round-trip, and the
-    // dev server already serves avatars at avatar size.
-    let skip_proxy = mezon_store::AppConfig::try_global(cx)
-        .map(|cfg| cfg.is_dev_imgproxy())
-        .unwrap_or(false);
     let avatar_src = if raw.avatar_raw.is_empty() {
         SharedString::default()
-    } else if skip_proxy {
-        SharedString::from(raw.avatar_raw.clone())
     } else {
         SharedString::from(crate::util::imgproxy::avatar_url(cx, &raw.avatar_raw))
     };
+    let id = raw.user_id.0;
     Row::Member(MemberRow {
+        rcm_id: SharedString::from(format!("member-rcm-{id}")),
+        popover_id: SharedString::from(format!("member-popover-{id}")),
+        trigger_id: SharedString::from(format!("member-trigger-{id}")),
+        user_id: raw.user_id,
         name: raw.name.into(),
         avatar_src,
         avatar_raw: raw.avatar_raw.into(),
@@ -334,6 +410,9 @@ fn render_member(
     theme: &Theme,
     member: &MemberRow,
     avatar_image_cache: &Entity<LruImageCache>,
+    context: Option<ProfileContext>,
+    settings: &Entity<Settings>,
+    panel: WeakEntity<MemberListPanel>,
 ) -> AnyElement {
     let mut avatar = Avatar::new()
         .name(member.name.clone())
@@ -351,7 +430,7 @@ fn render_member(
         theme.text_muted
     };
 
-    div()
+    let row_content = div()
         .flex()
         .flex_row()
         .items_center()
@@ -378,21 +457,72 @@ fn render_member(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_primary)
                 .child(member.name.clone()),
-        )
+        );
+
+    let user_id = member.user_id;
+    let rcm_id = member.rcm_id.clone();
+
+    let inner = match context {
+        Some(ctx) => {
+            profile_popover_menu(member.popover_id.clone(), user_id, ctx, settings.clone())
+                .anchor(Anchor::TopRight)
+                .attach(Anchor::TopLeft)
+                .trigger(
+                    ClickableContainer::new(member.trigger_id.clone())
+                        .flex()
+                        .flex_1()
+                        .cursor_pointer()
+                        .child(row_content),
+                )
+                .into_any_element()
+        }
+        None => row_content.into_any_element(),
+    };
+
+    let display_name = member.name.clone();
+    div()
+        .id(rcm_id)
+        .flex()
+        .flex_1()
+        .on_mouse_down(MouseButton::Right, {
+            let panel = panel.clone();
+            let display_name = display_name.clone();
+            move |event: &MouseDownEvent, _window, cx| {
+                let position = event.position;
+                if let Some(p) = panel.upgrade() {
+                    p.update(cx, |this, cx| {
+                        this.open_menu = Some((user_id, display_name.clone(), position));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .child(inner)
         .into_any_element()
 }
 
 impl Render for MemberListPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("MemberListPanel");
-        // Avatars use a plain byte-budget LRU (no per-frame viewport sweep):
-        // they are small, disk-cached, and reused, so sweeping them would force
-        // constant re-fetches (and re-trigger failed loads) on every re-render.
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let count = self.rows.get().len();
         let entity = cx.entity();
         let avatar_image_cache = self.avatar_image_cache.clone();
+        let context = self.active_context;
+        let settings = self.settings.clone();
+        let panel_weak = cx.entity().downgrade();
+        let menu_overlay = self.open_menu.as_ref().map(|(user_id, display_name, pos)| {
+            (
+                *user_id,
+                display_name.clone(),
+                *pos,
+                context,
+                settings.clone(),
+                locale.clone(),
+                panel_weak.clone(),
+            )
+        });
 
         let list = uniform_list("member-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -403,7 +533,14 @@ impl Render for MemberListPanel {
                     Some(Row::Header { kind, count }) => {
                         render_header(&theme, &locale, kind, *count)
                     }
-                    Some(Row::Member(member)) => render_member(&theme, member, &avatar_image_cache),
+                    Some(Row::Member(member)) => render_member(
+                        &theme,
+                        member,
+                        &avatar_image_cache,
+                        context,
+                        &settings,
+                        panel_weak.clone(),
+                    ),
                     None => div().into_any_element(),
                 })
                 .collect::<Vec<_>>()
@@ -423,5 +560,88 @@ impl Render for MemberListPanel {
             .border_l_1()
             .border_color(theme.border)
             .child(list)
+            .when_some(
+                menu_overlay,
+                |el, (_user_id, display_name, pos, ctx, settings, locale, panel)| {
+                    el.child(context_menu_at(
+                        pos,
+                        build_member_menu(display_name, ctx, settings, panel, &locale),
+                    ))
+                },
+            )
     }
+}
+
+fn toast_coming_soon(settings: Entity<Settings>) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        let locale = settings.read(cx).language.clone();
+        let msg = mezon_i18n::t(&locale, "common.comingSoon").to_string();
+        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+    }
+}
+
+fn build_member_menu(
+    display_name: SharedString,
+    context: Option<ProfileContext>,
+    settings: Entity<Settings>,
+    panel: WeakEntity<MemberListPanel>,
+    locale: &str,
+) -> ContextMenu {
+    let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
+    let is_clan = matches!(context, Some(ProfileContext::Clan(_)));
+
+    let dismiss = {
+        let panel = panel.clone();
+        move |_window: &mut Window, cx: &mut App| {
+            if let Some(p) = panel.upgrade() {
+                p.update(cx, |this, cx| {
+                    this.open_menu = None;
+                    cx.notify();
+                });
+            }
+        }
+    };
+
+    let remove_from_thread_label = mezon_i18n::t(locale, "contextMenu.member.removeFromThread")
+        .replace("{{username}}", display_name.as_ref());
+
+    let mut menu = ContextMenu::new()
+        .on_dismiss(dismiss)
+        .item(
+            t("contextMenu.member.profile"),
+            toast_coming_soon(settings.clone()),
+        )
+        .item(
+            t("contextMenu.member.message"),
+            toast_coming_soon(settings.clone()),
+        )
+        .item(
+            t("contextMenu.member.shareContact"),
+            toast_coming_soon(settings.clone()),
+        )
+        .item(
+            t("contextMenu.member.addFriend"),
+            toast_coming_soon(settings.clone()),
+        )
+        .separator()
+        .danger_item(
+            t("contextMenu.member.removeFriend"),
+            toast_coming_soon(settings.clone()),
+        );
+
+    if is_clan {
+        menu = menu
+            .separator()
+            .danger_item(
+                t("contextMenu.member.banChat"),
+                toast_coming_soon(settings.clone()),
+            )
+            .danger_item(
+                t("contextMenu.member.kick"),
+                toast_coming_soon(settings.clone()),
+            )
+            .danger_item(remove_from_thread_label, toast_coming_soon(settings));
+    }
+
+    menu
 }

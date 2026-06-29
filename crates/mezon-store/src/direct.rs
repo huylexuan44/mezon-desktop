@@ -1,10 +1,12 @@
 use crate::ids::{ChannelId, UserId};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiDirectChannel;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
+use crate::Freshness;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,12 +68,72 @@ pub enum DirectEvent {
 
 const DM_PAGE_SIZE: i32 = 500;
 
+#[derive(Default)]
+struct DirectChannelList {
+    channels: Vec<DirectChannel>,
+    by_id: HashMap<ChannelId, usize>,
+}
+
+impl DirectChannelList {
+    fn reindex(&mut self) {
+        self.by_id.clear();
+        self.by_id.reserve(self.channels.len());
+        for (i, c) in self.channels.iter().enumerate() {
+            self.by_id.insert(c.id, i);
+        }
+    }
+
+    fn as_slice(&self) -> &[DirectChannel] {
+        &self.channels
+    }
+
+    fn find(&self, id: ChannelId) -> Option<&DirectChannel> {
+        let idx = *self.by_id.get(&id)?;
+        self.channels.get(idx)
+    }
+
+    fn find_mut(&mut self, id: ChannelId) -> Option<&mut DirectChannel> {
+        let idx = *self.by_id.get(&id)?;
+        self.channels.get_mut(idx)
+    }
+
+    fn sort_by_recent(&mut self) {
+        sort_by_recent(&mut self.channels);
+        self.reindex();
+    }
+
+    fn replace(&mut self, channels: Vec<DirectChannel>) {
+        self.channels = channels;
+        self.sort_by_recent();
+    }
+
+    fn push_new(&mut self, channel: DirectChannel) -> bool {
+        if self.by_id.contains_key(&channel.id) {
+            return false;
+        }
+        self.channels.push(channel);
+        self.sort_by_recent();
+        true
+    }
+
+    fn extend_new(&mut self, channels: Vec<DirectChannel>) {
+        for channel in channels {
+            if !self.by_id.contains_key(&channel.id) {
+                self.by_id.insert(channel.id, self.channels.len());
+                self.channels.push(channel);
+            }
+        }
+        self.sort_by_recent();
+    }
+}
+
 /// Holds the user's direct-message / group conversations (clan_id = 0). Self-subscribes to the
 /// realtime broadcast (cf. `ChannelStore`): fetches the list on connect and keeps it ordered by
 /// most-recent activity.
 pub struct DirectMessageStore {
-    channels: Vec<DirectChannel>,
+    channels: DirectChannelList,
     loading: bool,
+    freshness: Freshness,
     has_more: bool,
     current_page: u32,
     api: Arc<AppApi>,
@@ -103,8 +165,9 @@ impl DirectMessageStore {
         Self::register_realtime(cx);
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
-            channels: Vec::new(),
+            channels: DirectChannelList::default(),
             loading: false,
+            freshness: Freshness::new(),
             has_more: true,
             current_page: 1,
             api,
@@ -119,12 +182,7 @@ impl DirectMessageStore {
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
-            for kind in [
-                RealtimeKind::ChannelMessage,
-                RealtimeKind::UserChannelAdded,
-                RealtimeKind::ChannelUpdated,
-                RealtimeKind::MarkAsRead,
-            ] {
+            for kind in [RealtimeKind::UserChannelAdded, RealtimeKind::ChannelUpdated] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
                 });
@@ -144,7 +202,13 @@ impl DirectMessageStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.fetch(cx)).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.freshness.mark_stale();
+                            this.fetch(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 } else if !connected {
@@ -155,21 +219,19 @@ impl DirectMessageStore {
     }
 
     pub fn channels(&self) -> &[DirectChannel] {
-        &self.channels
+        self.channels.as_slice()
     }
 
     pub fn find(&self, id: ChannelId) -> Option<&DirectChannel> {
-        self.channels.iter().find(|c| c.id == id)
+        self.channels.find(id)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
     }
 
-    /// Fetch the DM list lazily on navigation: refetches while the list is still empty (covers a
-    /// missed/failed connect-time fetch) but stops once we have data.
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.loading && self.channels.is_empty() {
+        if !self.loading && !self.freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch(cx);
         }
     }
@@ -190,12 +252,7 @@ impl DirectMessageStore {
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
                         let new_channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
-                        for ch in new_channels {
-                            if !this.channels.iter().any(|c| c.id == ch.id) {
-                                this.channels.push(ch);
-                            }
-                        }
-                        sort_by_recent(&mut this.channels);
+                        this.channels.extend_new(new_channels);
                         this.has_more = has_more;
                         this.current_page = next_page;
                         cx.emit(DirectEvent::Changed);
@@ -222,10 +279,10 @@ impl DirectMessageStore {
                     Ok(list) => {
                         tracing::info!("DirectMessageStore: fetched {} DM channels", list.len());
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
-                        let mut channels: Vec<DirectChannel> =
+                        let channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
-                        sort_by_recent(&mut channels);
-                        this.channels = channels;
+                        this.channels.replace(channels);
+                        this.freshness.mark_fetched();
                         this.has_more = has_more;
                         this.current_page = 1;
                         cx.emit(DirectEvent::Changed);
@@ -240,21 +297,9 @@ impl DirectMessageStore {
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
-            RealtimeEvent::ChannelMessage(m) => {
-                let id = ChannelId(m.channel_id);
-                let Some(pos) = self.channels.iter().position(|c| c.id == id) else {
-                    return;
-                };
-                if m.create_time_seconds > 0 {
-                    self.channels[pos].last_sent_timestamp = i64::from(m.create_time_seconds);
-                }
-                sort_by_recent(&mut self.channels);
-                cx.emit(DirectEvent::Changed);
-                cx.notify();
-            }
             RealtimeEvent::ChannelUpdated(e) => {
                 let id = ChannelId(e.channel_id);
-                let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) else {
+                let Some(ch) = self.channels.find_mut(id) else {
                     return;
                 };
                 if !e.channel_label.is_empty() {
@@ -266,16 +311,6 @@ impl DirectMessageStore {
                 cx.emit(DirectEvent::Changed);
                 cx.notify();
             }
-            RealtimeEvent::MarkAsRead(e) => {
-                let id = ChannelId(e.channel_id);
-                let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) else {
-                    return;
-                };
-                ch.unread_count = 0;
-                ch.last_seen_timestamp = ch.last_sent_timestamp;
-                cx.emit(DirectEvent::Changed);
-                cx.notify();
-            }
             RealtimeEvent::UserChannelAdded(e) => {
                 let Some(ref desc) = e.channel_desc else {
                     return;
@@ -284,18 +319,52 @@ impl DirectMessageStore {
                 if channel_type != 2 && channel_type != 3 {
                     return;
                 }
-                let channel_id = ChannelId(desc.channel_id);
-                if self.channels.iter().any(|c| c.id == channel_id) {
+                let api_ch = direct_from_channel_desc(desc);
+                if !self.channels.push_new(direct_from_api(api_ch)) {
                     return;
                 }
-                let api_ch = direct_from_channel_desc(desc);
-                self.channels.push(direct_from_api(api_ch));
-                sort_by_recent(&mut self.channels);
                 cx.emit(DirectEvent::Changed);
                 cx.notify();
             }
             _ => {}
         }
+    }
+
+    pub fn note_message(
+        &mut self,
+        channel_id: ChannelId,
+        ts: i64,
+        from_me: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(channel) = self.channels.find_mut(channel_id) else {
+            return false;
+        };
+        if ts > 0 {
+            channel.last_sent_timestamp = ts;
+        }
+        if from_me {
+            if ts > 0 {
+                channel.last_seen_timestamp = ts;
+            }
+        } else {
+            channel.unread_count = channel.unread_count.saturating_add(1);
+        }
+        self.channels.sort_by_recent();
+        cx.emit(DirectEvent::Changed);
+        cx.notify();
+        true
+    }
+
+    pub fn note_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) -> bool {
+        let Some(ch) = self.channels.find_mut(channel_id) else {
+            return false;
+        };
+        ch.unread_count = 0;
+        ch.last_seen_timestamp = ch.last_sent_timestamp;
+        cx.emit(DirectEvent::Changed);
+        cx.notify();
+        true
     }
 }
 
@@ -544,7 +613,7 @@ mod tests {
         })
     }
 
-    fn upsert_user_channel_added(channels: &mut Vec<DirectChannel>, event: &RealtimeEvent) {
+    fn upsert_user_channel_added(channels: &mut DirectChannelList, event: &RealtimeEvent) {
         let RealtimeEvent::UserChannelAdded(e) = event else {
             return;
         };
@@ -555,48 +624,89 @@ mod tests {
         if channel_type != 2 && channel_type != 3 {
             return;
         }
-        let channel_id = ChannelId(desc.channel_id);
-        if channels.iter().any(|c| c.id == channel_id) {
-            return;
-        }
         let api_ch = direct_from_channel_desc(desc);
-        channels.push(direct_from_api(api_ch));
-        sort_by_recent(channels);
+        channels.push_new(direct_from_api(api_ch));
+    }
+
+    fn list_from(channels: Vec<DirectChannel>) -> DirectChannelList {
+        let mut list = DirectChannelList::default();
+        list.replace(channels);
+        list
+    }
+
+    fn assert_index_consistent(list: &DirectChannelList) {
+        assert_eq!(list.by_id.len(), list.channels.len());
+        for (i, c) in list.channels.iter().enumerate() {
+            assert_eq!(list.by_id.get(&c.id), Some(&i));
+        }
     }
 
     #[test]
     fn user_channel_added_dm_inserts_new_channel() {
-        let mut channels: Vec<DirectChannel> = Vec::new();
+        let mut channels = DirectChannelList::default();
         let event = make_user_channel_added(99, 3);
         upsert_user_channel_added(&mut channels, &event);
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].id, ChannelId(99));
-        assert_eq!(channels[0].kind, DirectKind::Dm);
+        assert_eq!(channels.as_slice().len(), 1);
+        assert_eq!(channels.as_slice()[0].id, ChannelId(99));
+        assert_eq!(channels.as_slice()[0].kind, DirectKind::Dm);
+        assert!(channels.find(ChannelId(99)).is_some());
+        assert_index_consistent(&channels);
     }
 
     #[test]
     fn user_channel_added_group_inserts_new_channel() {
-        let mut channels: Vec<DirectChannel> = Vec::new();
+        let mut channels = DirectChannelList::default();
         let event = make_user_channel_added(42, 2);
         upsert_user_channel_added(&mut channels, &event);
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].id, ChannelId(42));
-        assert_eq!(channels[0].kind, DirectKind::Group);
+        assert_eq!(channels.as_slice().len(), 1);
+        assert_eq!(channels.as_slice()[0].id, ChannelId(42));
+        assert_eq!(channels.as_slice()[0].kind, DirectKind::Group);
     }
 
     #[test]
     fn user_channel_added_skips_duplicate() {
-        let mut channels = vec![direct_from_api(api_dm(99, "existing", 3))];
+        let mut channels = list_from(vec![direct_from_api(api_dm(99, "existing", 3))]);
         let event = make_user_channel_added(99, 3);
         upsert_user_channel_added(&mut channels, &event);
-        assert_eq!(channels.len(), 1);
+        assert_eq!(channels.as_slice().len(), 1);
+        assert_index_consistent(&channels);
     }
 
     #[test]
     fn user_channel_added_ignores_non_dm_types() {
-        let mut channels: Vec<DirectChannel> = Vec::new();
+        let mut channels = DirectChannelList::default();
         let event = make_user_channel_added(55, 1);
         upsert_user_channel_added(&mut channels, &event);
-        assert!(channels.is_empty());
+        assert!(channels.as_slice().is_empty());
+    }
+
+    #[test]
+    fn index_stays_consistent_after_sort_and_dedup() {
+        let mut list = list_from(vec![
+            DirectChannel {
+                last_sent_timestamp: 100,
+                ..direct_from_api(api_dm(1, "a", 3))
+            },
+            DirectChannel {
+                last_sent_timestamp: 300,
+                ..direct_from_api(api_dm(2, "b", 3))
+            },
+        ]);
+        assert_eq!(list.as_slice()[0].id, ChannelId(2));
+        assert_index_consistent(&list);
+        list.extend_new(vec![
+            DirectChannel {
+                last_sent_timestamp: 200,
+                ..direct_from_api(api_dm(3, "c", 3))
+            },
+            DirectChannel {
+                last_sent_timestamp: 999,
+                ..direct_from_api(api_dm(1, "dup", 3))
+            },
+        ]);
+        let ids: Vec<ChannelId> = list.as_slice().iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![ChannelId(2), ChannelId(3), ChannelId(1)]);
+        assert_index_consistent(&list);
+        assert_eq!(list.find(ChannelId(3)).unwrap().label, "c");
     }
 }

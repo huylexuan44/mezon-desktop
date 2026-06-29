@@ -15,6 +15,9 @@ documentation = "https://docs.rs/scap"
 keywords = ["screen", "recording", "video", "capture", "media"]
 categories = ["graphics", "multimedia", "multimedia::video"]
 
+[lints.rust]
+unexpected_cfgs = "allow"
+
 [features]
 default = ["wayland", "x11"]
 wayland = ["dep:pipewire", "dep:dbus"]

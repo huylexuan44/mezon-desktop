@@ -1,5 +1,3 @@
-#![allow(unexpected_cfgs)]
-
 use anyhow::{Context as _, Result};
 use cocoa::appkit::{NSApp, NSScreen};
 use cocoa::base::{id, nil};

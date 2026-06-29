@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
-use gpui::{Anchor, App, Window, div, prelude::*, px};
+use gpui::{
+    Anchor, App, Context, Entity, Render, SharedString, Subscription, WeakEntity, Window, div,
+    prelude::*, px,
+};
+use mezon_store::Settings;
 use ui::{ButtonLike, PopoverMenu, PopoverMenuHandle, Toggleable};
 
+use crate::app::window_controls;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::components::primitives::{Icon, IconName};
-use crate::theme::Theme;
+use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
 
@@ -95,7 +100,8 @@ impl ChannelHeader {
             .gap_2()
             .px_4()
             .py_2()
-            .h(px(50.))
+            .w_full()
+            .h(px(window_controls::APP_HEADER_HEIGHT))
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.bg_primary)
@@ -145,6 +151,7 @@ impl ChannelHeader {
                                     .rounded_md()
                                     .cursor_pointer()
                                     .hover(move |s| s.bg(bg_hover))
+                                    .occlude()
                                     .child(Icon::new(icon).size(px(20.)).text_color(tint));
                                 if active {
                                     button = button.bg(bg_active);
@@ -247,5 +254,99 @@ impl ChannelHeader {
                     ),
             )
             .into_any_element()
+    }
+}
+
+pub struct ChatHeader {
+    name: SharedString,
+    dm: bool,
+    members_action: bool,
+    members_active: bool,
+    show_inbox: bool,
+    inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+    clan_id: Option<String>,
+    locale: Option<String>,
+    layout: WeakEntity<crate::ChatLayout>,
+    settings: Entity<Settings>,
+    _settings_observe: Subscription,
+}
+
+impl ChatHeader {
+    pub fn new(
+        layout: WeakEntity<crate::ChatLayout>,
+        settings: &Entity<Settings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let _settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
+        Self {
+            name: SharedString::default(),
+            dm: false,
+            members_action: true,
+            members_active: false,
+            show_inbox: true,
+            inbox_handle: None,
+            clan_id: None,
+            locale: None,
+            layout,
+            settings: settings.clone(),
+            _settings_observe,
+        }
+    }
+
+    pub fn sync(
+        &mut self,
+        name: Option<SharedString>,
+        dm: bool,
+        members_action: bool,
+        members_active: bool,
+        show_inbox: bool,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        clan_id: Option<String>,
+        locale: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let name = name.unwrap_or_else(|| self.name.clone());
+        if self.name == name
+            && self.dm == dm
+            && self.members_action == members_action
+            && self.members_active == members_active
+            && self.show_inbox == show_inbox
+            && self.clan_id == clan_id
+            && self.locale == locale
+        {
+            return;
+        }
+        self.name = name;
+        self.dm = dm;
+        self.members_action = members_action;
+        self.members_active = members_active;
+        self.show_inbox = show_inbox;
+        self.inbox_handle = inbox_handle;
+        self.clan_id = clan_id;
+        self.locale = locale;
+        cx.notify();
+    }
+}
+
+impl Render for ChatHeader {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let layout = self.layout.clone();
+        let mut header = ChannelHeader::new(self.name.to_string())
+            .dm(self.dm)
+            .members_action(self.members_action)
+            .members_active(self.members_active)
+            .show_inbox(self.show_inbox)
+            .on_toggle_members(Arc::new(move |_window: &mut Window, cx: &mut App| {
+                let _ = layout.update(cx, |this, cx| this.toggle_member_list(cx));
+            }));
+        if let (Some(handle), Some(clan_id), Some(locale)) = (
+            self.inbox_handle.clone(),
+            self.clan_id.clone(),
+            self.locale.clone(),
+        ) {
+            header = header.inbox_popover(handle).inbox_context(clan_id, locale);
+        }
+        header.render(theme, window, cx).into_any_element()
     }
 }

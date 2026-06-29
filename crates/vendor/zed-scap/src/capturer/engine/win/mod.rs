@@ -11,7 +11,10 @@ use windows_capture::{
     frame::Frame as WCFrame,
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor as WCMonitor,
-    settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings as WCSettings},
+    settings::{
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings as WCSettings,
+    },
     window::Window as WCWindow,
 };
 
@@ -152,6 +155,9 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             WCMonitor::from_raw_hmonitor(display.raw_handle.0),
             show_cursor,
             DrawBorderSettings::Default,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
                 tx,
@@ -162,6 +168,9 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             WCWindow::from_raw_hwnd(window.raw_handle.0),
             show_cursor,
             DrawBorderSettings::Default,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
                 tx,

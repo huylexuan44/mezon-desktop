@@ -11,12 +11,9 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
-use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Switch, h_flex, v_flex,
-};
+use crate::chat::voice::ACCENT_BLUE;
+use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, h_flex, v_flex};
 use crate::theme::ActiveTheme;
-
-const ACCENT_BLUE: u32 = 0x5865f2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PreviewKey {
@@ -47,7 +44,6 @@ pub struct ScreenShareModal {
     loading: bool,
     load_error: Option<String>,
     selected: Option<SelectedTarget>,
-    share_audio: bool,
     load_started: bool,
 }
 
@@ -80,7 +76,6 @@ impl ScreenShareModal {
             loading: cached.is_none(),
             load_error: None,
             selected: None,
-            share_audio: false,
             load_started: false,
         }
     }
@@ -103,7 +98,7 @@ impl ScreenShareModal {
                 let _ = tx.send(list_screen_share_options());
             });
             let result = rx.recv_async().await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(options)) => {
                         this.options = options;
@@ -164,20 +159,28 @@ impl ScreenShareModal {
                 .name("mezon-screen-previews".into())
                 .spawn(move || {
                     for (kind, id) in targets {
-                        if let Some(preview) = capture_screen_share_preview(kind, id) {
-                            let _ = tx.send((kind, id, preview));
-                        }
+                        // Always report a result (including `None` on failure) so the
+                        // UI side can clear the in-flight request and allow a retry.
+                        let preview = capture_screen_share_preview(kind, id);
+                        let _ = tx.send((kind, id, preview));
                     }
                 })
                 .ok();
 
             while let Ok((kind, id, preview)) = rx.recv_async().await {
-                let Some(image) = preview_to_render_image(preview) else {
-                    continue;
-                };
                 let key = PreviewKey { kind, id };
-                let _ = this.update(cx, |this, cx| {
-                    this.previews.insert(key, image);
+                let image = preview.and_then(preview_to_render_image);
+                this.update(cx, |this, cx| {
+                    match image {
+                        Some(image) => {
+                            this.previews.insert(key, image);
+                        }
+                        None => {
+                            // Capture failed: drop the in-flight marker so this target
+                            // can be retried on a later render instead of being stuck.
+                            this.preview_requests.remove(&key);
+                        }
+                    }
                     cx.notify();
                 });
             }
@@ -227,7 +230,7 @@ impl ScreenShareModal {
         };
         self.options
             .iter()
-            .filter(|option| option_kind(option) == kind)
+            .filter(|option| option.kind == kind)
             .collect()
     }
 }
@@ -261,8 +264,6 @@ impl Render for ScreenShareModal {
         let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
         let window_tab: SharedString = mezon_i18n::t(&locale, "screenShare.window").into();
         let screen_tab: SharedString = mezon_i18n::t(&locale, "screenShare.entireScreen").into();
-        let share_audio_label: SharedString =
-            mezon_i18n::t(&locale, "screenShare.alsoShareSystemAudio").into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
         let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
         let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
@@ -387,7 +388,6 @@ impl Render for ScreenShareModal {
                                     &filtered,
                                     &self.previews,
                                     self.selected,
-                                    self.tab,
                                     accent,
                                     border,
                                     text_primary,
@@ -404,30 +404,14 @@ impl Render for ScreenShareModal {
                     .w_full()
                     .flex_none()
                     .items_center()
-                    .justify_between()
+                    .justify_end()
                     .px(px(20.))
                     .py(px(16.))
                     .border_t_1()
                     .border_color(border)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(
-                                Switch::new("screen-share-audio")
-                                    .checked(self.share_audio)
-                                    .on_click(cx.listener(|this, checked, _window, cx| {
-                                        this.share_audio = *checked;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(text_primary)
-                                    .child(share_audio_label),
-                            ),
-                    )
+                    // NOTE: the "also share system audio" toggle is intentionally hidden
+                    // until audio capture is wired into the screen-share engine. Re-add the
+                    // Switch here (and a `share_audio` field) once it is supported.
                     .child(
                         h_flex()
                             .gap(px(8.))
@@ -480,11 +464,11 @@ fn tab_button(
         .child(label)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn target_grid(
     options: &[&ScreenShareOption],
     previews: &HashMap<PreviewKey, Arc<RenderImage>>,
     selected: Option<SelectedTarget>,
-    tab: ShareTab,
     accent: gpui::Hsla,
     border: gpui::Hsla,
     text_primary: gpui::Hsla,
@@ -498,7 +482,7 @@ fn target_grid(
         .gap(px(12.))
         .pb(px(4.))
         .children(options.iter().enumerate().map(|(index, option)| {
-            let kind = option_kind(option);
+            let kind = option.kind;
             let preview_key = PreviewKey {
                 kind,
                 id: option.id,
@@ -538,7 +522,7 @@ fn target_grid(
                         .when_some(preview, |tile, image| {
                             tile.child(img(image).size_full().object_fit(ObjectFit::Cover))
                         })
-                        .when(!has_preview, |tile| tile.child(tile_icon(tab, text_muted))),
+                        .when(!has_preview, |tile| tile.child(tile_icon(text_muted))),
                 )
                 .child(
                     div()
@@ -551,12 +535,10 @@ fn target_grid(
         }))
 }
 
-fn tile_icon(tab: ShareTab, color: gpui::Hsla) -> impl IntoElement {
-    let icon = match tab {
-        ShareTab::Window => IconName::VoiceScreenShareIcon,
-        ShareTab::EntireScreen => IconName::VoiceScreenShareIcon,
-    };
-    Icon::new(icon).size(px(40.)).text_color(color)
+fn tile_icon(color: gpui::Hsla) -> impl IntoElement {
+    Icon::new(IconName::VoiceScreenShareIcon)
+        .size(px(40.))
+        .text_color(color)
 }
 
 pub fn open_screen_share_modal(

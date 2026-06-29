@@ -19,13 +19,15 @@ pub struct UserInfoBar {
 impl UserInfoBar {
     pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&PresenceStore::global(cx), |this, _, cx| {
-            this.sync_presence(cx);
-            cx.notify();
+            if this.sync_presence(cx) {
+                cx.notify();
+            }
         })
         .detach();
         cx.observe(&auth_state, |this, _, cx| {
-            this.sync_presence(cx);
-            cx.notify();
+            if this.sync_presence(cx) {
+                cx.notify();
+            }
         })
         .detach();
         let username = Self::read_username(&auth_state, cx);
@@ -45,7 +47,9 @@ impl UserInfoBar {
         }
     }
 
-    pub fn sync_presence(&mut self, cx: &App) {
+    pub fn sync_presence(&mut self, cx: &App) -> bool {
+        let prev_username = self.username.clone();
+        let prev_presence = self.presence.clone();
         let user_id = match self.auth_state.read(cx) {
             AuthState::Authenticated(session) => {
                 self.username = SharedString::from(session.username.clone());
@@ -54,7 +58,7 @@ impl UserInfoBar {
             _ => {
                 self.username = SharedString::from("Unknown");
                 self.presence = SharedString::from("Offline");
-                return;
+                return self.username != prev_username || self.presence != prev_presence;
             }
         };
         let online = PresenceStore::global(cx)
@@ -62,6 +66,7 @@ impl UserInfoBar {
             .user_online
             .contains(&user_id.parse().unwrap_or_default());
         self.presence = SharedString::from(if online { "Online" } else { "Offline" });
+        self.username != prev_username || self.presence != prev_presence
     }
 }
 

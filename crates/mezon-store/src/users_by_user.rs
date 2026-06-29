@@ -5,6 +5,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
+use crate::Freshness;
 use crate::clan_members::{User, user_from_api};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -16,7 +17,7 @@ pub enum UsersByUserEvent {
 pub struct UsersByUserStore {
     by_id: HashMap<UserId, User>,
     loading: bool,
-    loaded: bool,
+    freshness: Freshness,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -48,7 +49,7 @@ impl UsersByUserStore {
         Self {
             by_id: HashMap::new(),
             loading: false,
-            loaded: false,
+            freshness: Freshness::new(),
             api,
             _conn_watch: conn_watch,
         }
@@ -75,7 +76,7 @@ impl UsersByUserStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.fetch(cx)).is_err() {
+                    if this.update(cx, |this, _| this.invalidate()).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -94,13 +95,17 @@ impl UsersByUserStore {
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
-        if !self.loaded && !self.loading {
+        if !self.freshness.is_fresh(crate::CACHE_TTL) && !self.loading {
             self.fetch(cx);
         }
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
+    }
+
+    fn invalidate(&mut self) {
+        self.freshness.mark_stale();
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -115,7 +120,7 @@ impl UsersByUserStore {
                 this.loading = false;
                 match result {
                     Ok(users) => {
-                        this.loaded = true;
+                        this.freshness.mark_fetched();
                         for user in users {
                             if let Some(user) = user_from_api(user) {
                                 this.by_id.insert(user.id, user);

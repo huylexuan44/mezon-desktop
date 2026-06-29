@@ -8,6 +8,7 @@ pub mod image_disk_cache;
 pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
+pub mod network_probe;
 pub mod session;
 pub mod tls_crypto;
 pub mod transport;
@@ -15,7 +16,7 @@ pub mod transport_adapter;
 pub mod transport_runtime;
 
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
-pub use app_api::{AppApi, ConnectionStatus};
+pub use app_api::{AppApi, ConnectionStatus, UploadFile, UrlAttachment};
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
@@ -27,6 +28,9 @@ pub use inbox::{
     topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
+pub use network_probe::{
+    RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
+};
 pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
@@ -34,7 +38,21 @@ pub use transport::{ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiVoiceChan
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;
 
-/// Default WebSocket host (used for Stage 2+ WebSocket connection).
+/// Default realtime socket host (`ws_url` when the server omits one).
 pub const DEFAULT_WS_HOST: &str = "sock.mezon.ai";
-pub const DEFAULT_WS_PORT: u16 = 443;
+/// TLS port for bare-hostname prod endpoints (not shown in logs — see [`socket_connect_label`]).
+pub const DEFAULT_WS_TLS_PORT: u16 = 443;
 pub const DEFAULT_WS_SECURE: bool = true;
+
+/// Log/UX label for a realtime connect target (prod: hostname only, dev: `host:7349`).
+pub fn socket_connect_label(host: &str, explicit_port: Option<u16>) -> String {
+    match explicit_port {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
+}
+
+/// TCP/TLS port for the underlying socket (443 when the endpoint is hostname-only).
+pub fn resolve_connect_port(explicit_port: Option<u16>) -> u16 {
+    explicit_port.unwrap_or(DEFAULT_WS_TLS_PORT)
+}

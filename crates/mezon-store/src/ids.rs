@@ -107,6 +107,21 @@ define_id!(ClanId);
 define_id!(ChannelId);
 define_id!(UserId);
 define_id!(RoleId);
+define_id!(MessageId);
+
+impl MessageId {
+    const OPTIMISTIC_BASE: i64 = i64::MAX - (1_i64 << 40);
+
+    pub fn is_optimistic(self) -> bool {
+        self.0 >= Self::OPTIMISTIC_BASE
+    }
+
+    pub fn next_optimistic() -> Self {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static COUNTER: AtomicI64 = AtomicI64::new(MessageId::OPTIMISTIC_BASE);
+        MessageId(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 #[cfg(test)]
 mod tests {

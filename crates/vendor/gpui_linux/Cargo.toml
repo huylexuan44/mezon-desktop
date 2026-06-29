@@ -27,6 +27,7 @@ wayland = [
     "xkbcommon",
     "open",
     "gpui/wayland",
+    "scap?/wayland",
 ]
 x11 = [
     "gpui_wgpu",

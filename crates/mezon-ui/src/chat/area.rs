@@ -1,36 +1,42 @@
 use std::sync::Arc;
 
-use crate::components::primitives::{InputEvent, InputState};
 use gpui::{
     AnyView, App, Context, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px,
 };
-use mezon_store::Settings;
+use mezon_store::{ChannelId, Settings};
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
-use crate::chat::channel_header::ChannelHeader;
+use crate::chat::channel_header::ChatHeader;
+use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
-use crate::chat::message_list::MessageTimeline;
-use crate::theme::Theme;
+use crate::chat::message::ChannelMessages;
+use crate::components::primitives::{InputEvent, InputState};
+use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
-    pub(crate) timeline: Entity<MessageTimeline>,
+    pub(crate) timeline: Entity<ChannelMessages>,
     pub(crate) input_state: Option<Entity<InputState>>,
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
     settings: Entity<Settings>,
+    header: Entity<ChatHeader>,
+    typing: Entity<ChannelTyping>,
 }
 
 impl ChatArea {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<crate::ChatLayout>) -> Self {
         let timeline = cx.new({
             let settings = settings.clone();
-            move |cx| MessageTimeline::new(settings, cx)
+            move |cx| ChannelMessages::new(settings, cx)
         });
+        let layout = cx.weak_entity();
+        let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
+        let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
         Self {
             timeline,
             input_state: None,
@@ -38,6 +44,8 @@ impl ChatArea {
             member_source: None,
             replying_to: None,
             settings,
+            header,
+            typing,
         }
     }
 
@@ -91,18 +99,16 @@ impl ChatArea {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
-        theme: &Theme,
         locale: &str,
-        layout_entity: Entity<crate::ChatLayout>,
-        channel_name: &str,
+        channel_name: Option<&str>,
         is_dm: bool,
+        channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
-        typing_label: Option<SharedString>,
-        clan_id: Option<&str>,
+        show_inbox: bool,
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
-        window: &mut Window,
-        cx: &App,
+        clan_id: Option<String>,
+        cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
             Some(s) => s,
@@ -116,6 +122,26 @@ impl ChatArea {
             }
         };
 
+        self.header.update(cx, |header, cx| {
+            header.sync(
+                channel_name.map(SharedString::from),
+                is_dm,
+                show_members_button,
+                show_member_panel,
+                show_inbox,
+                inbox_handle,
+                clan_id,
+                Some(locale.to_string()),
+                cx,
+            );
+        });
+
+        self.typing
+            .update(cx, |typing, cx| typing.sync(channel_id, cx));
+
+        let layout_entity = cx.entity();
+        let theme = cx.theme();
+
         let on_send = {
             let handle = layout_entity.clone();
             Arc::new(move |window: &mut Window, cx: &mut App| {
@@ -123,26 +149,14 @@ impl ChatArea {
             })
         };
 
-        let input_bar = InputBar::new()
-            .with_input(input_state)
-            .on_send(on_send)
-            .typing_label(typing_label);
+        let input_bar = InputBar::new().with_input(input_state).on_send(on_send);
 
-        let mut header = ChannelHeader::new(channel_name)
-            .dm(is_dm)
-            .show_inbox(!is_dm)
-            .members_action(show_members_button)
-            .members_active(show_member_panel)
-            .on_toggle_members({
-                let handle = layout_entity.clone();
-                Arc::new(move |_window: &mut Window, cx: &mut App| {
-                    handle.update(cx, |this, cx| this.toggle_member_list(cx));
-                })
-            });
-
-        if let (Some(clan_id), Some(handle)) = (clan_id, inbox_handle) {
-            header = header.inbox_popover(handle).inbox_context(clan_id, locale);
-        }
+        let header = AnyView::from(self.header.clone()).cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(px(crate::app::window_controls::APP_HEADER_HEIGHT))
+                .flex_shrink_0(),
+        );
 
         let message_column = div()
             .flex()
@@ -151,14 +165,9 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .child(div().flex_1().min_h_0().child(
-                // Cache the message list so an unrelated sibling/parent notify
-                // (presence in the member panel, typing indicator, user info
-                // bar, theme change…) does not force a full re-layout of every
-                // row. It self-invalidates whenever the timeline itself
-                // notifies (scroll, new message, GIF animation), so behaviour
-                // is unchanged — only redundant re-renders are skipped.
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
+            .child(self.typing.clone())
             .child(input_bar.render(theme, locale));
 
         let body = div()
@@ -168,12 +177,6 @@ impl ChatArea {
             .min_h_0()
             .child(message_column)
             .when(show_member_panel, |row| match &self.member_panel {
-                // Cache the member panel so it is not re-rendered (and its avatars
-                // re-painted) every frame the message timeline notifies during
-                // scroll/load-more. GPUI marks the whole ancestor chain of a
-                // notified view dirty, so the timeline's churn forces chat_layout
-                // to re-render its subtree; caching keeps the panel reused unless
-                // the panel itself is notified (member/presence change or scroll).
                 Some(panel) => row.child(
                     AnyView::from(panel.clone()).cached(
                         StyleRefinement::default()
@@ -182,7 +185,7 @@ impl ChatArea {
                             .flex_shrink_0(),
                     ),
                 ),
-                None => row,
+                None => row.child(div().w(px(245.)).h_full().flex_shrink_0()),
             });
 
         div()
@@ -191,9 +194,7 @@ impl ChatArea {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .w_full()
-            .overflow_hidden()
-            .child(header.render(theme, window, cx))
+            .child(header)
             .child(body)
             .into_any_element()
     }

@@ -892,9 +892,21 @@ impl WindowsWindowInner {
             return None;
         }
 
+        let scale_factor = self.state.scale_factor.get();
+        let mut cursor_point = POINT {
+            x: lparam.signed_loword().into(),
+            y: lparam.signed_hiword().into(),
+        };
+        unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
+        let position = logical_point(
+            cursor_point.x as f32,
+            cursor_point.y as f32,
+            scale_factor,
+        );
+
         let callback = self.state.callbacks.hit_test_window_control.take();
-        let drag_area = if let Some(mut callback) = callback {
-            let area = callback();
+        let mut drag_area = if let Some(mut callback) = callback {
+            let area = callback(position);
             self.state
                 .callbacks
                 .hit_test_window_control
@@ -923,31 +935,21 @@ impl WindowsWindowInner {
         // We need to calculate the frame thickness ourselves and do the hit test manually.
         let frame_y = get_frame_thicknessx(dpi);
         let frame_x = get_frame_thicknessy(dpi);
-        let mut cursor_point = POINT {
-            x: lparam.signed_loword().into(),
-            y: lparam.signed_hiword().into(),
-        };
 
-        unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
-        if !self.state.is_maximized() && 0 <= cursor_point.y && cursor_point.y <= frame_y {
-            // x-axis actually goes from -frame_x to 0
-            return Some(if cursor_point.x <= 0 {
-                HTTOPLEFT
-            } else {
-                let mut rect = Default::default();
-                unsafe { GetWindowRect(handle, &mut rect) }.log_err();
-                // right and bottom bounds of RECT are exclusive, thus `-1`
-                let right = rect.right - rect.left - 1;
-                // the bounds include the padding frames, so accommodate for both of them
-                if right - 2 * frame_x <= cursor_point.x {
-                    HTTOPRIGHT
-                } else {
-                    HTTOP
-                }
-            } as _);
+        if !self.state.is_maximized()
+            && let Some(edge) = hit_test_resize_edge(handle, cursor_point, frame_x, frame_y)
+        {
+            return Some(edge as _);
         }
 
-        drag_area
+        if drag_area.is_none()
+            && let Some(code) =
+                hit_test_custom_titlebar_controls(cursor_point, scale_factor, self.state.logical_size.get())
+        {
+            drag_area = Some(code as _);
+        }
+
+        drag_area.or(Some(HTCLIENT as _))
     }
 
     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
@@ -1643,10 +1645,68 @@ pub(crate) fn current_capslock() -> Capslock {
     Capslock { on }
 }
 
-// there is some additional non-visible space when talking about window
-// borders on Windows:
-// - SM_CXSIZEFRAME: The resize handle.
-// - SM_CXPADDEDBORDER: Additional border space that isn't part of the resize handle.
+fn hit_test_custom_titlebar_controls(
+    cursor_point: POINT,
+    scale_factor: f32,
+    logical_size: Size<Pixels>,
+) -> Option<u32> {
+    const CUSTOM_TITLE_BAR_HEIGHT: f32 = 32.0;
+    const CUSTOM_CONTROL_BUTTON_SIZE: f32 = 28.0;
+    const CUSTOM_CONTROL_GAP: f32 = 4.0;
+    const CUSTOM_CONTROL_ROW_PADDING: f32 = 8.0;
+    let x = cursor_point.x as f32 / scale_factor;
+    let y = cursor_point.y as f32 / scale_factor;
+
+    if !(0.0..=CUSTOM_TITLE_BAR_HEIGHT).contains(&y) {
+        return None;
+    }
+
+    let width = logical_size.width.as_f32();
+    let controls_width = CUSTOM_CONTROL_ROW_PADDING * 2.0
+        + CUSTOM_CONTROL_BUTTON_SIZE * 3.0
+        + CUSTOM_CONTROL_GAP * 2.0;
+    let controls_left = width - controls_width;
+
+    if x >= controls_left {
+        let mut rel = x - controls_left - CUSTOM_CONTROL_ROW_PADDING;
+        for code in [HTMINBUTTON, HTMAXBUTTON, HTCLOSE] {
+            if rel < CUSTOM_CONTROL_BUTTON_SIZE {
+                return Some(code);
+            }
+            rel -= CUSTOM_CONTROL_BUTTON_SIZE + CUSTOM_CONTROL_GAP;
+        }
+        return Some(HTCLOSE);
+    }
+
+    Some(HTCAPTION)
+}
+
+fn hit_test_resize_edge(handle: HWND, cursor_point: POINT, frame_x: i32, frame_y: i32) -> Option<u32> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(handle, &mut rect) }.log_err();
+    let right = rect.right - rect.left - 1;
+    let bottom = rect.bottom - rect.top - 1;
+
+    let x = cursor_point.x;
+    let y = cursor_point.y;
+    let on_left = x <= 0;
+    let on_right = right - 2 * frame_x <= x;
+    let on_top = 0 <= y && y <= frame_y;
+    let on_bottom = bottom - 2 * frame_y <= y;
+
+    match (on_left, on_right, on_top, on_bottom) {
+        (true, _, true, _) => Some(HTTOPLEFT),
+        (_, true, true, _) => Some(HTTOPRIGHT),
+        (true, _, _, true) => Some(HTBOTTOMLEFT),
+        (_, true, _, true) => Some(HTBOTTOMRIGHT),
+        (true, false, false, false) => Some(HTLEFT),
+        (false, true, false, false) => Some(HTRIGHT),
+        (false, false, true, false) => Some(HTTOP),
+        (false, false, false, true) => Some(HTBOTTOM),
+        _ => None,
+    }
+}
+
 fn get_frame_thicknessx(dpi: u32) -> i32 {
     let resize_frame_thickness = unsafe { GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) };
     let padding_thickness = unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };

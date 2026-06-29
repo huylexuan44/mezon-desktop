@@ -1,22 +1,36 @@
-use crate::components::primitives::{Icon, IconName};
+use crate::app::window_controls;
 use crate::theme::ActiveTheme;
-use gpui::{Context, Entity, MouseButton, Window, div, prelude::*, rgb};
+use gpui::{
+    Context, Entity, FontWeight, MouseButton, Subscription, Window, WindowControlArea, div,
+    prelude::*,
+};
 use mezon_store::Settings;
 
-/// Custom frameless title bar.
-pub struct TitleBar {}
+pub struct TitleBar {
+    _bounds_observer: Option<Subscription>,
+}
 
 impl TitleBar {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        Self {}
+        Self {
+            _bounds_observer: None,
+        }
+    }
+
+    fn ensure_bounds_observer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self._bounds_observer.is_some() {
+            return;
+        }
+
+        self._bounds_observer = Some(cx.observe_window_bounds(window, |_, _, cx| cx.notify()));
     }
 }
 
 impl Render for TitleBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_bounds_observer(window, cx);
         let theme = cx.theme();
-        let bg_hover = theme.bg_hover;
 
         div()
             .flex()
@@ -25,80 +39,34 @@ impl Render for TitleBar {
             .w_full()
             .h_8()
             .bg(theme.title_bar_bg)
-            // Drag region — move window by dragging the title bar
-            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                window.start_window_move();
-            })
-            .child(div().flex_1())
-            // Window controls (Windows/Linux only — macOS hides traffic lights)
-            .when(cfg!(not(target_os = "macos")), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .h_full()
-                        .child(
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .h_full()
+                    .when(cfg!(target_os = "windows"), |bar| {
+                        bar.window_control_area(WindowControlArea::Drag)
+                    })
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        bar.on_mouse_down(MouseButton::Left, |event, window, _| {
+                            if event.click_count >= 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        })
+                    })
+                    .child(
+                        div().flex().items_center().px_3().child(
                             div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w_11()
-                                .h_full()
                                 .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_secondary)
-                                .hover(move |s| s.bg(bg_hover))
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                                    window.minimize_window();
-                                })
-                                .child(
-                                    Icon::new(IconName::WindowMinimize)
-                                        .size_4()
-                                        .text_color(theme.text_secondary),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w_11()
-                                .h_full()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .hover(move |s| s.bg(bg_hover))
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                                    window.zoom_window();
-                                })
-                                .child(
-                                    Icon::new(IconName::WindowZoom)
-                                        .size_4()
-                                        .text_color(theme.text_secondary),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w_11()
-                                .h_full()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .hover(|s| s.bg(rgb(0xc42b1c)))
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                                    window.remove_window();
-                                })
-                                .child(
-                                    Icon::new(IconName::Close)
-                                        .size_4()
-                                        .text_color(theme.text_secondary),
-                                ),
+                                .child(window_controls::APP_NAME),
                         ),
-                )
-            })
+                    ),
+            )
+            .child(window_controls::render_controls(theme, window))
     }
 }

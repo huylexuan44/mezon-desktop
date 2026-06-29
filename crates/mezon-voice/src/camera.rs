@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use livekit::track::LocalVideoTrack;
 use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
@@ -33,12 +33,15 @@ impl CameraStopper {
 pub fn start_camera(
     identity: String,
     frame_store: Arc<VideoFrameStore>,
-) -> (CameraStopper, flume::Receiver<Result<LocalVideoTrack, String>>) {
+) -> (
+    CameraStopper,
+    flume::Receiver<Result<LocalVideoTrack, String>>,
+) {
     let stop = Arc::new(AtomicBool::new(false));
     let (track_tx, track_rx) = flume::bounded(1);
 
     let thread_stop = stop.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("mezon-camera".into())
         .spawn(move || {
             let _guard = crate::runtime::handle().enter();
@@ -75,6 +78,9 @@ pub fn start_camera(
 
             let mut preview = Vec::with_capacity((width * height * 4) as usize);
 
+            let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
+            let mut last_capture: Option<Instant> = None;
+
             while !thread_stop.load(Ordering::Relaxed) {
                 let buffer = match camera.frame() {
                     Ok(buffer) => buffer,
@@ -83,6 +89,12 @@ pub fn start_camera(
                         continue;
                     }
                 };
+                if let Some(last) = last_capture
+                    && last.elapsed() < frame_interval
+                {
+                    continue;
+                }
+                last_capture = Some(Instant::now());
                 let dw = (buffer.resolution().width() & !1).max(2);
                 let dh = (buffer.resolution().height() & !1).max(2);
 
@@ -156,8 +168,10 @@ pub fn start_camera(
 
             frame_store.remove(local_camera_key(&identity));
             tracing::info!("camera capture stopped");
-        })
-        .expect("spawn camera thread");
+        });
+    if let Err(e) = spawned {
+        tracing::error!("failed to spawn camera capture thread: {e}");
+    }
 
     (CameraStopper { stop }, track_rx)
 }
@@ -227,8 +241,8 @@ fn camera_indices() -> Vec<CameraIndex> {
 }
 
 fn try_open_camera(index: &CameraIndex, requested: RequestedFormat<'_>) -> Result<Camera, String> {
-    let mut camera = Camera::new(index.clone(), requested)
-        .map_err(|e| format!("open camera: {e}"))?;
+    let mut camera =
+        Camera::new(index.clone(), requested).map_err(|e| format!("open camera: {e}"))?;
     camera
         .open_stream()
         .map_err(|e| format!("open camera stream: {e}"))?;

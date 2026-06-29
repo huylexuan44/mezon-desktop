@@ -12,17 +12,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use futures::StreamExt;
-use livekit::options::TrackPublishOptions;
+use livekit::options::{TrackPublishOptions, VideoEncoding};
 use livekit::prelude::*;
 use livekit::track::{
     LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteVideoTrack, TrackKind, TrackSource,
 };
 use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit::webrtc::peer_connection_factory::IceServer;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource, VideoBuffer};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 
 pub use audio::AudioFormat;
+
+pub fn microphone_denied() -> bool {
+    audio::microphone_denied()
+}
 pub use screen_picker::PickedScreen;
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
@@ -33,9 +38,14 @@ pub use video::{VideoFrameData, VideoFrameStore};
 
 use crate::camera::CameraStopper;
 use crate::screen::ScreenStopper;
-use crate::video::{
-    i420_to_bgra, local_camera_key, local_screen_key, track_frame_key,
-};
+use crate::video::{i420_to_bgra_into, local_camera_key, local_screen_key, track_frame_key};
+
+#[derive(Clone, Debug, Default)]
+pub struct IceServerConfig {
+    pub urls: Vec<String>,
+    pub username: String,
+    pub credential: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoiceParticipant {
@@ -80,6 +90,7 @@ impl VoiceSession {
         token: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        ice_servers: Vec<IceServerConfig>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = flume::unbounded();
         let (evt_tx, evt_rx) = flume::unbounded();
@@ -92,6 +103,7 @@ impl VoiceSession {
                 token,
                 input_device_id,
                 output_device_id,
+                ice_servers,
                 cmd_rx,
                 &evt_tx,
                 store,
@@ -154,18 +166,35 @@ struct ScreenSession {
     stopper: ScreenStopper,
 }
 
+fn room_options(ice_servers: Vec<IceServerConfig>) -> RoomOptions {
+    let ice_servers: Vec<IceServer> = ice_servers
+        .into_iter()
+        .filter(|s| !s.urls.is_empty())
+        .map(|s| IceServer {
+            urls: s.urls,
+            username: s.username,
+            password: s.credential,
+        })
+        .collect();
+
+    let mut options = RoomOptions::default();
+    options.rtc_config.ice_servers = ice_servers;
+    options
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn session_main(
     url: String,
     token: String,
     input_device_id: Option<String>,
     output_device_id: Option<String>,
+    ice_servers: Vec<IceServerConfig>,
     cmd_rx: flume::Receiver<Command>,
     evt_tx: &flume::Sender<VoiceEvent>,
     frame_store: Arc<VideoFrameStore>,
 ) -> Result<()> {
-    let (room, mut room_events) =
-        Room::connect(&url, &token, RoomOptions::default()).await?;
+    let options = room_options(ice_servers);
+    let (room, mut room_events) = Room::connect(&url, &token, options).await?;
     let room = Arc::new(room);
     tracing::info!("voice connected to room: {}", room.name());
     let local_identity = room.local_participant().identity().as_str().to_string();
@@ -174,6 +203,7 @@ async fn session_main(
     let mic_enabled = Arc::new(AtomicBool::new(false));
     let mut audio_mixer = None;
     let mut out_fmt = None;
+    let mut audio_io: Option<audio::AudioIo> = None;
 
     let audio = tokio::task::spawn_blocking(move || {
         audio::AudioIo::start(input_device_id, output_device_id)
@@ -228,9 +258,13 @@ async fn session_main(
 
             audio_mixer = Some(audio.mixer.clone());
             out_fmt = Some(audio.output_format);
+            audio_io = Some(audio);
         }
         Err(e) => {
-            let _ = evt_tx.send(VoiceEvent::Error(format!("audio: {e}")));
+            tracing::error!("voice audio unavailable: {e:#}");
+            let _ = evt_tx.send(VoiceEvent::Error(format!(
+                "audio unavailable (no microphone or playback): {e}"
+            )));
         }
     }
 
@@ -238,19 +272,17 @@ async fn session_main(
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
 
-    let emit = |room: &Room,
-                mic: bool,
-                camera: &Option<CameraSession>,
-                screen: &Option<ScreenSession>| {
-        emit_participants(
-            room,
-            evt_tx,
-            &local_identity,
-            mic,
-            camera.is_some(),
-            screen.is_some(),
-        );
-    };
+    let emit =
+        |room: &Room, mic: bool, camera: &Option<CameraSession>, screen: &Option<ScreenSession>| {
+            emit_participants(
+                room,
+                evt_tx,
+                &local_identity,
+                mic,
+                camera.is_some(),
+                screen.is_some(),
+            );
+        };
     emit(&room, mic_on, &camera_session, &screen_session);
 
     loop {
@@ -281,15 +313,15 @@ async fn session_main(
                         frame_store.remove(key);
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
-                    RoomEvent::ConnectionQualityChanged { quality, participant } => {
-                        if participant.identity().as_str() == local_identity {
-                            match quality {
-                                ConnectionQuality::Excellent | ConnectionQuality::Good => {
-                                    let _ = evt_tx.send(VoiceEvent::NetworkRecovered);
-                                }
-                                ConnectionQuality::Poor | ConnectionQuality::Lost => {
-                                    let _ = evt_tx.send(VoiceEvent::NetworkWeak);
-                                }
+                    RoomEvent::ConnectionQualityChanged { quality, participant }
+                        if participant.identity().as_str() == local_identity =>
+                    {
+                        match quality {
+                            ConnectionQuality::Excellent | ConnectionQuality::Good => {
+                                let _ = evt_tx.send(VoiceEvent::NetworkRecovered);
+                            }
+                            ConnectionQuality::Poor | ConnectionQuality::Lost => {
+                                let _ = evt_tx.send(VoiceEvent::NetworkWeak);
                             }
                         }
                     }
@@ -303,9 +335,19 @@ async fn session_main(
                         let _ = evt_tx.send(VoiceEvent::Disconnected { reason: format!("{reason:?}") });
                         break;
                     }
-                    _ => {
+                    RoomEvent::ParticipantConnected(..)
+                    | RoomEvent::ParticipantActive(..)
+                    | RoomEvent::ParticipantDisconnected(..)
+                    | RoomEvent::TrackPublished { .. }
+                    | RoomEvent::TrackUnpublished { .. }
+                    | RoomEvent::TrackMuted { .. }
+                    | RoomEvent::TrackUnmuted { .. }
+                    | RoomEvent::ActiveSpeakersChanged { .. }
+                    | RoomEvent::ParticipantNameChanged { .. }
+                    | RoomEvent::ParticipantsUpdated { .. } => {
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
+                    _ => {}
                 }
             }
             command = cmd_rx.recv_async() => {
@@ -313,6 +355,9 @@ async fn session_main(
                     Ok(Command::SetMicEnabled(enabled)) => {
                         mic_on = enabled;
                         mic_enabled.store(enabled, Ordering::Relaxed);
+                        if let Some(io) = &audio_io {
+                            io.set_input_active(enabled);
+                        }
                         emit(&room, mic_on, &camera_session, &screen_session);
                     }
                     Ok(Command::SetCameraEnabled(true)) => {
@@ -397,6 +442,7 @@ async fn start_camera_track(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Camera,
+                simulcast: false,
                 ..Default::default()
             },
         )
@@ -421,6 +467,11 @@ async fn start_screen_track(
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
+                simulcast: false,
+                video_encoding: Some(VideoEncoding {
+                    max_bitrate: 4_000_000,
+                    max_framerate: 15.0,
+                }),
                 ..Default::default()
             },
         )
@@ -436,8 +487,11 @@ fn spawn_playback(
 ) {
     let rtc_track = track.rtc_track();
     runtime::runtime().spawn(async move {
-        let mut stream =
-            NativeAudioStream::new(rtc_track, out_fmt.sample_rate as i32, out_fmt.channels as i32);
+        let mut stream = NativeAudioStream::new(
+            rtc_track,
+            out_fmt.sample_rate as i32,
+            out_fmt.channels as i32,
+        );
         while let Some(frame) = stream.next().await {
             mixer.push(key, &frame.data);
         }
@@ -449,16 +503,27 @@ fn spawn_video(track: RemoteVideoTrack, key: u64, frame_store: Arc<VideoFrameSto
     let rtc_track = track.rtc_track();
     runtime::runtime().spawn(async move {
         let mut stream = NativeVideoStream::new(rtc_track);
+        let mut bgra: Vec<u8> = Vec::new();
         while let Some(frame) = stream.next().await {
             let buffer = frame.buffer.to_i420();
             let width = buffer.width();
             let height = buffer.height();
             let (sy, su, sv) = buffer.strides();
             let (y, u, v) = buffer.data();
-            let bgra = i420_to_bgra(
-                y, u, v, sy as usize, su as usize, sv as usize, width as usize, height as usize,
+            bgra.clear();
+            bgra.resize(width as usize * height as usize * 4, 0);
+            i420_to_bgra_into(
+                &mut bgra,
+                y,
+                u,
+                v,
+                sy as usize,
+                su as usize,
+                sv as usize,
+                width as usize,
+                height as usize,
             );
-            frame_store.publish(key, width, height, bgra);
+            frame_store.publish(key, width, height, std::mem::take(&mut bgra));
         }
         frame_store.remove(key);
     });
@@ -528,7 +593,7 @@ fn remote_mic_muted(participant: &RemoteParticipant) -> bool {
         .filter(|publication| publication.source() == TrackSource::Microphone)
         .map(|publication| publication.is_muted())
         .next()
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn display_name(name: &str, identity: &str) -> String {

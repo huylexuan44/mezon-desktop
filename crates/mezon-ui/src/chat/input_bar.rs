@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
 use crate::chat::ReplyTarget;
+// composer: use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Button, Icon, IconName, Input, InputState};
+// composer: use crate::components::primitives::{Button, Icon, IconName};
 use crate::theme::Theme;
-use gpui::{App, ClickEvent, SharedString, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Window, div, prelude::*, px};
 
 type SendHandler = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
 
 pub struct InputBar {
     input_state: Option<gpui::Entity<InputState>>,
+    // composer: mention_input: Option<gpui::Entity<MentionInput>>,
     on_send: Option<SendHandler>,
+    // composer: on_cancel_reply: Option<SendHandler>,
     replying_to: Option<ReplyTarget>,
-    typing_label: Option<SharedString>,
 }
 
 impl Default for InputBar {
@@ -24,21 +27,26 @@ impl InputBar {
     pub fn new() -> Self {
         Self {
             input_state: None,
+            // composer: mention_input: None,
             on_send: None,
+            // composer: on_cancel_reply: None,
             replying_to: None,
-            typing_label: None,
         }
     }
 
-    pub fn typing_label(mut self, label: Option<SharedString>) -> Self {
-        self.typing_label = label;
-        self
-    }
+    // composer: pub fn on_cancel_reply(mut self, handler: SendHandler) -> Self {
+    // composer:     self.on_cancel_reply = Some(handler);
+    // composer:     self
+    // composer: }
 
     pub fn with_input(mut self, state: gpui::Entity<InputState>) -> Self {
         self.input_state = Some(state);
         self
     }
+    // composer: pub fn with_mention_input(mut self, mention_input: gpui::Entity<MentionInput>) -> Self {
+    // composer:     self.mention_input = Some(mention_input);
+    // composer:     self
+    // composer: }
 
     pub fn on_send(mut self, handler: SendHandler) -> Self {
         self.on_send = Some(handler);
@@ -50,6 +58,7 @@ impl InputBar {
         self
     }
 
+    // composer: take `&self` and add `let on_cancel = self.on_cancel_reply.clone();` before the div.
     fn reply_preview_bar(theme: &Theme, locale: &str, target: &ReplyTarget) -> impl IntoElement {
         div()
             .id("reply-preview-bar")
@@ -100,6 +109,22 @@ impl InputBar {
                         .text_color(theme.text_muted),
                 ),
             )
+        // composer: clickable cancel button — replace the .child(...) above with:
+        // composer: .child(
+        // composer:     div()
+        // composer:         .id("reply-cancel")
+        // composer:         .cursor_pointer()
+        // composer:         .on_click(move |_, window, cx| {
+        // composer:             if let Some(handler) = &on_cancel {
+        // composer:                 handler(window, cx);
+        // composer:             }
+        // composer:         })
+        // composer:         .child(
+        // composer:             Icon::new(IconName::Close)
+        // composer:                 .size_4()
+        // composer:                 .text_color(theme.text_muted),
+        // composer:         ),
+        // composer: )
     }
 
     pub fn render(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -116,22 +141,8 @@ impl InputBar {
             .flex_col()
             .when_some(self.replying_to.as_ref(), |d, target| {
                 d.child(Self::reply_preview_bar(theme, locale, target))
+                // composer: d.child(self.reply_preview_bar(theme, locale, target))
             })
-            .child(
-                div()
-                    .mx_3()
-                    .h(px(16.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .overflow_hidden()
-                    .text_xs()
-                    .text_color(theme.text_primary)
-                    .when_some(self.typing_label.as_ref(), |d, label| {
-                        d.child(label.clone())
-                    }),
-            )
             .child(
                 div()
                     .flex()
@@ -146,6 +157,9 @@ impl InputBar {
                     .when_some(self.input_state.as_ref(), |d, state| {
                         d.child(div().flex_1().child(Input::new(state)))
                     })
+                    // composer: .when_some(self.mention_input.clone(), |d, mention_input| {
+                    // composer:     d.child(div().flex_1().child(mention_input))
+                    // composer: })
                     .child(
                         Button::new("send-btn")
                             .label(mezon_i18n::t(locale, "chat.send"))

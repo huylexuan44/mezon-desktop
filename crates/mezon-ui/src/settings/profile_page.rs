@@ -114,7 +114,7 @@ impl ProfilePage {
         )
         .detach();
 
-        AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
+        AccountStore::global(cx).update(cx, |store, cx| store.ensure_account(cx));
 
         Self {
             settings,

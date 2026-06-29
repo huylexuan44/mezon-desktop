@@ -9,8 +9,8 @@ use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use scap::capturer::{Capturer, Options, Resolution};
 use scap::frame::{Frame, FrameType};
 
-use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 use crate::screen_picker::{PickedScreen, scap_target_for_pick};
+use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
 const CAPTURE_FPS: u32 = 15;
 
@@ -28,12 +28,15 @@ pub fn start_screen(
     identity: String,
     frame_store: Arc<VideoFrameStore>,
     pick: PickedScreen,
-) -> (ScreenStopper, flume::Receiver<Result<LocalVideoTrack, String>>) {
+) -> (
+    ScreenStopper,
+    flume::Receiver<Result<LocalVideoTrack, String>>,
+) {
     let stop = Arc::new(AtomicBool::new(false));
     let (track_tx, track_rx) = flume::bounded(1);
 
     let thread_stop = stop.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("mezon-screen".into())
         .spawn(move || {
             let _guard = crate::runtime::handle().enter();
@@ -62,7 +65,7 @@ pub fn start_screen(
                 show_highlight: false,
                 excluded_targets: None,
                 output_type: FrameType::BGRAFrame,
-                output_resolution: Resolution::_720p,
+                output_resolution: Resolution::_1080p,
                 ..Default::default()
             };
 
@@ -119,7 +122,11 @@ pub fn start_screen(
                 }
 
                 if width != src_w || height != src_h {
-                    continue;
+                    tracing::debug!(
+                        "screen capture resolution changed: {src_w}x{src_h} -> {width}x{height}"
+                    );
+                    src_w = width;
+                    src_h = height;
                 }
 
                 let row_stride = bgra.data.len() / bgra.height.max(1) as usize;
@@ -150,7 +157,8 @@ pub fn start_screen(
                     source.capture_frame(&frame);
                 }
 
-                let preview = normalize_bgra(&bgra.data, src_w as usize, src_h as usize, row_stride);
+                let preview =
+                    normalize_bgra(&bgra.data, src_w as usize, src_h as usize, row_stride);
                 frame_store.publish(key, src_w, src_h, preview);
             }
 
@@ -160,8 +168,10 @@ pub fn start_screen(
                 let _ = track_tx.send(Err("screen capture produced no frames".into()));
             }
             tracing::info!("screen capture stopped");
-        })
-        .expect("spawn screen thread");
+        });
+    if let Err(e) = spawned {
+        tracing::error!("failed to spawn screen capture thread: {e}");
+    }
 
     (ScreenStopper { stop }, track_rx)
 }

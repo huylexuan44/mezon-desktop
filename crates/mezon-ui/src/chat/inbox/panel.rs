@@ -7,8 +7,9 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore,
-    InboxCategory, InboxEvent, InboxNotification, InboxStore, MessagesStore, TopicBadgeEvent,
-    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
+    InboxCategory, InboxEvent, InboxNotification, InboxStore, MessageId, MessagesStore,
+    TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
+    UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -683,14 +684,16 @@ fn schedule_inbox_jump(
     cx: &mut App,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     route: Route,
-    clan_id: String,
-    channel_id: String,
+    _clan_id: String,
+    _channel_id: String,
     message_id: String,
 ) {
-    MessagesStore::global(cx).update(cx, |store, cx| {
-        store.jump_to_message(&clan_id, &channel_id, &message_id, cx);
-    });
     navigate(cx, route);
+    if let Ok(jump_target) = message_id.parse::<MessageId>() {
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.jump_to_message(jump_target, cx);
+        });
+    }
     inbox_handle.hide(cx);
 }
 

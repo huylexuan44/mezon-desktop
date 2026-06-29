@@ -159,6 +159,7 @@ mod tests {
             clan_nick: "Boss".into(),
             clan_avatar: "clan_avatar.png".into(),
             role_ids: vec![RoleId(3), RoleId(4)],
+            online: false,
         };
         let view = UserProfileView::from_clan_member(&member, true);
         assert_eq!(view.user_id, UserId(7));

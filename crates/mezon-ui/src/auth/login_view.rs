@@ -8,6 +8,7 @@ use gpui::{
 };
 use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings};
 
+use crate::app::window_controls;
 use crate::components::compositions::OtpInput;
 use crate::components::primitives::{Input, InputEvent, InputState, Spinner};
 
@@ -914,8 +915,25 @@ impl Render for LoginView {
             .shadow_lg()
             .bg(rgb(0x0b0b0b))
             .text_color(white())
+            .occlude()
             .child(left_col)
             .child(self.render_qr_panel(&locale, cx));
+
+        let background = window_controls::window_drag_handle(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(linear_gradient(
+                    135.,
+                    linear_color_stop(blue, 0.),
+                    linear_color_stop(purple, 0.5),
+                ))
+                .child(div().absolute().inset_0().bg(linear_gradient(
+                    135.,
+                    linear_color_stop(rgba(0xf9a8d400), 0.5),
+                    linear_color_stop(pink, 1.),
+                ))),
+        );
 
         div()
             .relative()
@@ -925,16 +943,7 @@ impl Render for LoginView {
             .items_center()
             .justify_center()
             .px_4()
-            .bg(linear_gradient(
-                135.,
-                linear_color_stop(blue, 0.),
-                linear_color_stop(purple, 0.5),
-            ))
-            .child(div().absolute().inset_0().bg(linear_gradient(
-                135.,
-                linear_color_stop(rgba(0xf9a8d400), 0.5),
-                linear_color_stop(pink, 1.),
-            )))
+            .child(background)
             .child(card)
     }
 }

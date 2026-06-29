@@ -59,6 +59,20 @@ pub struct AppApi {
     status_tx: Arc<tokio::sync::watch::Sender<ConnectionStatus>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UploadFile {
+    pub filename: String,
+    pub filetype: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UrlAttachment {
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+}
+
 impl AppApi {
     pub fn new(transport: Arc<TransportClient>) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -111,8 +125,7 @@ impl AppApi {
     }
 
     pub async fn list_dm_channels(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
-        let _ = page;
-        self.transport.list_dm_channel_descs().await
+        self.transport.list_dm_channel_descs(page).await
     }
 
     pub async fn mark_as_read(
@@ -210,6 +223,18 @@ impl AppApi {
             .await
     }
 
+    pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
+        self.transport.join_clan_chat(clan_id).await
+    }
+
+    pub async fn list_clan_users_status(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ClanUserStatusList> {
+        self.transport.list_clan_users_status(clan_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,
         clan_id: i64,
@@ -217,10 +242,55 @@ impl AppApi {
         content: &str,
         is_public: bool,
         mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
     ) -> Result<ApiMessage> {
         self.transport
-            .send_channel_message(clan_id, channel_id, content, is_public, mode)
+            .send_channel_message(
+                clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis,
+            )
             .await
+    }
+
+    /// Send a message as a reply to another message.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_reply(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        reply: crate::transport::OutgoingReply,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_reply(
+                clan_id, channel_id, content, is_public, mode, reply, mentions, hashtags, emojis,
+            )
+            .await
+    }
+
+    pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
+        let resp = self.transport.list_emojis_by_user_id().await?;
+        Ok(resp.emoji_list)
+    }
+
+    pub async fn list_roles(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleListEventResponse> {
+        self.transport.list_roles(clan_id, limit, cursor).await
+    }
+
+    pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
+        let resp = self.transport.list_stickers_by_user_id().await?;
+        Ok(resp.stickers)
     }
 
     pub async fn create_channel(
@@ -278,6 +348,116 @@ impl AppApi {
                 attachments,
             )
             .await
+    }
+
+    pub async fn send_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        files: Vec<UploadFile>,
+    ) -> Result<ApiMessage> {
+        let attachments: Vec<_> = {
+            use futures::StreamExt as _;
+            futures::stream::iter(files.into_iter().map(|file| self.upload_file(file)))
+                .buffered(4)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?
+        };
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url.clone(),
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                width: a.width,
+                height: a.height,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_channel_message_with_attachments(
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                attachments,
+            )
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
+    }
+
+    pub async fn send_message_with_attachment_urls(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<UrlAttachment>,
+    ) -> Result<ApiMessage> {
+        let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
+            .iter()
+            .map(|a| mezon_proto::api::MessageAttachment {
+                filename: a.filename.clone(),
+                size: 0,
+                url: a.url.clone(),
+                filetype: a.filetype.clone(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+            })
+            .collect();
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: 0,
+                height: 0,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_channel_message_with_attachments(clan_id, channel_id, "", is_public, mode, proto)
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
+    }
+
+    async fn upload_file(&self, file: UploadFile) -> Result<mezon_proto::api::MessageAttachment> {
+        let UploadFile {
+            filename,
+            filetype,
+            data,
+        } = file;
+        let filename = sanitize_filename(&filename);
+        let size = clamp_i32(data.len());
+        let (width, height) = if filetype.starts_with("image/") {
+            image_dimensions(&data)
+        } else {
+            (0, 0)
+        };
+        let url = self
+            .upload_bytes(&filename, &filetype, size, width, height, data)
+            .await?;
+        Ok(mezon_proto::api::MessageAttachment {
+            filename,
+            size,
+            url,
+            filetype,
+            width,
+            height,
+            thumbnail: String::new(),
+            duration: 0,
+        })
     }
 
     async fn upload_bytes(

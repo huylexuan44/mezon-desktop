@@ -4,7 +4,7 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, Rgba, SharedString, Window,
     div, img, prelude::*, px, rgb,
 };
-use mezon_store::ClanList;
+use mezon_store::{ClanId, ClanList};
 
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
@@ -12,10 +12,12 @@ use crate::theme::ActiveTheme;
 #[derive(Clone)]
 pub(super) struct ClanRow {
     pub(super) id: SharedString,
+    pub(super) id_num: ClanId,
     pub(super) row_id: SharedString,
     pub(super) group_name: SharedString,
     pub(super) name: SharedString,
-    pub(super) avatar_url: Option<SharedString>,
+    pub(super) proxied_avatar_url: Option<SharedString>,
+    pub(super) avatar_id: SharedString,
     pub(super) badge_count: u32,
     pub(super) has_unread: bool,
     pub(super) muted: bool,
@@ -95,19 +97,15 @@ pub(super) fn render_clan_row(
     };
 
     let clan_id = clan.id.clone();
-    let is_active = clan_list_handle
-        .read(cx)
-        .is_active_clan(clan.id.parse().unwrap_or_default())
-        && !dm_active;
+    let is_active = clan_list_handle.read(cx).is_active_clan(clan.id_num) && !dm_active;
     let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
     let badge_count = clan.badge_count;
     let muted = clan.muted;
     let pill_color = theme.tokens.text_theme_primary;
 
-    let avatar: AnyElement = if let Some(ref url) = clan.avatar_url {
-        let proxied = crate::util::imgproxy::proxied(cx, url, 100, 100, "fill");
-        let mut el = img(SharedString::from(proxied))
+    let avatar: AnyElement = if let Some(ref proxied) = clan.proxied_avatar_url {
+        let mut el = img(proxied.clone())
             .size(px(40.))
             .rounded(px(8.))
             .overflow_hidden()
@@ -124,6 +122,7 @@ pub(super) fn render_clan_row(
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_default();
         div()
+            .id(clan.avatar_id.clone())
             .size(px(40.))
             .rounded(px(12.))
             .bg(theme.tokens.theme_base_color)

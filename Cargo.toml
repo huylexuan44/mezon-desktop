@@ -65,6 +65,7 @@ todo = "deny"
 accesskit          = "0.24.0"
 accesskit_macos    = "0.26.0"
 accesskit_unix     = "0.21.0"
+accesskit_windows  = "0.32.0"
 documented         = "0.9.1"
 num-format         = "0.4.4"
 palette            = { version = "0.7.5", default-features = false, features = ["std"] }
@@ -77,9 +78,6 @@ syntax_theme       = { path = "crates/vendor/syntax_theme" }
 menu               = { path = "crates/vendor/menu" }
 # ---------- Vendored GPUI internal crates ----------
 gpui               = { path = "crates/vendor/gpui", default-features = false, features = ["x11", "wayland"] }
-gpui-component     = { path = "crates/vendor/gpui-component/crates/ui", default-features = false }
-gpui-component-macros = { path = "crates/vendor/gpui-component/crates/macros" }
-gpui-component-assets = { path = "crates/vendor/gpui-component/crates/assets" }
 gpui-macros        = { package = "gpui_macros", path = "crates/vendor/gpui_macros" }
 gpui_macros        = { package = "gpui_macros", path = "crates/vendor/gpui_macros" }
 gpui_platform      = { path = "crates/vendor/gpui_platform", default-features = false }
@@ -134,7 +132,6 @@ postage              = { version = "0.5", features = ["futures-traits"] }
 
 # ---------- Networking ----------
 reqwest             = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = ["charset", "http2", "macos-system-configuration", "multipart", "rustls-tls-native-roots", "socks", "stream"], package = "zed-reqwest", version = "0.12.15-zed" }
-tokio-tungstenite   = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 http                = "1.0"
 http-body           = "1.0"
 serde_urlencoded    = "0.7"

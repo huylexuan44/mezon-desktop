@@ -9,7 +9,7 @@ use mezon_client::RealtimeEvent;
 use crate::channel::ChannelList;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-const TYPING_NOTIFY_DEBOUNCE_MS: u64 = 250;
+const STATUS_NOTIFY_DEBOUNCE_MS: u64 = 5000;
 
 #[derive(Debug, Clone)]
 pub enum PresenceEvent {
@@ -23,7 +23,7 @@ pub struct PresenceStore {
     pub typing_by_channel: HashMap<ChannelId, HashSet<String>>,
     pub channel_online: HashMap<ChannelId, HashSet<UserId>>,
     pub user_online: HashSet<UserId>,
-    typing_notify_tasks: HashMap<ChannelId, Task<()>>,
+    status_notify_task: Option<Task<()>>,
     _channel_sub: Subscription,
 }
 
@@ -43,11 +43,9 @@ impl PresenceStore {
         cx.global::<GlobalPresenceStore>().0.clone()
     }
 
-    pub fn typing_users(&self, channel_id: ChannelId) -> Vec<String> {
-        self.typing_by_channel
-            .get(&channel_id)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default()
+    pub fn typing_users(&self, channel_id: ChannelId) -> &HashSet<String> {
+        static EMPTY: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(HashSet::new);
+        self.typing_by_channel.get(&channel_id).unwrap_or(&EMPTY)
     }
 
     pub fn is_online(&self, user_id: UserId) -> bool {
@@ -69,7 +67,7 @@ impl PresenceStore {
             typing_by_channel: HashMap::new(),
             channel_online: HashMap::new(),
             user_online: HashSet::new(),
-            typing_notify_tasks: HashMap::new(),
+            status_notify_task: None,
             _channel_sub: channel_sub,
         }
     }
@@ -110,7 +108,6 @@ impl PresenceStore {
                     e.mode,
                 );
                 cx.emit(PresenceEvent::TypingChanged { channel_id });
-                self.schedule_typing_notify(channel_id, cx);
             }
             RealtimeEvent::ChannelPresence(e) => {
                 let cid = ChannelId(e.channel_id);
@@ -124,27 +121,26 @@ impl PresenceStore {
                 let joins: Vec<UserId> = e.joins.iter().map(|u| UserId(u.user_id)).collect();
                 let leaves: Vec<UserId> = e.leaves.iter().map(|u| UserId(u.user_id)).collect();
                 self.apply_status_presence(&joins, &leaves);
-                cx.emit(PresenceEvent::StatusChanged);
-                cx.notify();
+                self.schedule_status_notify(cx);
             }
             _ => {}
         }
     }
 
-    fn schedule_typing_notify(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if self.typing_notify_tasks.contains_key(&channel_id) {
+    fn schedule_status_notify(&mut self, cx: &mut Context<Self>) {
+        if self.status_notify_task.is_some() {
             return;
         }
-        let delay = Duration::from_millis(TYPING_NOTIFY_DEBOUNCE_MS);
-        let cid = channel_id;
+        let delay = Duration::from_millis(STATUS_NOTIFY_DEBOUNCE_MS);
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |store, cx| {
-                store.typing_notify_tasks.remove(&cid);
+                store.status_notify_task = None;
+                cx.emit(PresenceEvent::StatusChanged);
                 cx.notify();
             });
         });
-        self.typing_notify_tasks.insert(channel_id, task);
+        self.status_notify_task = Some(task);
     }
 
     pub(crate) fn apply_typing(
@@ -213,7 +209,7 @@ mod tests {
             typing_by_channel: HashMap::new(),
             channel_online: HashMap::new(),
             user_online: HashSet::new(),
-            typing_notify_tasks: HashMap::new(),
+            status_notify_task: None,
             _channel_sub: gpui::Subscription::new(|| {}),
         }
     }
@@ -300,11 +296,12 @@ mod tests {
     }
 
     #[test]
-    fn typing_users_returns_vec_for_channel() {
+    fn typing_users_returns_set_for_channel() {
         let mut store = empty_store();
         store.apply_typing(ChannelId(1), "Alice", "", "", 0);
         let users = store.typing_users(ChannelId(1));
-        assert_eq!(users, vec!["Alice".to_string()]);
+        assert!(users.contains("Alice"));
+        assert_eq!(users.len(), 1);
     }
 
     #[test]
