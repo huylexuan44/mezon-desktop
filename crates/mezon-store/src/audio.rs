@@ -12,13 +12,10 @@ pub type MicCaptureHandle = Box<dyn Send>;
 pub type MicCaptureFactory =
     Arc<dyn Fn(&str, flume::Sender<f32>) -> Result<MicCaptureHandle, String> + Send + Sync>;
 
-pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
-
 pub struct AudioStore {
     pub input_devices: Vec<AudioDeviceInfo>,
     pub output_devices: Vec<AudioDeviceInfo>,
     pub mic_capture_factory: Option<MicCaptureFactory>,
-    pub open_url: Option<OpenUrlFn>,
 }
 
 impl AudioStore {
@@ -27,7 +24,6 @@ impl AudioStore {
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             mic_capture_factory: None,
-            open_url: None,
         });
         cx.set_global(GlobalAudioStore(entity.clone()));
         entity
@@ -65,13 +61,6 @@ impl AudioStore {
         });
     }
 
-    pub fn set_open_url(entity: &Entity<Self>, f: OpenUrlFn, cx: &mut App) {
-        entity.update(cx, |store, cx| {
-            store.open_url = Some(f);
-            cx.notify();
-        });
-    }
-
     pub fn start_mic_capture(
         &self,
         device_id: &str,
@@ -80,13 +69,6 @@ impl AudioStore {
         match &self.mic_capture_factory {
             Some(factory) => factory(device_id, sender),
             None => Err("Mic capture not available on this platform".to_string()),
-        }
-    }
-
-    pub fn open_url_external(&self, url: &str) -> anyhow::Result<()> {
-        match &self.open_url {
-            Some(f) => f(url),
-            None => Err(anyhow::anyhow!("open_url not registered")),
         }
     }
 }

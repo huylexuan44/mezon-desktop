@@ -18,7 +18,7 @@ impl AccountPage {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify())
             .detach();
-        AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
+        AccountStore::global(cx).update(cx, |store, cx| store.ensure_account(cx));
         Self {
             settings,
             toast_message: None,

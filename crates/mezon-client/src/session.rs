@@ -52,7 +52,7 @@ impl Session {
         self.expires_at == 0 || now >= self.expires_at
     }
 
-    /// Credential for `wss://…/ws?token=…` — matches mezon-js (`session_id` first, else JWT).
+    /// Credential for `wss://…?token=…` — matches mezon-js (`session_id` first, else JWT).
     pub fn ws_credential(&self) -> &str {
         if !self.session_id.is_empty() {
             &self.session_id

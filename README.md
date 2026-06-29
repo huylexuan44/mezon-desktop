@@ -26,13 +26,22 @@ The app is under active migration to a native GPUI client.
 The Rust toolchain is pinned in `rust-toolchain.toml`. When using `rustup`, Cargo
 will automatically install and use the configured toolchain and components.
 
-For linux:
+For Linux, install native build dependencies (GPUI/Wayland/X11 plus GTK/ATK/Pango for tray and accessibility):
+
+```bash
+./scripts/linux-deps
+# or: just install-linux-deps
 ```
-sudo apt install -y pkg-config libcairo2-dev libjpeg-dev libgif-dev
-sudo apt install libgdk-pixbuf2.0-dev pkg-config
-sudo apt install libgtk-3-dev
-sudo apt install libasound2-dev
-sudo apt install libxdo-dev libxkbcommon-x11-dev
+
+On Debian/Ubuntu you can also install manually:
+
+```bash
+sudo apt install -y build-essential pkg-config libgtk-3-dev libatk1.0-dev \
+  libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libasound2-dev \
+  libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-x11-dev \
+  libxdo-dev libsecret-1-dev libssl-dev libvulkan-dev \
+  libpipewire-0.3-dev libdbus-1-dev libxcb1-dev libxcb-randr0-dev \
+  libxcb-xfixes0-dev libxcb-xkb-dev libxcb-cursor-dev libx11-dev libx11-xcb-dev
 ```
 
 ## Quick Start
@@ -42,8 +51,11 @@ sudo apt install libxdo-dev libxkbcommon-x11-dev
 cargo install just
 
 # Clone the repository
-git clone https://github.com/mezonai/mezon-desktop
+git clone --recurse-submodules https://github.com/mezonai/mezon-desktop
 cd mezon-desktop
+
+# If you already cloned without submodules, initialize them:
+git submodule update --init --recursive
 
 # Install development tools used by the just recipes
 just install

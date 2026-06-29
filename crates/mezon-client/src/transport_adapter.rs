@@ -12,7 +12,8 @@ pub type ErrorHandler = Arc<dyn Fn(String) + Send + Sync>;
 
 #[async_trait]
 pub trait TransportAdapter: Send + Sync {
-    async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()>;
+    /// `port`: explicit abridged-TCP port (dev). `None` = hostname-only prod endpoint (`sock.mezon.ai`).
+    async fn connect(&self, host: &str, port: Option<u16>, token: &str) -> Result<()>;
 
     async fn send(&self, message: Vec<u8>) -> Result<()>;
 

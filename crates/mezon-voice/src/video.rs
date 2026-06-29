@@ -1,0 +1,267 @@
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::Mutex;
+use tokio::sync::Notify;
+
+#[derive(Clone)]
+pub struct VideoFrameData {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+    pub seq: u64,
+}
+
+#[derive(Default)]
+pub struct VideoFrameStore {
+    frames: Mutex<HashMap<u64, Arc<VideoFrameData>>>,
+    seq: AtomicU64,
+    frame_notify: Notify,
+}
+
+impl VideoFrameStore {
+    pub fn publish(&self, key: u64, width: u32, height: u32, bgra: Vec<u8>) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let frame = Arc::new(VideoFrameData {
+            width,
+            height,
+            bgra,
+            seq,
+        });
+        self.frames.lock().insert(key, frame);
+        self.frame_notify.notify_one();
+    }
+
+    pub async fn frame_changed(&self) {
+        self.frame_notify.notified().await;
+    }
+
+    pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {
+        self.frames.lock().get(&key).cloned()
+    }
+
+    pub fn remove(&self, key: u64) {
+        self.frames.lock().remove(&key);
+    }
+}
+
+pub fn track_frame_key(identity: &str, track_sid: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    identity.hash(&mut hasher);
+    track_sid.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn local_camera_key(identity: &str) -> u64 {
+    track_frame_key(identity, "__local_camera__")
+}
+
+pub fn local_screen_key(identity: &str) -> u64 {
+    track_frame_key(identity, "__local_screen__")
+}
+
+#[inline]
+fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+#[inline]
+fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
+    clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16)
+}
+#[inline]
+fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
+    clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128)
+}
+#[inline]
+fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
+    clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_to_i420(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    pixel_stride: usize,
+    src_row_stride: usize,
+    ro: usize,
+    go: usize,
+    bo: usize,
+    y_plane: &mut [u8],
+    u_plane: &mut [u8],
+    v_plane: &mut [u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+) {
+    for y in 0..height {
+        let row = y * src_row_stride;
+        let y_out = y * stride_y;
+        for x in 0..width {
+            let p = row + x * pixel_stride;
+            if p + bo.max(ro).max(go) >= src.len() {
+                continue;
+            }
+            let r = src[p + ro] as i32;
+            let g = src[p + go] as i32;
+            let b = src[p + bo] as i32;
+            y_plane[y_out + x] = rgb_to_y(r, g, b);
+        }
+    }
+
+    let cw = width / 2;
+    let ch = height / 2;
+    for cy in 0..ch {
+        let src_y = cy * 2;
+        let u_out = cy * stride_u;
+        let v_out = cy * stride_v;
+        for cx in 0..cw {
+            let src_x = cx * 2;
+            let p = src_y * src_row_stride + src_x * pixel_stride;
+            if p + bo.max(ro).max(go) >= src.len() {
+                continue;
+            }
+            let r = src[p + ro] as i32;
+            let g = src[p + go] as i32;
+            let b = src[p + bo] as i32;
+            u_plane[u_out + cx] = rgb_to_u(r, g, b);
+            v_plane[v_out + cx] = rgb_to_v(r, g, b);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn bgra_to_i420(
+    bgra: &[u8],
+    width: usize,
+    height: usize,
+    src_row_stride: usize,
+    y_plane: &mut [u8],
+    u_plane: &mut [u8],
+    v_plane: &mut [u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+) {
+    pack_to_i420(
+        bgra,
+        width,
+        height,
+        4,
+        src_row_stride,
+        2,
+        1,
+        0,
+        y_plane,
+        u_plane,
+        v_plane,
+        stride_y,
+        stride_u,
+        stride_v,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn i420_to_bgra_into(
+    out: &mut [u8],
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+    width: usize,
+    height: usize,
+) {
+    let needed = width * height * 4;
+    if out.len() < needed {
+        return;
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let yi = y * stride_y + x;
+            let ui = (y / 2) * stride_u + (x / 2);
+            let vi = (y / 2) * stride_v + (x / 2);
+            if yi >= y_plane.len() || ui >= u_plane.len() || vi >= v_plane.len() {
+                continue;
+            }
+            let c = y_plane[yi] as i32 - 16;
+            let d = u_plane[ui] as i32 - 128;
+            let e = v_plane[vi] as i32 - 128;
+            let r = clamp_u8((298 * c + 409 * e + 128) >> 8);
+            let g = clamp_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
+            let b = clamp_u8((298 * c + 516 * d + 128) >> 8);
+            let o = (y * width + x) * 4;
+            out[o] = b;
+            out[o + 1] = g;
+            out[o + 2] = r;
+            out[o + 3] = 255;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn rgb_to_i420(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    y_plane: &mut [u8],
+    u_plane: &mut [u8],
+    v_plane: &mut [u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+) {
+    pack_to_i420(
+        rgb,
+        width,
+        height,
+        3,
+        width * 3,
+        0,
+        1,
+        2,
+        y_plane,
+        u_plane,
+        v_plane,
+        stride_y,
+        stride_u,
+        stride_v,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn yuyv422_to_i420(
+    yuyv: &[u8],
+    width: usize,
+    height: usize,
+    y_plane: &mut [u8],
+    u_plane: &mut [u8],
+    v_plane: &mut [u8],
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+) {
+    for y in 0..height {
+        let row = y * width * 2;
+        let y_out = y * stride_y;
+        for x in (0..width).step_by(2) {
+            let p = row + x * 2;
+            if p + 3 >= yuyv.len() {
+                continue;
+            }
+            y_plane[y_out + x] = yuyv[p];
+            y_plane[y_out + x + 1] = yuyv[p + 2];
+            if y % 2 == 0 {
+                let cx = x / 2;
+                let cy = y / 2;
+                u_plane[cy * stride_u + cx] = yuyv[p + 1];
+                v_plane[cy * stride_v + cx] = yuyv[p + 3];
+            }
+        }
+    }
+}

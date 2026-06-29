@@ -13,6 +13,7 @@ pub struct Avatar {
     indicator: Option<AnyElement>,
     grayscale: bool,
     fallback_src: Option<SharedString>,
+    image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
 }
 
 impl Avatar {
@@ -26,7 +27,13 @@ impl Avatar {
             indicator: None,
             grayscale: false,
             fallback_src: None,
+            image_cache: None,
         }
+    }
+
+    pub fn image_cache(mut self, cache: gpui::Entity<crate::image_cache::LruImageCache>) -> Self {
+        self.image_cache = Some(cache);
+        self
     }
 
     /// Override the avatar diameter with an explicit pixel size (e.g. 32px DM rows).
@@ -115,6 +122,7 @@ fn clipped_image(
         .size(size)
         .flex_shrink_0()
         .rounded_full()
+        .overflow_hidden()
         .child(
             img(src)
                 .size(size)
@@ -151,6 +159,9 @@ impl RenderOnce for Avatar {
             .rounded_full()
             .when_some(self.border_color, |this, color| {
                 this.border(border_width).border_color(color)
+            })
+            .when_some(self.image_cache.clone(), |this, cache| {
+                this.image_cache(cache)
             })
             .child(match self.src {
                 Some(src) => {

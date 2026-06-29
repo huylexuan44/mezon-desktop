@@ -374,7 +374,8 @@ pub(crate) struct Callbacks {
     pub(crate) moved: Cell<Option<Box<dyn FnMut()>>>,
     pub(crate) should_close: Cell<Option<Box<dyn FnMut() -> bool>>>,
     pub(crate) close: Cell<Option<Box<dyn FnOnce()>>>,
-    pub(crate) hit_test_window_control: Cell<Option<Box<dyn FnMut() -> Option<WindowControlArea>>>>,
+    pub(crate) hit_test_window_control:
+        Cell<Option<Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>>>,
     pub(crate) appearance_changed: Cell<Option<Box<dyn FnMut()>>>,
 }
 
@@ -923,7 +924,10 @@ impl PlatformWindow for WindowsWindow {
         self.state.callbacks.close.set(Some(callback));
     }
 
-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
+    fn on_hit_test_window_control(
+        &self,
+        callback: Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>,
+    ) {
         self.0
             .state
             .callbacks
@@ -1013,6 +1017,36 @@ impl PlatformWindow for WindowsWindow {
 
     fn a11y_update_window_bounds(&self) {
         // Windows UIA handles window bounds tracking automatically.
+    }
+
+    fn start_window_resize(&self, edge: ResizeEdge) {
+        let hwnd = self.0.hwnd;
+        let hit_size = resize_window_edge(edge);
+        unsafe {
+            ReleaseCapture().log_err();
+            let mut point = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut point).log_err();
+            let packed = ((point.y as u32) << 16) | (point.x as u16 as u32);
+            SendMessageW(
+                hwnd,
+                WM_NCLBUTTONDOWN,
+                Some(WPARAM(hit_size as usize)),
+                Some(LPARAM(packed as isize)),
+            );
+        }
+    }
+}
+
+fn resize_window_edge(edge: ResizeEdge) -> u32 {
+    match edge {
+        ResizeEdge::Left => HTLEFT,
+        ResizeEdge::Right => HTRIGHT,
+        ResizeEdge::Top => HTTOP,
+        ResizeEdge::TopLeft => HTTOPLEFT,
+        ResizeEdge::TopRight => HTTOPRIGHT,
+        ResizeEdge::Bottom => HTBOTTOM,
+        ResizeEdge::BottomLeft => HTBOTTOMLEFT,
+        ResizeEdge::BottomRight => HTBOTTOMRIGHT,
     }
 }
 

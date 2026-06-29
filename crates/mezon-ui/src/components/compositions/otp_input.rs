@@ -130,9 +130,9 @@ impl OtpInput {
                 input.set_value("", window, cx);
             });
         }
-        if let Some(first) = self.inputs.first() {
-            first.update(cx, |input, cx| {
-                input.focus(window, cx);
+        if let Some(first) = self.inputs.first().cloned() {
+            window.defer(cx, move |window, cx| {
+                first.update(cx, |input, cx| input.focus(window, cx));
             });
         }
     }

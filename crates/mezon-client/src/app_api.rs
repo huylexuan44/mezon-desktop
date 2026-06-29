@@ -59,6 +59,20 @@ pub struct AppApi {
     status_tx: Arc<tokio::sync::watch::Sender<ConnectionStatus>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UploadFile {
+    pub filename: String,
+    pub filetype: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UrlAttachment {
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+}
+
 impl AppApi {
     pub fn new(transport: Arc<TransportClient>) -> Self {
         let (realtime_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -99,7 +113,7 @@ impl AppApi {
 
     pub async fn list_channel_descs(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         channel_type: i32,
     ) -> Result<Vec<ApiChannelDesc>> {
         let _ = channel_type;
@@ -111,15 +125,14 @@ impl AppApi {
     }
 
     pub async fn list_dm_channels(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
-        let _ = page;
-        self.transport.list_dm_channel_descs().await
+        self.transport.list_dm_channel_descs(page).await
     }
 
     pub async fn mark_as_read(
         &self,
-        channel_id: &str,
-        category_id: &str,
-        clan_id: &str,
+        channel_id: i64,
+        category_id: i64,
+        clan_id: i64,
     ) -> Result<()> {
         self.transport
             .mark_as_read(channel_id, category_id, clan_id)
@@ -134,8 +147,36 @@ impl AppApi {
         &self,
         clan_id: i64,
     ) -> Result<Vec<mezon_proto::api::clan_user_list::ClanUser>> {
-        let lists = self.transport.list_clan_users(&clan_id.to_string()).await?;
+        let lists = self.transport.list_clan_users(clan_id).await?;
         Ok(lists.into_iter().flat_map(|list| list.clan_users).collect())
+    }
+
+    pub async fn list_channel_users(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        channel_type: i32,
+    ) -> Result<Vec<mezon_proto::api::channel_user_list::ChannelUser>> {
+        let list = self
+            .transport
+            .list_channel_users(clan_id, channel_id, channel_type)
+            .await?;
+        Ok(list.channel_users)
+    }
+
+    pub async fn list_user_clans_by_user(&self) -> Result<Vec<mezon_proto::api::User>> {
+        let list = self.transport.list_user_clans_by_user_id().await?;
+        Ok(list.users)
+    }
+
+    pub async fn list_channel_users_uc(
+        &self,
+        channel_id: i64,
+        limit: i32,
+    ) -> Result<mezon_proto::api::AllUsersAddChannelResponse> {
+        self.transport
+            .list_channel_users_uc(channel_id, limit)
+            .await
     }
 
     pub async fn create_clan_desc(
@@ -159,9 +200,9 @@ impl AppApi {
 
     pub async fn list_channel_messages(
         &self,
-        clan_id: &str,
-        channel_id: &str,
-        message_id: &str,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
         direction: i32,
         limit: u32,
     ) -> Result<Vec<ApiMessage>> {
@@ -204,8 +245,8 @@ impl AppApi {
 
     pub async fn join_chat(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: i64,
+        channel_id: i64,
         channel_type: i32,
         is_public: bool,
     ) -> Result<()> {
@@ -214,26 +255,83 @@ impl AppApi {
             .await
     }
 
+    pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
+        self.transport.join_clan_chat(clan_id).await
+    }
+
+    pub async fn list_clan_users_status(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ClanUserStatusList> {
+        self.transport.list_clan_users_status(clan_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: i64,
+        channel_id: i64,
         content: &str,
         is_public: bool,
         mode: i32,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
     ) -> Result<ApiMessage> {
         self.transport
-            .send_channel_message(clan_id, channel_id, content, is_public, mode)
+            .send_channel_message(
+                clan_id, channel_id, content, is_public, mode, mentions, hashtags, emojis,
+            )
             .await
+    }
+
+    /// Send a message as a reply to another message.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_channel_message_reply(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        reply: crate::transport::OutgoingReply,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+    ) -> Result<ApiMessage> {
+        self.transport
+            .send_channel_message_reply(
+                clan_id, channel_id, content, is_public, mode, reply, mentions, hashtags, emojis,
+            )
+            .await
+    }
+
+    pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
+        let resp = self.transport.list_emojis_by_user_id().await?;
+        Ok(resp.emoji_list)
+    }
+
+    pub async fn list_roles(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        cursor: &str,
+    ) -> Result<mezon_proto::api::RoleListEventResponse> {
+        self.transport.list_roles(clan_id, limit, cursor).await
+    }
+
+    pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
+        let resp = self.transport.list_stickers_by_user_id().await?;
+        Ok(resp.stickers)
     }
 
     pub async fn create_channel(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         channel_label: &str,
         channel_type: u32,
-        category_id: Option<&str>,
-        parent_id: Option<&str>,
+        category_id: Option<i64>,
+        parent_id: Option<i64>,
         channel_private: i32,
     ) -> Result<ApiChannelDesc> {
         self.transport
@@ -249,7 +347,7 @@ impl AppApi {
     }
 
     /// Create a category in a clan; returns its id.
-    pub async fn create_category(&self, clan_id: &str, category_name: &str) -> Result<String> {
+    pub async fn create_category(&self, clan_id: i64, category_name: &str) -> Result<String> {
         let category = self
             .transport
             .create_category_desc(category_name, clan_id)
@@ -257,15 +355,15 @@ impl AppApi {
         Ok(category.category_id.to_string())
     }
 
-    pub async fn add_channel_users(&self, channel_id: &str, user_ids: Vec<String>) -> Result<()> {
+    pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         self.transport.add_channel_users(channel_id, user_ids).await
     }
 
     /// Send a channel message, uploading each `media_url` as an attachment first.
     pub async fn send_message_with_media(
         &self,
-        clan_id: &str,
-        channel_id: &str,
+        clan_id: i64,
+        channel_id: i64,
         content: &str,
         is_public: bool,
         mode: i32,
@@ -290,6 +388,116 @@ impl AppApi {
                 attachments,
             )
             .await
+    }
+
+    pub async fn send_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        files: Vec<UploadFile>,
+    ) -> Result<ApiMessage> {
+        let attachments: Vec<_> = {
+            use futures::StreamExt as _;
+            futures::stream::iter(files.into_iter().map(|file| self.upload_file(file)))
+                .buffered(4)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?
+        };
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url.clone(),
+                filename: a.filename.clone(),
+                filetype: a.filetype.clone(),
+                width: a.width,
+                height: a.height,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_channel_message_with_attachments(
+                clan_id,
+                channel_id,
+                content,
+                is_public,
+                mode,
+                attachments,
+            )
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
+    }
+
+    pub async fn send_message_with_attachment_urls(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<UrlAttachment>,
+    ) -> Result<ApiMessage> {
+        let proto: Vec<mezon_proto::api::MessageAttachment> = attachments
+            .iter()
+            .map(|a| mezon_proto::api::MessageAttachment {
+                filename: a.filename.clone(),
+                size: 0,
+                url: a.url.clone(),
+                filetype: a.filetype.clone(),
+                width: 0,
+                height: 0,
+                thumbnail: String::new(),
+                duration: 0,
+            })
+            .collect();
+        let echo: Vec<crate::transport::ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| crate::transport::ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: 0,
+                height: 0,
+            })
+            .collect();
+        let mut sent = self
+            .transport
+            .send_channel_message_with_attachments(clan_id, channel_id, "", is_public, mode, proto)
+            .await?;
+        sent.attachments = echo;
+        Ok(sent)
+    }
+
+    async fn upload_file(&self, file: UploadFile) -> Result<mezon_proto::api::MessageAttachment> {
+        let UploadFile {
+            filename,
+            filetype,
+            data,
+        } = file;
+        let filename = sanitize_filename(&filename);
+        let size = clamp_i32(data.len());
+        let (width, height) = if filetype.starts_with("image/") {
+            image_dimensions(&data)
+        } else {
+            (0, 0)
+        };
+        let url = self
+            .upload_bytes(&filename, &filetype, size, width, height, data)
+            .await?;
+        Ok(mezon_proto::api::MessageAttachment {
+            filename,
+            size,
+            url,
+            filetype,
+            width,
+            height,
+            thumbnail: String::new(),
+            duration: 0,
+        })
     }
 
     async fn upload_bytes(
@@ -391,14 +599,14 @@ impl AppApi {
 
     pub async fn get_user_clan_profile(
         &self,
-        clan_id: &str,
+        clan_id: i64,
     ) -> Result<mezon_proto::api::ClanProfile> {
         self.transport.get_user_profile_on_clan(clan_id).await
     }
 
     pub async fn update_user_clan_profile(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         nick_name: &str,
         avatar_url: Option<&str>,
     ) -> Result<()> {
@@ -417,15 +625,12 @@ impl AppApi {
 
     pub async fn check_duplicate_clan_nickname(
         &self,
-        clan_id: &str,
+        clan_id: i64,
         nick_name: &str,
     ) -> Result<bool> {
-        let condition_id: i64 = clan_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let resp = self
             .transport
-            .check_duplicate_name(nick_name, CHECK_NAME_TYPE_NICKNAME, condition_id)
+            .check_duplicate_name(nick_name, CHECK_NAME_TYPE_NICKNAME, clan_id)
             .await?;
         Ok(resp.is_duplicate)
     }
@@ -466,7 +671,7 @@ impl AppApi {
         Ok(permanent_url)
     }
 
-    pub async fn list_categories_typed(&self, clan_id: &str) -> Result<Vec<ApiCategoryDesc>> {
+    pub async fn list_categories_typed(&self, clan_id: i64) -> Result<Vec<ApiCategoryDesc>> {
         self.transport.list_categories_typed(clan_id).await
     }
 
@@ -474,26 +679,29 @@ impl AppApi {
         self.transport.list_clan_badge_count().await
     }
 
-    pub async fn get_notification_clan(&self, clan_id: &str) -> Result<i32> {
+    pub async fn get_notification_clan(&self, clan_id: i64) -> Result<i32> {
         self.transport.get_notification_clan(clan_id).await
     }
 
-    pub async fn list_channel_badge_counts(&self, clan_id: &str) -> Result<Vec<ApiChannelDesc>> {
+    pub async fn list_channel_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiChannelDesc>> {
         self.transport.list_channel_badge_counts(clan_id).await
     }
 
-    pub async fn list_voice_channel_users(
-        &self,
-        clan_id: &str,
-    ) -> Result<Vec<ApiVoiceChannelUser>> {
+    pub async fn list_voice_channel_users(&self, clan_id: i64) -> Result<Vec<ApiVoiceChannelUser>> {
         self.transport.list_voice_channel_users(clan_id).await
     }
 
-    pub async fn list_channel_apps(&self, clan_id: &str) -> Result<Vec<ApiChannelApp>> {
+    pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
+        self.transport
+            .generate_meet_token(channel_id, room_name)
+            .await
+    }
+
+    pub async fn list_channel_apps(&self, clan_id: i64) -> Result<Vec<ApiChannelApp>> {
         self.transport.list_channel_apps(clan_id).await
     }
 
-    pub async fn list_favorite_channels(&self, clan_id: &str) -> Result<Vec<String>> {
+    pub async fn list_favorite_channels(&self, clan_id: i64) -> Result<Vec<String>> {
         let resp = self.transport.get_list_favorite_channel(clan_id).await?;
         Ok(resp
             .channel_ids
@@ -502,13 +710,13 @@ impl AppApi {
             .collect())
     }
 
-    pub async fn add_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+    pub async fn add_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .add_channel_favorite(channel_id, clan_id)
             .await
     }
 
-    pub async fn remove_channel_favorite(&self, channel_id: &str, clan_id: &str) -> Result<()> {
+    pub async fn remove_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         self.transport
             .remove_channel_favorite(channel_id, clan_id)
             .await

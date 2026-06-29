@@ -10,19 +10,28 @@ use gpui::{
     App, AppContext, AsyncApp, BackgroundExecutor, Context, Entity, Global, Subscription, Task,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, NetworkMonitor, RealtimeEvent, Session, TransportClient, keychain,
+    AppApi, ConnectionStatus, DEFAULT_WS_HOST, NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT,
+    RealtimeEvent, Session, TransportClient, favicon_probe_url, keychain,
+    probe_network_reachability, socket_connect_label,
 };
 
-use crate::AuthState;
+use crate::login::{session_credentials, spawn_session_logout};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::{AppConfig, AuthState};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
+/// Dev abridged-TCP port (`NX_CHAT_APP_TCP_PORT` on dev stacks). Production connects to
+/// [`DEFAULT_WS_HOST`] (`sock.mezon.ai`) as a hostname-only endpoint.
+const DEV_ABRIDGED_TCP_PORT: u16 = 7349;
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
 /// [`Global`] so it lives for the process; the held [`Task`]/[`Subscription`] cancel on drop.
 pub struct ConnectionStore {
     online: bool,
+    connecting_attempt: u32,
     _manager: Task<()>,
     _auth_observe: Subscription,
     _heartbeat: Task<()>,
@@ -49,6 +58,10 @@ impl ConnectionStore {
 
     pub fn is_online(&self) -> bool {
         self.online
+    }
+
+    pub fn connecting_attempt(&self) -> u32 {
+        self.connecting_attempt
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -98,16 +111,32 @@ impl ConnectionStore {
 
         let heartbeat = Self::spawn_heartbeat(transport.clone(), api.clone(), wake.clone(), cx);
 
-        let manager = cx.spawn(async move |_this, cx| {
+        let probe_url = AppConfig::try_global(cx)
+            .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
+            .unwrap_or_else(|| favicon_probe_url(""));
+        let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
+        let online_signal = network.online();
+
+        let manager = cx.spawn(async move |this, cx| {
             let exec = cx.background_executor().clone();
             let mut connected_user_id: Option<String> = None;
             let mut retry_backoff_secs = 1u64;
+            let mut consecutive_failures = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
 
             loop {
-                let session = cx.update(|cx| match auth_state.read(cx).clone() {
-                    AuthState::Connecting(s) | AuthState::Authenticated(s) => Some(s),
-                    _ => None,
+                let (session, is_connecting) = cx.update(|cx| match auth_state.read(cx).clone() {
+                    AuthState::Connecting(s) => (Some(s), true),
+                    AuthState::Authenticated(s) => (Some(s), false),
+                    _ => (None, false),
+                });
+
+                let displayed_attempt = if is_connecting { consecutive_failures } else { 0 };
+                let _ = this.update(cx, |store, cx| {
+                    if store.connecting_attempt != displayed_attempt {
+                        store.connecting_attempt = displayed_attempt;
+                        cx.notify();
+                    }
                 });
 
                 let Some(session) = session else {
@@ -118,25 +147,43 @@ impl ConnectionStore {
                         api.set_status(ConnectionStatus::Disconnected);
                     }
                     retry_backoff_secs = 1;
+                    consecutive_failures = 0;
                     wake.notified().await;
                     continue;
                 };
 
-                // Already connected with the right credential — park until something changes.
                 if connected_user_id.as_deref() == Some(session.user_id.as_str())
                     && transport.is_open().await
                 {
                     retry_backoff_secs = 1;
+                    consecutive_failures = 0;
                     wake.notified().await;
                     continue;
+                }
+
+                if requires_network_probe(consecutive_failures) {
+                    let os_online = *online_signal.borrow();
+                    let reachable = os_online
+                        && probe_network_reachability(&probe_url, RECONNECT_NETWORK_PROBE_TIMEOUT)
+                            .await;
+                    if !reachable {
+                        tracing::warn!(
+                            "Network unreachable before reconnect attempt — backing off without consuming a retry"
+                        );
+                        promote_connecting_to_authenticated(&auth_state, cx);
+                        retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
+                        backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                        continue;
+                    }
                 }
 
                 let host = session
                     .tcp_host
                     .clone()
                     .or(session.ws_host.clone())
-                    .unwrap_or_else(|| mezon_client::DEFAULT_WS_HOST.to_string());
-                let port = resolve_tcp_port(&session);
+                    .unwrap_or_else(|| DEFAULT_WS_HOST.to_string());
+                let explicit_port = resolve_tcp_port(&session, tcp_default_port);
+                let endpoint_label = socket_connect_label(&host, explicit_port);
 
                 if transport.is_open().await
                     && let Err(e) = transport.close().await
@@ -144,18 +191,17 @@ impl ConnectionStore {
                     tracing::warn!("Failed to close stale transport: {e}");
                 }
 
-                tracing::info!("Connecting shared abridged TCP transport to {host}:{port}");
+                tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
                 api.set_status(ConnectionStatus::Connecting);
-                // Socket credential: prefer the durable `session_id` (matches mezon-js), not the JWT.
                 let token = session.ws_credential().to_string();
                 let api_for_publish = api.clone();
                 let api_for_close = api.clone();
                 let wake_for_close = wake.clone();
                 connect_ack_rx.borrow_and_update();
-                match transport
+                let connect_result = transport
                     .connect(
                         &host,
-                        port,
+                        explicit_port,
                         &token,
                         move |event| {
                             api_for_publish.publish_event(event);
@@ -166,65 +212,81 @@ impl ConnectionStore {
                             } else {
                                 tracing::warn!("TCP transport closed with error");
                             }
-                            // Reactive reconnect: flag disconnected + wake the manager loop.
                             api_for_close.set_status(ConnectionStatus::Disconnected);
                             wake_for_close.notify_one();
                         },
                     )
-                    .await
-                {
+                    .await;
+
+                let confirmed = match connect_result {
                     Ok(()) => {
                         tracing::info!("Shared abridged TCP transport connected");
-
-                        let confirmed = {
-                            let signaled = tokio::select! {
-                                res = connect_ack_rx.changed() => res.is_ok(),
-                                _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
-                            };
-                            signaled && transport.is_open().await
+                        let signaled = tokio::select! {
+                            res = connect_ack_rx.changed() => res.is_ok(),
+                            _ = exec.timer(CONNECT_CONFIRM_GRACE) => true,
                         };
-
-                        if confirmed {
-                            connected_user_id = Some(session.user_id.clone());
-                            retry_backoff_secs = 1;
-                            api.set_status(ConnectionStatus::Connected);
-                            tracing::info!("Connection confirmed — handshake accepted");
-
-                            cx.update(|cx| {
-                                auth_state.update(cx, |state, cx| {
-                                    if let AuthState::Connecting(s) = state {
-                                        let session = s.clone();
-                                        *state = AuthState::Authenticated(session);
-                                        cx.notify();
-                                    }
-                                });
-                            });
-                        } else {
+                        let handshake_ok = signaled && transport.is_open().await;
+                        if !handshake_ok {
                             tracing::warn!(
                                 "Connection not confirmed — handshake rejected or dropped"
                             );
                             let _ = transport.close().await;
-                            connected_user_id = None;
-                            api.set_status(ConnectionStatus::Disconnected);
-                            retry_backoff_secs = (retry_backoff_secs * 2).min(60);
-                            promote_connecting_to_authenticated(&auth_state, cx);
-                            backoff_wait(&exec, &wake, retry_backoff_secs).await;
                         }
+                        handshake_ok
                     }
                     Err(e) => {
-                        connected_user_id = None;
-                        api.set_status(ConnectionStatus::Disconnected);
-                        retry_backoff_secs = (retry_backoff_secs * 2).min(60);
                         tracing::error!("Shared abridged TCP transport connect failed: {e}");
-                        promote_connecting_to_authenticated(&auth_state, cx);
-                        backoff_wait(&exec, &wake, retry_backoff_secs).await;
+                        false
                     }
+                };
+
+                if confirmed {
+                    connected_user_id = Some(session.user_id.clone());
+                    retry_backoff_secs = 1;
+                    consecutive_failures = 0;
+                    api.set_status(ConnectionStatus::Connected);
+                    tracing::info!("Connection confirmed — handshake accepted");
+                    cx.update(|cx| {
+                        auth_state.update(cx, |state, cx| {
+                            if let AuthState::Connecting(s) = state {
+                                let session = s.clone();
+                                *state = AuthState::Authenticated(session);
+                                cx.notify();
+                            }
+                        });
+                    });
+                    continue;
                 }
+
+                connected_user_id = None;
+                api.set_status(ConnectionStatus::Disconnected);
+                consecutive_failures += 1;
+
+                if reached_failure_limit(consecutive_failures) {
+                    tracing::warn!(
+                        "Reconnect failed {consecutive_failures} times consecutively — logging out"
+                    );
+                    let credentials = cx.update(|cx| session_credentials(auth_state.read(cx)));
+                    spawn_session_logout(api.clone(), credentials, &exec);
+                    cx.update(|cx| {
+                        auth_state.update(cx, |state, cx| {
+                            *state = AuthState::NotAuthenticated;
+                            cx.notify();
+                        });
+                    });
+                    consecutive_failures = 0;
+                    retry_backoff_secs = 1;
+                    continue;
+                }
+
+                retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
+                backoff_wait(&exec, &wake, retry_backoff_secs).await;
             }
         });
 
         Self {
             online,
+            connecting_attempt: 0,
             _manager: manager,
             _auth_observe: auth_observe,
             _heartbeat: heartbeat,
@@ -297,6 +359,18 @@ impl ConnectionStore {
     }
 }
 
+fn requires_network_probe(consecutive_failures: u32) -> bool {
+    consecutive_failures >= 1
+}
+
+fn reached_failure_limit(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+}
+
+fn next_backoff_secs(current: u64) -> u64 {
+    current.saturating_mul(2).min(RECONNECT_BACKOFF_CAP_SECS)
+}
+
 /// Wait out a reconnect backoff, but wake early if auth/connection state changes.
 async fn backoff_wait(exec: &BackgroundExecutor, wake: &tokio::sync::Notify, secs: u64) {
     let base_ms = secs.saturating_mul(1000);
@@ -325,22 +399,11 @@ fn promote_connecting_to_authenticated(auth_state: &Entity<AuthState>, cx: &mut 
     });
 }
 
-pub(crate) fn resolve_tcp_port(session: &Session) -> u16 {
-    if let Some(port) = session.tcp_port {
-        return port;
-    }
-    if let Some(port) = session.ws_port {
-        return port;
-    }
-    if let Ok(v) = std::env::var("NX_CHAT_APP_TCP_PORT")
-        && let Ok(port) = v.parse()
-    {
-        return port;
-    }
-    match session.tcp_host.as_deref().or(session.ws_host.as_deref()) {
-        Some(h) if h.contains("dev-mezon") || h.contains("nccsoft.vn") => 7349,
-        _ => 4433,
-    }
+pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> Option<u16> {
+    session
+        .tcp_port
+        .or(session.ws_port)
+        .or(default_port)
 }
 
 /// Restore a stored session from the OS keychain.
@@ -369,22 +432,6 @@ mod tests {
     use super::*;
     use mezon_client::Session;
 
-    fn session_with_tcp(host: Option<&str>, port: Option<u16>) -> Session {
-        Session {
-            tcp_host: host.map(str::to_owned),
-            tcp_port: port,
-            ..Default::default()
-        }
-    }
-
-    fn session_with_ws(host: Option<&str>, port: Option<u16>) -> Session {
-        Session {
-            ws_host: host.map(str::to_owned),
-            ws_port: port,
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn resolve_tcp_port_uses_tcp_port_field_first() {
         let s = Session {
@@ -392,46 +439,33 @@ mod tests {
             ws_port: Some(1111),
             ..Default::default()
         };
-        assert_eq!(resolve_tcp_port(&s), 9999);
+        assert_eq!(resolve_tcp_port(&s, Some(4433)), Some(9999));
     }
 
     #[test]
     fn resolve_tcp_port_falls_back_to_ws_port() {
-        let s = session_with_ws(None, Some(4433));
-        assert_eq!(resolve_tcp_port(&s), 4433);
-    }
-
-    #[test]
-    fn resolve_tcp_port_dev_mezon_host_gives_7349() {
-        let s = session_with_tcp(Some("dev-mezon.nccsoft.vn"), None);
-        assert_eq!(resolve_tcp_port(&s), 7349);
-    }
-
-    #[test]
-    fn resolve_tcp_port_nccsoft_host_gives_7349() {
-        let s = session_with_tcp(Some("api.nccsoft.vn"), None);
-        assert_eq!(resolve_tcp_port(&s), 7349);
-    }
-
-    #[test]
-    fn resolve_tcp_port_unknown_host_gives_4433() {
-        let s = session_with_tcp(Some("mezon.ai"), None);
-        assert_eq!(resolve_tcp_port(&s), 4433);
-    }
-
-    #[test]
-    fn resolve_tcp_port_no_info_gives_4433() {
-        let s = Session::default();
-        assert_eq!(resolve_tcp_port(&s), 4433);
-    }
-
-    #[test]
-    fn resolve_tcp_port_ws_host_used_when_no_tcp_host() {
         let s = Session {
-            ws_host: Some("dev-mezon.nccsoft.vn".to_owned()),
+            ws_port: Some(8888),
             ..Default::default()
         };
-        assert_eq!(resolve_tcp_port(&s), 7349);
+        assert_eq!(resolve_tcp_port(&s, Some(4433)), Some(8888));
+    }
+
+    #[test]
+    fn resolve_tcp_port_uses_config_default_when_session_has_no_port() {
+        let s = Session {
+            tcp_host: Some("mezon.ai".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_tcp_port(&s, Some(DEV_ABRIDGED_TCP_PORT)),
+            Some(7349)
+        );
+    }
+
+    #[test]
+    fn resolve_tcp_port_defaults_to_none_for_prod_sock_host() {
+        assert_eq!(resolve_tcp_port(&Session::default(), None), None);
     }
 
     #[test]
@@ -441,5 +475,194 @@ mod tests {
             secs = (secs * 2).min(60);
         }
         assert_eq!(secs, 60);
+    }
+
+    #[test]
+    fn next_backoff_secs_doubles_with_cap() {
+        assert_eq!(next_backoff_secs(1), 2);
+        assert_eq!(next_backoff_secs(2), 4);
+        assert_eq!(next_backoff_secs(16), 32);
+        assert_eq!(next_backoff_secs(32), 60);
+        assert_eq!(next_backoff_secs(60), 60);
+    }
+
+    #[test]
+    fn first_attempt_connects_without_probe_then_probes_every_retry() {
+        assert!(!requires_network_probe(0));
+        assert!(requires_network_probe(1));
+        assert!(requires_network_probe(4));
+    }
+
+    #[test]
+    fn failure_limit_reached_only_after_five() {
+        assert!(!reached_failure_limit(0));
+        assert!(!reached_failure_limit(4));
+        assert!(reached_failure_limit(5));
+        assert!(reached_failure_limit(6));
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Surface {
+        Connecting,
+        AppShell,
+        LoggedOut,
+    }
+
+    struct ReconnectSim {
+        consecutive_failures: u32,
+        logout_count: u32,
+        surface: Surface,
+        displayed_attempt: u32,
+    }
+
+    impl ReconnectSim {
+        fn new() -> Self {
+            Self {
+                consecutive_failures: 0,
+                logout_count: 0,
+                surface: Surface::Connecting,
+                displayed_attempt: 0,
+            }
+        }
+
+        fn begin_iteration(&mut self) {
+            self.displayed_attempt = if self.surface == Surface::Connecting {
+                self.consecutive_failures
+            } else {
+                0
+            };
+        }
+
+        fn probe_required(&self) -> bool {
+            requires_network_probe(self.consecutive_failures)
+        }
+
+        fn record_offline_gate(&mut self) {
+            self.surface = Surface::AppShell;
+        }
+
+        fn record_connect_failure(&mut self) {
+            self.consecutive_failures += 1;
+            if reached_failure_limit(self.consecutive_failures) {
+                self.logout_count += 1;
+                self.consecutive_failures = 0;
+                self.surface = Surface::LoggedOut;
+            }
+        }
+
+        fn record_connect_success(&mut self) {
+            self.consecutive_failures = 0;
+            self.surface = Surface::AppShell;
+        }
+    }
+
+    #[test]
+    fn five_consecutive_failures_log_out_once_then_reset() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..4 {
+            sim.record_connect_failure();
+            assert_eq!(sim.logout_count, 0);
+        }
+        sim.record_connect_failure();
+        assert_eq!(sim.logout_count, 1);
+        assert_eq!(sim.consecutive_failures, 0);
+        assert!(!sim.probe_required());
+    }
+
+    #[test]
+    fn success_resets_failure_counter() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..4 {
+            sim.record_connect_failure();
+        }
+        assert_eq!(sim.consecutive_failures, 4);
+
+        sim.record_connect_success();
+        assert_eq!(sim.consecutive_failures, 0);
+        assert_eq!(sim.logout_count, 0);
+
+        for _ in 0..4 {
+            sim.record_connect_failure();
+        }
+        assert_eq!(sim.logout_count, 0);
+        sim.record_connect_failure();
+        assert_eq!(sim.logout_count, 1);
+    }
+
+    #[test]
+    fn offline_skips_do_not_consume_attempts_or_log_out() {
+        let mut sim = ReconnectSim::new();
+        sim.record_connect_failure();
+        assert!(sim.probe_required());
+
+        for _ in 0..50 {
+            assert!(sim.probe_required());
+            assert_eq!(sim.logout_count, 0);
+            assert_eq!(sim.consecutive_failures, 1);
+        }
+    }
+
+    #[test]
+    fn online_failure_below_limit_keeps_connecting() {
+        let mut sim = ReconnectSim::new();
+        for expected in 1..=4 {
+            sim.record_connect_failure();
+            assert_eq!(sim.consecutive_failures, expected);
+            assert_eq!(sim.surface, Surface::Connecting);
+        }
+    }
+
+    #[test]
+    fn offline_gate_promotes_to_app_shell_without_consuming_attempt() {
+        let mut sim = ReconnectSim::new();
+        sim.record_connect_failure();
+        assert_eq!(sim.surface, Surface::Connecting);
+        sim.begin_iteration();
+        assert!(sim.probe_required());
+
+        sim.record_offline_gate();
+        assert_eq!(sim.surface, Surface::AppShell);
+        assert_eq!(sim.consecutive_failures, 1);
+        assert_eq!(sim.logout_count, 0);
+    }
+
+    #[test]
+    fn fifth_online_failure_logs_out_and_leaves_connecting() {
+        let mut sim = ReconnectSim::new();
+        for _ in 0..4 {
+            sim.record_connect_failure();
+            assert_eq!(sim.surface, Surface::Connecting);
+        }
+        sim.record_connect_failure();
+        assert_eq!(sim.surface, Surface::LoggedOut);
+    }
+
+    #[test]
+    fn connecting_attempt_mirrors_failures_and_resets_on_success() {
+        let mut sim = ReconnectSim::new();
+        sim.begin_iteration();
+        assert_eq!(sim.displayed_attempt, 0);
+
+        sim.record_connect_failure();
+        sim.record_connect_failure();
+        sim.begin_iteration();
+        assert_eq!(sim.displayed_attempt, 2);
+
+        sim.record_connect_success();
+        sim.begin_iteration();
+        assert_eq!(sim.displayed_attempt, 0);
+        assert_eq!(sim.surface, Surface::AppShell);
+    }
+
+    #[test]
+    fn mid_session_failures_do_not_display_attempt() {
+        let mut sim = ReconnectSim::new();
+        sim.record_connect_success();
+        for _ in 0..4 {
+            sim.record_connect_failure();
+            sim.begin_iteration();
+            assert_eq!(sim.surface, Surface::AppShell);
+            assert_eq!(sim.displayed_attempt, 0);
+        }
     }
 }

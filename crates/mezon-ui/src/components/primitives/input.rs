@@ -1,4 +1,9 @@
+#[path = "blink_manager.rs"]
+mod blink_manager;
+
 use std::ops::Range;
+
+use blink_manager::CaretBlink;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
@@ -6,7 +11,7 @@ use gpui::{
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, ShapedLine,
     SharedString, Style, StyleRefinement, Styled, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, point, prelude::*, px, size,
+    actions, div, fill, point, prelude::*, px, size, svg,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -44,10 +49,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-a", SelectAll, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-v", Paste, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-c", Copy, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-x", Cut, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-a", SelectAll, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-c", Copy, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-x", Cut, Some(KEY_CONTEXT)),
         KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
         KeyBinding::new("end", End, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
@@ -76,14 +81,24 @@ pub struct InputState {
     multi_line: bool,
     embedded: bool,
     validate: Option<ValidateFn>,
+    height: Option<Pixels>,
+    radius: Option<Pixels>,
+    bg_override: Option<Hsla>,
+    text_color_override: Option<Hsla>,
+    text_size_override: Option<Pixels>,
+    padding_x: Option<Pixels>,
+    padding_right: Option<Pixels>,
+    show_border: bool,
+    pub(crate) caret_blink: CaretBlink,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
 
 impl InputState {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
-            focus_handle: cx.focus_handle(),
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        let this = Self {
+            focus_handle: focus_handle.clone(),
             content: SharedString::default(),
             placeholder: SharedString::default(),
             selected_range: 0..0,
@@ -96,11 +111,72 @@ impl InputState {
             multi_line: false,
             embedded: false,
             validate: None,
-        }
+            height: None,
+            radius: None,
+            bg_override: None,
+            text_color_override: None,
+            text_size_override: None,
+            padding_x: None,
+            padding_right: None,
+            show_border: true,
+            caret_blink: CaretBlink::new(),
+        };
+
+        cx.on_focus(&focus_handle, window, |this, _window, cx| {
+            this.caret_blink.sync_focused(cx);
+        })
+        .detach();
+
+        cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.caret_blink.sync_blurred(cx);
+        })
+        .detach();
+
+        this
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn height(mut self, height: Pixels) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    pub fn radius(mut self, radius: Pixels) -> Self {
+        self.radius = Some(radius);
+        self
+    }
+
+    pub fn bg(mut self, bg: impl Into<Hsla>) -> Self {
+        self.bg_override = Some(bg.into());
+        self
+    }
+
+    pub fn text_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.text_color_override = Some(color.into());
+        self
+    }
+
+    pub fn text_size(mut self, size: Pixels) -> Self {
+        self.text_size_override = Some(size);
+        self
+    }
+
+    pub fn padding_x(mut self, padding: Pixels) -> Self {
+        self.padding_x = Some(padding);
+        self
+    }
+
+    pub fn padding_right(mut self, padding: Pixels) -> Self {
+        self.padding_right = Some(padding);
+        self
+    }
+
+    pub fn borderless(mut self) -> Self {
+        self.show_border = false;
         self
     }
 
@@ -154,6 +230,7 @@ impl InputState {
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        self.caret_blink.sync_focused(cx);
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -225,7 +302,14 @@ impl InputState {
         self.replace_text_in_range(None, "", window, cx)
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        self.caret_blink.sync_focused(cx);
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -285,7 +369,12 @@ impl InputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.pause_caret_blink(cx);
         cx.notify()
+    }
+
+    fn pause_caret_blink(&mut self, cx: &mut Context<Self>) {
+        self.caret_blink.pause_blinking(cx);
     }
 
     fn cursor_offset(&self) -> usize {
@@ -358,6 +447,7 @@ impl InputState {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.pause_caret_blink(cx);
         cx.notify()
     }
 
@@ -477,6 +567,7 @@ impl EntityInputHandler for InputState {
         self.content = candidate.into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
     }
@@ -509,6 +600,7 @@ impl EntityInputHandler for InputState {
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        self.pause_caret_blink(cx);
         cx.notify();
         cx.emit(InputEvent::Change);
     }
@@ -556,10 +648,26 @@ impl Focusable for InputState {
 impl Render for InputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let bg = cx.theme().bg_tertiary;
-        let text_color = cx.theme().text_primary;
+        if focused {
+            self.caret_blink.sync_focused(cx);
+        } else {
+            self.caret_blink.sync_blurred(cx);
+        }
+
+        let bg: Hsla = self.bg_override.unwrap_or(cx.theme().bg_tertiary.into());
+        let text_color: Hsla = self
+            .text_color_override
+            .unwrap_or(cx.theme().text_primary.into());
         let border = cx.theme().border;
         let focus_border = cx.theme().brand;
+        let height = self
+            .height
+            .unwrap_or(if self.multi_line { px(72.) } else { px(36.) });
+        let radius = self.radius;
+        let padding_x = self.padding_x.unwrap_or(px(10.));
+        let padding_right = self.padding_right;
+        let text_size = self.text_size_override.unwrap_or(px(14.));
+        let show_border = self.show_border;
 
         div()
             .key_context(KEY_CONTEXT)
@@ -589,15 +697,19 @@ impl Render for InputState {
             .w_full()
             .when(self.embedded, |el| el.min_h(px(24.)).px_0())
             .when(!self.embedded, |el| {
-                el.min_h(if self.multi_line { px(72.) } else { px(36.) })
-                    .px(px(10.))
-                    .rounded_md()
+                el.min_h(height)
+                    .px(padding_x)
+                    .when_some(padding_right, |el, p| el.pr(p))
+                    .when(radius.is_none(), |el| el.rounded_md())
+                    .when_some(radius, |el, r| el.rounded(r))
                     .bg(bg)
-                    .border_1()
-                    .border_color(if focused { focus_border } else { border })
+                    .when(show_border, |el| {
+                        el.border_1()
+                            .border_color(if focused { focus_border } else { border })
+                    })
             })
             .text_color(text_color)
-            .text_size(px(14.))
+            .text_size(text_size)
             .child(
                 div()
                     .flex_1()
@@ -792,6 +904,7 @@ impl Element for TextElement {
         }
 
         if focus_handle.is_focused(window)
+            && self.input.read(cx).caret_blink.visible()
             && let Some(cursor) = prepaint.cursor.take()
         {
             window.paint_quad(cursor);
@@ -809,8 +922,6 @@ pub struct Input {
     state: Entity<InputState>,
     base: Div,
     mask_toggle: bool,
-    show_label: SharedString,
-    hide_label: SharedString,
 }
 
 impl Input {
@@ -819,23 +930,11 @@ impl Input {
             state: state.clone(),
             base: div().w_full(),
             mask_toggle: false,
-            show_label: "Show".into(),
-            hide_label: "Hide".into(),
         }
     }
 
     pub fn mask_toggle(mut self) -> Self {
         self.mask_toggle = true;
-        self
-    }
-
-    pub fn show_label(mut self, label: impl Into<SharedString>) -> Self {
-        self.show_label = label.into();
-        self
-    }
-
-    pub fn hide_label(mut self, label: impl Into<SharedString>) -> Self {
-        self.hide_label = label.into();
         self
     }
 }
@@ -852,17 +951,28 @@ impl RenderOnce for Input {
         let masked = state.read(cx).masked;
         let toggle_color = cx.theme().text_muted;
 
-        let show_label = self.show_label.clone();
-        let hide_label = self.hide_label.clone();
         let toggle = self.mask_toggle.then(|| {
             let state = state.clone();
             div()
                 .id("mask-toggle")
-                .px(px(6.))
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .px(px(16.))
+                .flex()
+                .items_center()
                 .cursor_pointer()
-                .text_xs()
-                .text_color(toggle_color)
-                .child(if masked { show_label } else { hide_label })
+                .child(
+                    svg()
+                        .path(if masked {
+                            "icons/eye-open.svg"
+                        } else {
+                            "icons/eye-close.svg"
+                        })
+                        .size(px(20.))
+                        .text_color(toggle_color),
+                )
                 .on_click(move |_, window, cx| {
                     state.update(cx, |input, cx| {
                         let next = !input.masked;
@@ -872,9 +982,8 @@ impl RenderOnce for Input {
         });
 
         self.base
-            .flex()
-            .items_center()
-            .child(div().flex_1().child(state))
+            .relative()
+            .child(state)
             .when_some(toggle, |el, toggle| el.child(toggle))
     }
 }

@@ -1,5 +1,5 @@
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ struct Entry<V> {
 /// + entity adapter). The store owns the value type and decides what each key means.
 pub struct KeyedCache<K, V> {
     entries: HashMap<K, Entry<V>>,
-    order: Vec<K>,
+    order: VecDeque<K>,
     max: Option<usize>,
 }
 
@@ -21,7 +21,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
     pub fn new(max: Option<usize>) -> Self {
         Self {
             entries: HashMap::new(),
-            order: Vec::new(),
+            order: VecDeque::new(),
             max,
         }
     }
@@ -81,7 +81,7 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
                 fetched_at: Some(Instant::now()),
             },
         );
-        self.order.push(key);
+        self.order.push_back(key);
         self.evict(protect);
     }
 
@@ -91,9 +91,10 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        if let Some(pos) = self.order.iter().position(|k| k.borrow() == key) {
-            let k = self.order.remove(pos);
-            self.order.push(k);
+        if let Some(pos) = self.order.iter().position(|k| k.borrow() == key)
+            && let Some(k) = self.order.remove(pos)
+        {
+            self.order.push_back(k);
         }
     }
 
@@ -116,21 +117,62 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
             return;
         };
         while self.entries.len() > max {
-            let Some(victim) = self.order.first().cloned() else {
+            let Some(victim) = self.order.front().cloned() else {
                 break;
             };
             if protect == Some(&victim) {
                 break;
             }
-            self.order.remove(0);
+            self.order.pop_front();
             self.entries.remove(&victim);
         }
+    }
+}
+
+pub struct Freshness {
+    fetched_at: Option<Instant>,
+}
+
+impl Freshness {
+    pub fn new() -> Self {
+        Self { fetched_at: None }
+    }
+
+    pub fn is_fresh(&self, ttl: Duration) -> bool {
+        self.fetched_at.is_some_and(|t| t.elapsed() < ttl)
+    }
+
+    pub fn mark_fetched(&mut self) {
+        self.fetched_at = Some(Instant::now());
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.fetched_at = None;
+    }
+}
+
+impl Default for Freshness {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freshness_starts_stale_then_tracks_fetch_and_stale() {
+        let mut f = Freshness::new();
+        assert!(!f.is_fresh(Duration::from_secs(60)));
+
+        f.mark_fetched();
+        assert!(f.is_fresh(Duration::from_secs(60)));
+        assert!(!f.is_fresh(Duration::from_millis(0)));
+
+        f.mark_stale();
+        assert!(!f.is_fresh(Duration::from_secs(60)));
+    }
 
     #[test]
     fn fresh_then_stale_keeps_value() {

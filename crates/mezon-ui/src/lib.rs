@@ -25,7 +25,12 @@ pub use sidebar::direct_sidebar::DirectSidebar;
 pub use theme::Theme;
 pub use theme::tokens::ThemeTokens;
 
-gpui::actions!(mezon, [ToggleInspector, Quit]);
+pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = false;
+
+gpui::actions!(
+    mezon,
+    [ToggleInspector, Quit, HideWindow, MinimizeWindow, HideApp]
+);
 
 #[macro_export]
 macro_rules! trace_render {
@@ -57,27 +62,100 @@ pub fn init(cx: &mut gpui::App) {
     #[cfg(debug_assertions)]
     cx.bind_keys([gpui::KeyBinding::new("cmd-alt-i", ToggleInspector, None)]);
     components::primitives::init_input(cx);
+    chat::mention_input::init(cx);
     router::Router::init(cx);
     init_menus(cx);
 }
 
-/// macOS menu bar + Cmd+Q. The Edit items reuse the input component's own clipboard actions, so
-/// the menu drives the same handlers as the in-input keybindings (cf. Zed's app menus).
+/// macOS menu bar and standard shortcuts. Edit items reuse the input component's clipboard actions.
 fn init_menus(cx: &mut gpui::App) {
     use crate::components::primitives::input::{Copy, Cut, Paste, SelectAll};
-    use gpui::{Menu, MenuItem, OsAction};
 
-    cx.on_action(|_: &Quit, cx: &mut gpui::App| cx.quit());
-    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
+    #[cfg(target_os = "macos")]
+    init_macos_menu_actions(cx);
 
-    cx.set_menus(vec![
-        Menu::new("Mezon").items([MenuItem::action("Quit Mezon", Quit)]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Cut", Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
-            MenuItem::separator(),
-            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
-        ]),
+    #[cfg(not(target_os = "macos"))]
+    {
+        use gpui::KeyBinding;
+
+        cx.on_action(|_: &Quit, cx: &mut gpui::App| cx.quit());
+        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+    }
+
+    cx.set_menus(app_menus(Cut, Copy, Paste, SelectAll));
+}
+
+#[cfg(target_os = "macos")]
+fn init_macos_menu_actions(cx: &mut gpui::App) {
+    use crate::app::window_controls::macos;
+    use gpui::{App, KeyBinding};
+
+    macos::install_shortcuts(cx);
+
+    // Menu clicks dispatch GPUI actions; keyboard shortcuts are handled in `install_shortcuts`.
+    // Global handlers satisfy macOS menu validation (`is_action_available`).
+    cx.on_action(|_: &HideWindow, cx: &mut App| macos::hide_active_window(cx));
+    cx.on_action(|_: &MinimizeWindow, cx: &mut App| macos::minimize_active_window(cx));
+    cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
+    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+
+    // Key bindings label menu items; shortcuts are handled natively on macOS.
+    cx.bind_keys([
+        KeyBinding::new("cmd-w", HideWindow, None),
+        KeyBinding::new("cmd-m", MinimizeWindow, None),
+        KeyBinding::new("cmd-h", HideApp, None),
+        KeyBinding::new("cmd-q", Quit, None),
     ]);
+}
+
+fn app_menus(
+    cut: crate::components::primitives::input::Cut,
+    copy: crate::components::primitives::input::Copy,
+    paste: crate::components::primitives::input::Paste,
+    select_all: crate::components::primitives::input::SelectAll,
+) -> Vec<gpui::Menu> {
+    use gpui::{Menu, MenuItem};
+
+    let edit = Menu::new("Edit").items(edit_menu_items(cut, copy, paste, select_all));
+
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            Menu::new("Mezon").items([
+                MenuItem::action("Hide Mezon", HideApp),
+                MenuItem::separator(),
+                MenuItem::action("Quit Mezon", Quit),
+            ]),
+            edit,
+            Menu::new("Window").items([
+                MenuItem::action("Minimize", MinimizeWindow),
+                MenuItem::action("Close Window", HideWindow),
+            ]),
+        ]
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![
+            Menu::new("Mezon").items([MenuItem::action("Quit Mezon", Quit)]),
+            edit,
+        ]
+    }
+}
+
+fn edit_menu_items(
+    cut: crate::components::primitives::input::Cut,
+    copy: crate::components::primitives::input::Copy,
+    paste: crate::components::primitives::input::Paste,
+    select_all: crate::components::primitives::input::SelectAll,
+) -> [gpui::MenuItem; 5] {
+    use gpui::{MenuItem, OsAction};
+
+    [
+        MenuItem::os_action("Cut", cut, OsAction::Cut),
+        MenuItem::os_action("Copy", copy, OsAction::Copy),
+        MenuItem::os_action("Paste", paste, OsAction::Paste),
+        MenuItem::separator(),
+        MenuItem::os_action("Select All", select_all, OsAction::SelectAll),
+    ]
 }

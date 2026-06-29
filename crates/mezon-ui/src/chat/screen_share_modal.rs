@@ -1,0 +1,552 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, SharedString, Window,
+    div, img, prelude::*, px,
+};
+use mezon_store::{
+    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, Settings, VoiceStore,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+};
+
+use crate::app::shell::Shell;
+use crate::chat::voice::ACCENT_BLUE;
+use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, h_flex, v_flex};
+use crate::theme::ActiveTheme;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PreviewKey {
+    kind: ScreenShareKind,
+    id: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShareTab {
+    Window,
+    EntireScreen,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SelectedTarget {
+    kind: ScreenShareKind,
+    id: u32,
+}
+
+pub struct ScreenShareModal {
+    focus_handle: FocusHandle,
+    voice: Entity<VoiceStore>,
+    settings: Entity<Settings>,
+    tab: ShareTab,
+    options: Vec<ScreenShareOption>,
+    previews: HashMap<PreviewKey, Arc<RenderImage>>,
+    preview_requests: HashSet<PreviewKey>,
+    loading: bool,
+    load_error: Option<String>,
+    selected: Option<SelectedTarget>,
+    load_started: bool,
+}
+
+impl Focusable for ScreenShareModal {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl ScreenShareModal {
+    pub fn new(
+        voice: Entity<VoiceStore>,
+        settings: Entity<Settings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+
+        let cached = peek_screen_share_options();
+
+        Self {
+            focus_handle,
+            voice,
+            settings,
+            tab: ShareTab::Window,
+            options: cached.clone().unwrap_or_default(),
+            previews: HashMap::new(),
+            preview_requests: HashSet::new(),
+            loading: cached.is_none(),
+            load_error: None,
+            selected: None,
+            load_started: false,
+        }
+    }
+
+    fn start_loading(&mut self, cx: &mut Context<Self>) {
+        if self.load_started {
+            return;
+        }
+        self.load_started = true;
+
+        if let Some(options) = peek_screen_share_options() {
+            self.options = options;
+            self.loading = false;
+        }
+
+        let this = cx.entity().clone();
+        cx.spawn(async move |_, cx| {
+            let (tx, rx) = flume::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send(list_screen_share_options());
+            });
+            let result = rx.recv_async().await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(options)) => {
+                        this.options = options;
+                        this.loading = false;
+                        this.previews.clear();
+                        this.preview_requests.clear();
+                    }
+                    Ok(Err(message)) => {
+                        this.load_error = Some(message);
+                        this.loading = false;
+                    }
+                    Err(_) => {
+                        this.load_error = Some("failed to load share targets".into());
+                        this.loading = false;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_preview_loading(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.load_error.is_some() {
+            return;
+        }
+
+        let targets: Vec<(ScreenShareKind, u32)> = self
+            .filtered_options()
+            .into_iter()
+            .filter_map(|option| {
+                let key = PreviewKey {
+                    kind: option.kind,
+                    id: option.id,
+                };
+                if self.previews.contains_key(&key) || self.preview_requests.contains(&key) {
+                    None
+                } else {
+                    Some((option.kind, option.id))
+                }
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+
+        self.preview_requests.extend(
+            targets
+                .iter()
+                .copied()
+                .map(|(kind, id)| PreviewKey { kind, id }),
+        );
+
+        let this = cx.entity().clone();
+        cx.spawn(async move |_, cx| {
+            let (tx, rx) = flume::bounded(targets.len().max(1));
+            std::thread::Builder::new()
+                .name("mezon-screen-previews".into())
+                .spawn(move || {
+                    for (kind, id) in targets {
+                        // Always report a result (including `None` on failure) so the
+                        // UI side can clear the in-flight request and allow a retry.
+                        let preview = capture_screen_share_preview(kind, id);
+                        let _ = tx.send((kind, id, preview));
+                    }
+                })
+                .ok();
+
+            while let Ok((kind, id, preview)) = rx.recv_async().await {
+                let key = PreviewKey { kind, id };
+                let image = preview.and_then(preview_to_render_image);
+                this.update(cx, |this, cx| {
+                    match image {
+                        Some(image) => {
+                            this.previews.insert(key, image);
+                        }
+                        None => {
+                            // Capture failed: drop the in-flight marker so this target
+                            // can be retried on a later render instead of being stuck.
+                            this.preview_requests.remove(&key);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn close(&mut self, cx: &mut Context<Self>) {
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    }
+
+    fn set_tab(&mut self, tab: ShareTab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        if let Some(selected) = self.selected {
+            let still_valid = self
+                .options
+                .iter()
+                .any(|option| option_kind(option) == selected.kind && option.id == selected.id);
+            if !still_valid {
+                self.selected = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn confirm_share(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let Some(option) = self
+            .options
+            .iter()
+            .find(|option| option_kind(option) == selected.kind && option.id == selected.id)
+        else {
+            return;
+        };
+        let pick = PickedScreen::Target(option.target.clone());
+        self.voice
+            .update(cx, |store, cx| store.start_screen_share(pick, cx));
+        self.close(cx);
+    }
+
+    fn filtered_options(&self) -> Vec<&ScreenShareOption> {
+        let kind = match self.tab {
+            ShareTab::Window => ScreenShareKind::Window,
+            ShareTab::EntireScreen => ScreenShareKind::Display,
+        };
+        self.options
+            .iter()
+            .filter(|option| option.kind == kind)
+            .collect()
+    }
+}
+
+fn preview_to_render_image(preview: ScreenSharePreview) -> Option<Arc<RenderImage>> {
+    let buffer = image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba)?;
+    Some(Arc::new(RenderImage::new(smallvec::smallvec![
+        image::Frame::new(buffer,)
+    ])))
+}
+
+fn option_kind(option: &ScreenShareOption) -> ScreenShareKind {
+    option.kind
+}
+
+impl Render for ScreenShareModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.start_loading(cx);
+        self.start_preview_loading(cx);
+
+        let locale = self.settings.read(cx).language.clone();
+        let theme = cx.theme();
+        let border: gpui::Hsla = theme.border.into();
+        let text_primary: gpui::Hsla = theme.text_primary.into();
+        let text_muted: gpui::Hsla = theme.text_muted.into();
+        let bg: gpui::Hsla = theme.bg_secondary.into();
+        let accent = gpui::Hsla::from(gpui::rgb(ACCENT_BLUE));
+        let tile_bg: gpui::Hsla = theme.bg_tertiary.into();
+        let status_dnd: gpui::Hsla = theme.status_dnd.into();
+
+        let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
+        let window_tab: SharedString = mezon_i18n::t(&locale, "screenShare.window").into();
+        let screen_tab: SharedString = mezon_i18n::t(&locale, "screenShare.entireScreen").into();
+        let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
+        let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
+        let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
+        let empty_label: SharedString = mezon_i18n::t(&locale, "screenShare.selectScreen").into();
+
+        let filtered = self.filtered_options();
+        let can_share = self.selected.is_some();
+
+        let tab_window_active = self.tab == ShareTab::Window;
+        let tab_screen_active = self.tab == ShareTab::EntireScreen;
+
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context("menu")
+            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+                this.close(cx);
+            }))
+            .w(px(720.))
+            .h(px(560.))
+            .rounded(px(12.))
+            .bg(bg)
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .justify_between()
+                    .items_center()
+                    .px(px(20.))
+                    .py(px(16.))
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(text_primary)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("screen-share-close")
+                            .w(px(24.))
+                            .h(px(24.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .opacity(0.5)
+                            .hover(|s| s.opacity(1.0))
+                            .text_size(px(18.))
+                            .text_color(text_primary)
+                            .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
+                            .child("×"),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(8.))
+                    .px(px(20.))
+                    .pt(px(12.))
+                    .child(tab_button(
+                        "screen-share-tab-window",
+                        window_tab,
+                        tab_window_active,
+                        accent,
+                        text_muted,
+                        border,
+                        cx.listener(|this, _, _window, cx| {
+                            this.set_tab(ShareTab::Window, cx);
+                        }),
+                    ))
+                    .child(tab_button(
+                        "screen-share-tab-screen",
+                        screen_tab,
+                        tab_screen_active,
+                        accent,
+                        text_muted,
+                        border,
+                        cx.listener(|this, _, _window, cx| {
+                            this.set_tab(ShareTab::EntireScreen, cx);
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .id("screen-share-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .px(px(20.))
+                    .py(px(16.))
+                    .overflow_y_scroll()
+                    .when(self.loading, |this| {
+                        this.flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().text_sm().text_color(text_muted).child(loading_label))
+                    })
+                    .when(!self.loading, |this| {
+                        this.when_some(self.load_error.clone(), |el, message| {
+                            el.flex()
+                                .items_center()
+                                .justify_center()
+                                .child(div().text_sm().text_color(status_dnd).child(message))
+                        })
+                        .when(self.load_error.is_none(), |el| {
+                            el.when(filtered.is_empty(), |empty| {
+                                empty
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .py(px(40.))
+                                    .child(
+                                        div().text_sm().text_color(text_muted).child(empty_label),
+                                    )
+                            })
+                            .when(!filtered.is_empty(), |grid| {
+                                grid.child(target_grid(
+                                    &filtered,
+                                    &self.previews,
+                                    self.selected,
+                                    accent,
+                                    border,
+                                    text_primary,
+                                    text_muted,
+                                    tile_bg,
+                                    cx,
+                                ))
+                            })
+                        })
+                    }),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .items_center()
+                    .justify_end()
+                    .px(px(20.))
+                    .py(px(16.))
+                    .border_t_1()
+                    .border_color(border)
+                    // NOTE: the "also share system audio" toggle is intentionally hidden
+                    // until audio capture is wired into the screen-share engine. Re-add the
+                    // Switch here (and a `share_audio` field) once it is supported.
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("screen-share-cancel")
+                                    .label(cancel_label)
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _window, cx| this.close(cx))),
+                            )
+                            .child(
+                                Button::new("screen-share-confirm")
+                                    .label(share_label)
+                                    .primary()
+                                    .disabled(!can_share)
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.confirm_share(cx);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+}
+
+fn tab_button(
+    id: &'static str,
+    label: SharedString,
+    active: bool,
+    accent: gpui::Hsla,
+    text_muted: gpui::Hsla,
+    border: gpui::Hsla,
+    handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px(px(14.))
+        .py(px(8.))
+        .rounded(px(8.))
+        .cursor_pointer()
+        .when(active, |this| {
+            this.bg(accent)
+                .text_color(gpui::Hsla::from(gpui::rgb(0xffffff)))
+        })
+        .when(!active, |this| {
+            this.text_color(text_muted)
+                .border_1()
+                .border_color(border)
+                .hover(|s| s.bg(border))
+        })
+        .on_click(handler)
+        .child(label)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn target_grid(
+    options: &[&ScreenShareOption],
+    previews: &HashMap<PreviewKey, Arc<RenderImage>>,
+    selected: Option<SelectedTarget>,
+    accent: gpui::Hsla,
+    border: gpui::Hsla,
+    text_primary: gpui::Hsla,
+    text_muted: gpui::Hsla,
+    tile_bg: gpui::Hsla,
+    cx: &mut Context<ScreenShareModal>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap(px(12.))
+        .pb(px(4.))
+        .children(options.iter().enumerate().map(|(index, option)| {
+            let kind = option.kind;
+            let preview_key = PreviewKey {
+                kind,
+                id: option.id,
+            };
+            let is_selected = selected
+                == Some(SelectedTarget {
+                    kind,
+                    id: option.id,
+                });
+            let title = option.title.clone();
+            let id = option.id;
+            let tile_id = SharedString::from(format!("screen-share-tile-{index}"));
+            let preview = previews.get(&preview_key).cloned();
+            let has_preview = preview.is_some();
+
+            div()
+                .id(tile_id)
+                .w(px(210.))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.selected = Some(SelectedTarget { kind, id });
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(118.))
+                        .rounded(px(8.))
+                        .overflow_hidden()
+                        .bg(tile_bg)
+                        .border_2()
+                        .when(is_selected, |this| this.border_color(accent))
+                        .when(!is_selected, |this| this.border_color(border))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when_some(preview, |tile, image| {
+                            tile.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                        })
+                        .when(!has_preview, |tile| tile.child(tile_icon(text_muted))),
+                )
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .text_sm()
+                        .text_color(text_primary)
+                        .truncate()
+                        .child(title),
+                )
+        }))
+}
+
+fn tile_icon(color: gpui::Hsla) -> impl IntoElement {
+    Icon::new(IconName::VoiceScreenShareIcon)
+        .size(px(40.))
+        .text_color(color)
+}
+
+pub fn open_screen_share_modal(
+    voice: Entity<VoiceStore>,
+    settings: Entity<Settings>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, window, cx));
+    Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+}

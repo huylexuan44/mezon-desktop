@@ -4,13 +4,14 @@ use gpui::{
     AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_store::{ClanList, Settings};
+use mezon_store::{ClanId, ClanList, Settings};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
+use crate::app::window_controls;
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, Router};
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
 use clan_row::{ClanRow, render_clan_row, render_pill};
@@ -20,8 +21,10 @@ pub struct ClanSidebar {
     settings: Entity<Settings>,
     rows: Rc<Vec<ClanRow>>,
     list_state: ListState,
-    active_clan_id: Option<String>,
+    active_clan_id: Option<ClanId>,
     dm_active: bool,
+    can_go_back: bool,
+    can_go_forward: bool,
     _clan_sub: Subscription,
     _settings_sub: Subscription,
     _router_sub: Subscription,
@@ -34,25 +37,37 @@ impl ClanSidebar {
         cx: &mut Context<Self>,
     ) -> Self {
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
-            this.sync_rows(clan_list.read(cx));
+            this.sync_rows(clan_list.read(cx), cx);
             cx.notify();
         });
         let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
+            let router = router.read(cx);
             let new_dm_active = matches!(
-                router.read(cx).route(),
+                router.route(),
                 Route::Direct | Route::DirectMessage { .. } | Route::Friends
             );
-            if new_dm_active != this.dm_active {
+            let new_can_go_back = router.can_go_back();
+            let new_can_go_forward = router.can_go_forward();
+            if new_dm_active != this.dm_active
+                || new_can_go_back != this.can_go_back
+                || new_can_go_forward != this.can_go_forward
+            {
                 this.dm_active = new_dm_active;
+                this.can_go_back = new_can_go_back;
+                this.can_go_forward = new_can_go_forward;
                 cx.notify();
             }
         });
 
+        let router = Router::global(cx);
+        let router_view = router.read(cx);
         let initial_dm_active = matches!(
-            Router::global(cx).read(cx).route(),
+            router_view.route(),
             Route::Direct | Route::DirectMessage { .. } | Route::Friends
         );
+        let initial_can_go_back = router_view.can_go_back();
+        let initial_can_go_forward = router_view.can_go_forward();
         let mut this = Self {
             clan_list,
             settings,
@@ -60,31 +75,40 @@ impl ClanSidebar {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(48.)),
             active_clan_id: None,
             dm_active: initial_dm_active,
+            can_go_back: initial_can_go_back,
+            can_go_forward: initial_can_go_forward,
             _clan_sub: clan_sub,
             _settings_sub: settings_sub,
             _router_sub: router_sub,
         };
-        this.sync_rows(this.clan_list.read(cx));
+        let clan_list_handle = this.clan_list.clone();
+        this.sync_rows(clan_list_handle.read(cx), cx);
         this
     }
 
-    fn sync_rows(&mut self, clan_list_view: &ClanList) {
+    fn sync_rows(&mut self, clan_list_view: &ClanList, cx: &App) {
         let rows: Vec<ClanRow> = clan_list_view
             .clans
             .iter()
             .map(|clan| {
-                let id = SharedString::from(clan.id.clone());
+                let id = SharedString::from(clan.id.to_string());
                 let row_id = SharedString::from(format!("clan-{}", clan.id));
                 let group_name = SharedString::from(format!("clan-group-{}", clan.id));
+                let avatar_id = SharedString::from(format!("clan-avatar-{}", clan.id));
+                let proxied_avatar_url: Option<SharedString> =
+                    clan.avatar_url.as_deref().map(|url| {
+                        SharedString::from(crate::util::imgproxy::proxied(
+                            cx, url, 100, 100, "fill",
+                        ))
+                    });
                 ClanRow {
                     id,
+                    id_num: clan.id,
                     row_id,
                     group_name,
                     name: SharedString::from(clan.name.clone()),
-                    avatar_url: clan
-                        .avatar_url
-                        .as_deref()
-                        .map(|s| SharedString::from(s.to_string())),
+                    proxied_avatar_url,
+                    avatar_id,
                     badge_count: clan.badge_count,
                     has_unread: clan.has_unread,
                     muted: clan.muted,
@@ -93,7 +117,7 @@ impl ClanSidebar {
             .collect();
         let count = rows.len();
         let item_count = count + 1;
-        let new_active = clan_list_view.active_clan_id.clone();
+        let new_active = clan_list_view.active_clan_id;
         let needs_reset =
             self.list_state.item_count() != item_count || self.active_clan_id != new_active;
         self.rows = Rc::new(rows);
@@ -145,6 +169,11 @@ impl Render for ClanSidebar {
             .h_full()
             .bg(theme.bg_tertiary)
             .items_center()
+            .child(render_window_nav(
+                theme,
+                self.can_go_back,
+                self.can_go_forward,
+            ))
             .child(
                 div()
                     .flex()
@@ -152,7 +181,7 @@ impl Render for ClanSidebar {
                     .items_center()
                     .w_full()
                     .bg(theme.bg_tertiary)
-                    .pt_3()
+                    .pt_2()
                     .child(
                         div()
                             .id("dm-logo")
@@ -179,6 +208,62 @@ impl Render for ClanSidebar {
             )
             .child(div().flex_1().min_h_0().w_full().child(list_element))
     }
+}
+
+fn render_window_nav(theme: &Theme, can_go_back: bool, can_go_forward: bool) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .pt(px(window_controls::NAV_TOP_INSET))
+        .pb(px(4.))
+        .child(nav_arrow("clan-nav-back", can_go_back, true, theme))
+        .child(nav_arrow("clan-nav-forward", can_go_forward, false, theme))
+        .into_any_element()
+}
+
+fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> AnyElement {
+    let icon_color = if enabled {
+        theme.text_secondary
+    } else {
+        theme.text_muted
+    };
+    let bg_hover = theme.bg_hover;
+
+    let mut icon = Icon::new(IconName::LongArrowRight)
+        .size(px(window_controls::NAV_ARROW_ICON_SIZE))
+        .text_color(icon_color);
+    if is_back {
+        icon = icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
+            std::f32::consts::PI,
+        )));
+    }
+
+    let mut button = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .p(px(window_controls::NAV_ARROW_BUTTON_PADDING))
+        .child(icon);
+
+    if enabled {
+        button = button
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .on_click(move |_, _, cx| {
+                if is_back {
+                    crate::router::go_back(cx);
+                } else {
+                    crate::router::go_forward(cx);
+                }
+            });
+    }
+
+    button.into_any_element()
 }
 
 fn render_clan_footer(

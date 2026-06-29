@@ -1,11 +1,12 @@
+use crate::ids::ClanId;
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
-use mezon_client::AppApi;
-use mezon_client::RealtimeEvent;
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
+use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
+use crate::Freshness;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 #[derive(Debug, Clone)]
@@ -33,7 +34,7 @@ pub struct LoggedDevice {
 
 #[derive(Debug, Clone)]
 pub struct UserClanProfile {
-    pub clan_id: String,
+    pub clan_id: ClanId,
     pub nick_name: String,
     pub avatar_url: Option<String>,
 }
@@ -65,7 +66,10 @@ pub struct AccountStore {
     pub clan_profile: Option<UserClanProfile>,
     pub clan_profile_loading: bool,
     pub nickname_duplicate: bool,
+    account_freshness: Freshness,
+    devices_freshness: Freshness,
     api: Arc<AppApi>,
+    _conn_watch: Task<()>,
 }
 
 struct GlobalAccountStore(Entity<AccountStore>);
@@ -82,6 +86,7 @@ impl AccountStore {
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
+        let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
             account: None,
@@ -93,8 +98,38 @@ impl AccountStore {
             clan_profile: None,
             clan_profile_loading: false,
             nickname_duplicate: false,
+            account_freshness: Freshness::new(),
+            devices_freshness: Freshness::new(),
             api,
+            _conn_watch: conn_watch,
         }
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this
+                        .update(cx, |this, _| {
+                            this.account_freshness.mark_stale();
+                            this.devices_freshness.mark_stale();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
+                }
+            }
+        })
     }
 
     /// Register realtime handlers with the central dispatcher (cf. `add_message_handler`).
@@ -117,7 +152,7 @@ impl AccountStore {
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
-            let clan_id = e.clan_id.to_string();
+            let clan_id = ClanId(e.clan_id);
             if self
                 .clan_profile
                 .as_ref()
@@ -141,6 +176,12 @@ impl AccountStore {
         cx.global::<GlobalAccountStore>().0.clone()
     }
 
+    pub fn ensure_account(&mut self, cx: &mut Context<Self>) {
+        if !self.account_loading && !self.account_freshness.is_fresh(crate::CACHE_TTL) {
+            self.fetch_account(cx);
+        }
+    }
+
     pub fn fetch_account(&mut self, cx: &mut Context<Self>) {
         if self.account_loading {
             return;
@@ -154,6 +195,7 @@ impl AccountStore {
             Ok(acct) => {
                 let _ = this.update(cx, |this, cx| {
                     this.account = Some(user_account_from_api(acct));
+                    this.account_freshness.mark_fetched();
                     this.account_loading = false;
                     this.account_error = false;
                     cx.emit(AccountEvent::AccountLoaded);
@@ -173,6 +215,12 @@ impl AccountStore {
         .detach();
     }
 
+    pub fn ensure_devices(&mut self, cx: &mut Context<Self>) {
+        if !self.devices_loading && !self.devices_freshness.is_fresh(crate::CACHE_TTL) {
+            self.fetch_devices(cx);
+        }
+    }
+
     pub fn fetch_devices(&mut self, cx: &mut Context<Self>) {
         if self.devices_loading {
             return;
@@ -188,6 +236,7 @@ impl AccountStore {
                     devices.into_iter().map(logged_device_from_proto).collect();
                 let _ = this.update(cx, |this, cx| {
                     this.devices = mapped;
+                    this.devices_freshness.mark_fetched();
                     this.devices_loading = false;
                     this.devices_error = None;
                     cx.emit(AccountEvent::DevicesLoaded);
@@ -313,19 +362,18 @@ impl AccountStore {
         .detach();
     }
 
-    pub fn fetch_clan_profile(&mut self, clan_id: &str, cx: &mut Context<Self>) {
+    pub fn fetch_clan_profile(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         self.clan_profile_loading = true;
         self.nickname_duplicate = false;
         cx.notify();
 
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
         cx.spawn(
-            async move |this, cx| match api.get_user_clan_profile(&clan_id).await {
+            async move |this, cx| match api.get_user_clan_profile(clan_id.get()).await {
                 Ok(profile) => {
                     let _ = this.update(cx, |this, cx| {
                         this.clan_profile = Some(UserClanProfile {
-                            clan_id: clan_id.clone(),
+                            clan_id,
                             nick_name: profile.nick_name,
                             avatar_url: (!profile.avatar.is_empty()).then_some(profile.avatar),
                         });
@@ -337,7 +385,7 @@ impl AccountStore {
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
                         this.clan_profile = Some(UserClanProfile {
-                            clan_id: clan_id.clone(),
+                            clan_id,
                             nick_name: String::new(),
                             avatar_url: None,
                         });
@@ -353,22 +401,21 @@ impl AccountStore {
 
     pub fn save_clan_profile(
         &mut self,
-        clan_id: &str,
+        clan_id: ClanId,
         nick_name: String,
         avatar_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
         cx.spawn(async move |this, cx| {
             match api
-                .update_user_clan_profile(&clan_id, &nick_name, avatar_url.as_deref())
+                .update_user_clan_profile(clan_id.get(), &nick_name, avatar_url.as_deref())
                 .await
             {
                 Ok(()) => {
                     let _ = this.update(cx, |this, cx| {
                         this.clan_profile = Some(UserClanProfile {
-                            clan_id: clan_id.clone(),
+                            clan_id,
                             nick_name: nick_name.clone(),
                             avatar_url: avatar_url.clone(),
                         });
@@ -387,13 +434,17 @@ impl AccountStore {
         .detach();
     }
 
-    pub fn check_clan_nickname(&mut self, clan_id: &str, nick_name: &str, cx: &mut Context<Self>) {
+    pub fn check_clan_nickname(
+        &mut self,
+        clan_id: ClanId,
+        nick_name: &str,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
         let nick_name = nick_name.to_string();
         cx.spawn(async move |this, cx| {
             let is_dup = api
-                .check_duplicate_clan_nickname(&clan_id, &nick_name)
+                .check_duplicate_clan_nickname(clan_id.get(), &nick_name)
                 .await
                 .unwrap_or(false);
             let _ = this.update(cx, |this, cx| {
@@ -463,7 +514,7 @@ mod tests {
     #[test]
     fn user_account_from_api_uses_username_when_display_empty() {
         let acct = user_account_from_api(ApiAccount {
-            user_id: "1".into(),
+            user_id: 1,
             username: "alice".into(),
             email: Some("a@b.c".into()),
             display_name: None,

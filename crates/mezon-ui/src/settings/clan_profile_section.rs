@@ -47,12 +47,12 @@ impl ClanProfileSection {
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |this, store, cx| {
             if let Some(clan_profile) = store.read(cx).clan_profile.as_ref()
-                && clan_profile.clan_id == this.selected_clan_id
+                && clan_profile.clan_id.to_string() == this.selected_clan_id
             {
                 let nick: SharedString = clan_profile.nick_name.clone().into();
                 let avatar: Option<SharedString> = clan_profile.avatar_url.clone().map(Into::into);
                 this.profile = Some(ClanProfileState {
-                    selected_clan_id: clan_profile.clan_id.clone().into(),
+                    selected_clan_id: clan_profile.clan_id.to_string().into(),
                     nick_name: nick.clone(),
                     avatar_url: avatar.clone(),
                     original_nick_name: nick,
@@ -196,7 +196,11 @@ impl ClanProfileSection {
                                 .await;
                             this.update(cx, |_, cx| {
                                 AccountStore::global(cx).update(cx, |store, cx| {
-                                    store.check_clan_nickname(&clan_id, &value, cx);
+                                    store.check_clan_nickname(
+                                        clan_id.parse().unwrap_or_default(),
+                                        &value,
+                                        cx,
+                                    );
                                 });
                             })
                             .ok();
@@ -247,7 +251,12 @@ impl ClanProfileSection {
         let avatar_url: Option<String> = state.avatar_url.as_ref().map(|s| s.to_string());
 
         AccountStore::global(cx).update(cx, |store, cx| {
-            store.save_clan_profile(&clan_id, nick_name, avatar_url, cx);
+            store.save_clan_profile(
+                clan_id.parse().unwrap_or_default(),
+                nick_name,
+                avatar_url,
+                cx,
+            );
         });
     }
 
@@ -278,7 +287,9 @@ impl ClanProfileSection {
             fetched: false,
         });
         cx.notify();
-        AccountStore::global(cx).update(cx, |store, cx| store.fetch_clan_profile(clan_id, cx));
+        AccountStore::global(cx).update(cx, |store, cx| {
+            store.fetch_clan_profile(clan_id.parse().unwrap_or_default(), cx)
+        });
     }
 }
 
@@ -300,7 +311,7 @@ impl Render for ClanProfileSection {
         let clan_options: Vec<(SharedString, SharedString)> = clans
             .clans
             .iter()
-            .map(|c| (c.id.clone().into(), c.name.clone().into()))
+            .map(|c| (c.id.to_string().into(), c.name.clone().into()))
             .collect();
 
         let selected_clan_id: SharedString = self

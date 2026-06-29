@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+crossbeam-channel = "0.5"
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true

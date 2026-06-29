@@ -1,0 +1,591 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task};
+use mezon_client::AppApi;
+use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
+use parking_lot::Mutex;
+
+pub use mezon_voice::{
+    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
+    VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, preload_screen_share_options,
+};
+
+use crate::AppConfig;
+
+const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
+
+struct CachedMeetToken {
+    channel_id: String,
+    token: String,
+    fetched_at: Instant,
+}
+
+struct CachedRenderImage {
+    seq: u64,
+    image: Arc<RenderImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoiceConnection {
+    Idle,
+    Connecting { channel_id: String, clan_id: String },
+    Connected { channel_id: String, clan_id: String },
+    Failed { channel_id: String, message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceCallStatus {
+    Stable,
+    WeakNetwork,
+    Reconnecting,
+}
+
+impl VoiceConnection {
+    pub fn active_channel_id(&self) -> Option<&str> {
+        match self {
+            VoiceConnection::Connecting { channel_id, .. }
+            | VoiceConnection::Connected { channel_id, .. } => Some(channel_id),
+            _ => None,
+        }
+    }
+
+    pub fn connected_channel(&self) -> Option<(&str, &str)> {
+        match self {
+            VoiceConnection::Connected {
+                channel_id,
+                clan_id,
+            } => Some((channel_id, clan_id)),
+            _ => None,
+        }
+    }
+}
+
+pub struct VoiceStore {
+    api: Arc<AppApi>,
+    connection: VoiceConnection,
+    call_status: VoiceCallStatus,
+    channel_label: String,
+    mic_enabled: bool,
+    mic_permission_denied: bool,
+    camera_enabled: bool,
+    screen_share_enabled: bool,
+    focused_tile: Option<String>,
+    participants: Vec<VoiceParticipant>,
+    session: Option<VoiceSession>,
+    frame_store: Option<Arc<VideoFrameStore>>,
+    render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
+    cached_meet_token: Option<CachedMeetToken>,
+    meet_token_prefetching: Option<String>,
+    last_repaint_seq: Option<u64>,
+    _events_task: Option<Task<()>>,
+    _repaint_task: Option<Task<()>>,
+}
+
+struct GlobalVoiceStore(Entity<VoiceStore>);
+impl Global for GlobalVoiceStore {}
+
+impl VoiceStore {
+    pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|_| Self::new(api));
+        cx.set_global(GlobalVoiceStore(entity.clone()));
+        entity
+    }
+
+    pub fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalVoiceStore>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalVoiceStore>().map(|g| g.0.clone())
+    }
+
+    fn new(api: Arc<AppApi>) -> Self {
+        Self {
+            api,
+            connection: VoiceConnection::Idle,
+            call_status: VoiceCallStatus::Stable,
+            channel_label: String::new(),
+            mic_enabled: false,
+            mic_permission_denied: false,
+            camera_enabled: false,
+            screen_share_enabled: false,
+            focused_tile: None,
+            participants: Vec::new(),
+            session: None,
+            frame_store: None,
+            render_cache: Mutex::new(HashMap::new()),
+            cached_meet_token: None,
+            meet_token_prefetching: None,
+            last_repaint_seq: None,
+            _events_task: None,
+            _repaint_task: None,
+        }
+    }
+
+    fn current_max_frame_seq(&self) -> Option<u64> {
+        let store = self.frame_store.as_ref()?;
+        let mut max_seq = None;
+        for participant in &self.participants {
+            for key in [participant.camera, participant.screenshare]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(frame) = store.get(key) {
+                    max_seq = Some(max_seq.map_or(frame.seq, |m: u64| m.max(frame.seq)));
+                }
+            }
+        }
+        max_seq
+    }
+
+    fn cached_token_for(&self, channel_id: &str) -> Option<String> {
+        let cached = self.cached_meet_token.as_ref()?;
+        if cached.channel_id == channel_id && cached.fetched_at.elapsed() < MEET_TOKEN_CACHE_TTL {
+            return Some(cached.token.clone());
+        }
+        None
+    }
+
+    pub fn prefetch_meet_token(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        if self.cached_token_for(&channel_id).is_some() {
+            return;
+        }
+        if self.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
+            return;
+        }
+        self.meet_token_prefetching = Some(channel_id.clone());
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let token = api.generate_meet_token(&channel_id, "").await;
+            let _ = this.update(cx, |this, _| {
+                if this.meet_token_prefetching.as_deref() == Some(channel_id.as_str()) {
+                    this.meet_token_prefetching = None;
+                }
+                if let Ok(token) = token {
+                    this.cached_meet_token = Some(CachedMeetToken {
+                        channel_id: channel_id.clone(),
+                        token,
+                        fetched_at: Instant::now(),
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn connection(&self) -> &VoiceConnection {
+        &self.connection
+    }
+
+    pub fn call_status(&self) -> VoiceCallStatus {
+        self.call_status
+    }
+
+    pub fn channel_label(&self) -> &str {
+        &self.channel_label
+    }
+
+    pub fn participants(&self) -> &[VoiceParticipant] {
+        &self.participants
+    }
+
+    pub fn mic_enabled(&self) -> bool {
+        self.mic_enabled
+    }
+
+    pub fn mic_permission_denied(&self) -> bool {
+        self.mic_permission_denied
+    }
+
+    pub fn dismiss_mic_permission_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.mic_permission_denied {
+            self.mic_permission_denied = false;
+            cx.notify();
+        }
+    }
+
+    pub fn camera_enabled(&self) -> bool {
+        self.camera_enabled
+    }
+
+    pub fn screen_share_enabled(&self) -> bool {
+        self.screen_share_enabled
+    }
+
+    pub fn frame_store(&self) -> Option<Arc<VideoFrameStore>> {
+        self.frame_store.clone()
+    }
+
+    pub fn render_image(&self, key: u64) -> Option<Arc<RenderImage>> {
+        let store = self.frame_store.as_ref()?;
+        let frame = store.get(key)?;
+        let mut cache = self.render_cache.lock();
+        if let Some(entry) = cache.get(&key)
+            && entry.seq == frame.seq
+        {
+            return Some(entry.image.clone());
+        }
+        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
+        let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+            buffer,
+        )]));
+        cache.insert(
+            key,
+            CachedRenderImage {
+                seq: frame.seq,
+                image: image.clone(),
+            },
+        );
+        Some(image)
+    }
+
+    fn evict_stale_render_cache(&self) {
+        let mut cache = self.render_cache.lock();
+        if cache.is_empty() {
+            return;
+        }
+        let mut live_keys: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for participant in &self.participants {
+            if let Some(key) = participant.camera {
+                live_keys.insert(key);
+            }
+            if let Some(key) = participant.screenshare {
+                live_keys.insert(key);
+            }
+        }
+        cache.retain(|key, _| live_keys.contains(key));
+    }
+
+    pub fn focused_tile(&self) -> Option<&str> {
+        self.focused_tile.as_deref()
+    }
+
+    pub fn toggle_focus(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.focused_tile.as_deref() == Some(id.as_str()) {
+            self.focused_tile = None;
+        } else {
+            self.focused_tile = Some(id);
+        }
+        cx.notify();
+    }
+
+    pub fn set_focus(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.focused_tile.as_deref() != Some(id.as_str()) {
+            self.focused_tile = Some(id);
+            cx.notify();
+        }
+    }
+
+    pub fn clear_focus(&mut self, cx: &mut Context<Self>) {
+        if self.focused_tile.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn is_connected_to(&self, channel_id: &str) -> bool {
+        matches!(self.connection.connected_channel(), Some((id, _)) if id == channel_id)
+    }
+
+    pub fn is_active_in(&self, channel_id: &str) -> bool {
+        self.connection.active_channel_id() == Some(channel_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn join(
+        &mut self,
+        channel_id: String,
+        clan_id: String,
+        channel_label: String,
+        input_device_id: Option<String>,
+        output_device_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_active_in(&channel_id) {
+            return;
+        }
+
+        self.teardown();
+        self.channel_label = channel_label;
+
+        let ws_url = AppConfig::global(cx).meet_ws_url.clone();
+        if ws_url.is_empty() {
+            self.connection = VoiceConnection::Failed {
+                channel_id,
+                message: "meet server URL is not configured".into(),
+            };
+            cx.notify();
+            return;
+        }
+
+        self.connection = VoiceConnection::Connecting {
+            channel_id: channel_id.clone(),
+            clan_id: clan_id.clone(),
+        };
+        self.call_status = VoiceCallStatus::Stable;
+        self.mic_enabled = false;
+        self.mic_permission_denied = false;
+        self.participants.clear();
+        cx.notify();
+
+        let api = self.api.clone();
+        let cached_token = self.cached_token_for(&channel_id);
+        if let Some(token) = cached_token {
+            self.start_session(
+                ws_url,
+                token,
+                channel_id,
+                input_device_id,
+                output_device_id,
+                cx,
+            );
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let token = api.generate_meet_token(&channel_id, "").await;
+            let _ = this.update(cx, |this, cx| match token {
+                Ok(token) => {
+                    this.cached_meet_token = Some(CachedMeetToken {
+                        channel_id: channel_id.clone(),
+                        token: token.clone(),
+                        fetched_at: Instant::now(),
+                    });
+                    this.start_session(
+                        ws_url,
+                        token,
+                        channel_id,
+                        input_device_id,
+                        output_device_id,
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("failed to generate meet token: {e:#}");
+                    this.connection = VoiceConnection::Failed {
+                        channel_id,
+                        message: e.to_string(),
+                    };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn start_session(
+        &mut self,
+        ws_url: String,
+        token: String,
+        channel_id: String,
+        input_device_id: Option<String>,
+        output_device_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection.active_channel_id() != Some(channel_id.as_str()) {
+            return;
+        }
+
+        let ice_servers = Self::ice_servers(cx);
+        let session = VoiceSession::connect(
+            ws_url,
+            token,
+            input_device_id,
+            output_device_id,
+            ice_servers,
+        );
+        let events = session.events();
+        let frame_store = session.frame_store();
+        self.frame_store = Some(frame_store.clone());
+        self.session = Some(session);
+
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv_async().await {
+                if this
+                    .update(cx, |this, cx| this.handle_engine_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self._events_task = Some(task);
+
+        let repaint = cx.spawn(async move |this, cx| {
+            loop {
+                frame_store.frame_changed().await;
+                let keep_going = this.update(cx, |this, cx| {
+                    if this.has_active_video() {
+                        let seq = this.current_max_frame_seq();
+                        if seq.is_some() && seq != this.last_repaint_seq {
+                            this.last_repaint_seq = seq;
+                            cx.notify();
+                        }
+                    }
+                    !matches!(this.connection, VoiceConnection::Idle)
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        });
+        self._repaint_task = Some(repaint);
+        cx.notify();
+    }
+
+    fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
+        let config = AppConfig::global(cx);
+        if config.webrtc_ice_servers_url.is_empty() {
+            return Vec::new();
+        }
+        vec![IceServerConfig {
+            urls: vec![config.webrtc_ice_servers_url.clone()],
+            username: config.webrtc_ice_servers_username.clone(),
+            credential: config.webrtc_ice_servers_credential.clone(),
+        }]
+    }
+
+    fn has_active_video(&self) -> bool {
+        self.camera_enabled
+            || self.screen_share_enabled
+            || self
+                .participants
+                .iter()
+                .any(|p| p.camera.is_some() || p.screenshare.is_some())
+    }
+
+    fn handle_engine_event(&mut self, event: VoiceEvent, cx: &mut Context<Self>) {
+        match event {
+            VoiceEvent::Connected => {
+                if let VoiceConnection::Connecting {
+                    channel_id,
+                    clan_id,
+                } = &self.connection
+                {
+                    self.connection = VoiceConnection::Connected {
+                        channel_id: channel_id.clone(),
+                        clan_id: clan_id.clone(),
+                    };
+                }
+                self.call_status = VoiceCallStatus::Stable;
+            }
+            VoiceEvent::Reconnecting => {
+                self.call_status = VoiceCallStatus::Reconnecting;
+            }
+            VoiceEvent::Reconnected => {
+                self.call_status = VoiceCallStatus::Stable;
+            }
+            VoiceEvent::NetworkWeak => {
+                if !matches!(self.call_status, VoiceCallStatus::Reconnecting) {
+                    self.call_status = VoiceCallStatus::WeakNetwork;
+                }
+            }
+            VoiceEvent::NetworkRecovered => {
+                if matches!(self.call_status, VoiceCallStatus::WeakNetwork) {
+                    self.call_status = VoiceCallStatus::Stable;
+                }
+            }
+            VoiceEvent::Participants(list) => {
+                self.participants = list;
+                if let Some(local) = self.participants.iter().find(|p| p.is_local) {
+                    self.camera_enabled = local.camera.is_some();
+                    self.screen_share_enabled = local.screenshare.is_some();
+                }
+                self.evict_stale_render_cache();
+            }
+            VoiceEvent::Disconnected { reason } => {
+                tracing::info!("voice disconnected: {reason}");
+                self.teardown();
+            }
+            VoiceEvent::Error(message) => {
+                tracing::warn!("voice error: {message}");
+                if message.starts_with("camera:") {
+                    self.camera_enabled = false;
+                } else if message.starts_with("screen:") {
+                    self.screen_share_enabled = false;
+                } else if let VoiceConnection::Connecting { channel_id, .. } = &self.connection {
+                    self.connection = VoiceConnection::Failed {
+                        channel_id: channel_id.clone(),
+                        message,
+                    };
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn leave(&mut self, cx: &mut Context<Self>) {
+        self.teardown();
+        cx.notify();
+    }
+
+    pub fn toggle_mic(&mut self, cx: &mut Context<Self>) {
+        self.set_mic_enabled(!self.mic_enabled, cx);
+    }
+
+    pub fn set_mic_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled && mezon_voice::microphone_denied() {
+            self.mic_enabled = false;
+            self.mic_permission_denied = true;
+            cx.notify();
+            return;
+        }
+        self.mic_permission_denied = false;
+        self.mic_enabled = enabled;
+        if let Some(session) = &self.session {
+            session.set_mic_enabled(enabled);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_camera(&mut self, cx: &mut Context<Self>) {
+        self.set_camera_enabled(!self.camera_enabled, cx);
+    }
+
+    pub fn set_camera_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            session.set_camera_enabled(enabled);
+        }
+        cx.notify();
+    }
+
+    pub fn start_screen_share(&mut self, pick: PickedScreen, cx: &mut Context<Self>) {
+        if self.screen_share_enabled {
+            return;
+        }
+        if let Some(session) = &self.session {
+            session.start_screen_share(pick);
+        }
+        cx.notify();
+    }
+
+    pub fn stop_screen_share(&mut self, cx: &mut Context<Self>) {
+        if !self.screen_share_enabled {
+            return;
+        }
+        if let Some(session) = &self.session {
+            session.stop_screen_share();
+        }
+        cx.notify();
+    }
+
+    fn teardown(&mut self) {
+        self.session = None;
+        self.frame_store = None;
+        self.render_cache.lock().clear();
+        self._events_task = None;
+        self._repaint_task = None;
+        self.connection = VoiceConnection::Idle;
+        self.call_status = VoiceCallStatus::Stable;
+        self.channel_label.clear();
+        self.mic_enabled = false;
+        self.mic_permission_denied = false;
+        self.camera_enabled = false;
+        self.screen_share_enabled = false;
+        self.focused_tile = None;
+        self.participants.clear();
+        self.meet_token_prefetching = None;
+        self.last_repaint_seq = None;
+    }
+}

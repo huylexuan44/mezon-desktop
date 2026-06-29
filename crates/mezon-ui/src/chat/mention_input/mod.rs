@@ -1,0 +1,1252 @@
+mod attachments;
+mod text_field;
+
+use gpui::{
+    AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, KeyBinding,
+    PathPromptOptions, SharedString, Subscription, UniformListScrollHandle, Window, actions,
+    deferred, div, img, prelude::*, px, uniform_list,
+};
+use mezon_store::{
+    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore,
+    MENTION_HERE_ID, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
+    OutgoingMention, Settings, StickerEvent, StickerStore,
+};
+
+use attachments::{PendingAttachment, acceptable, build_pending};
+
+use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
+use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
+use crate::theme::{ActiveTheme, Theme};
+use crate::util::imgproxy;
+use text_field::{
+    MentionFieldEvent, MentionInputField, MentionInputState, MentionSpan, MentionSpanKind,
+    byte_offset_to_utf16,
+};
+
+const KEY_CONTEXT: &str = "MezonMention";
+const MAX_SUGGESTIONS: usize = 50;
+const PICKER_EMOJI_PX: f32 = 28.;
+const PICKER_CELL_PX: f32 = 34.;
+const PICKER_ROW_PX: f32 = 40.;
+const PICKER_COLS: usize = 7;
+const STICKER_PANEL_PX: f32 = 320.;
+const STICKER_COLS: usize = 3;
+const STICKER_CELL_PX: f32 = 92.;
+const STICKER_ROW_PX: f32 = 100.;
+const STICKER_IMG_PX: f32 = 80.;
+
+actions!(mezon_mention, [MentionAccept, MentionDismiss]);
+
+pub fn init(cx: &mut App) {
+    text_field::init(cx);
+    cx.bind_keys([
+        KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),
+    ]);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sigil {
+    At,
+    Hash,
+    Colon,
+}
+
+impl Sigil {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            b'@' => Some(Self::At),
+            b'#' => Some(Self::Hash),
+            b':' => Some(Self::Colon),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TokenKind {
+    Mention { user_id: String, role_id: String },
+    Hashtag { channel_id: String },
+    Emoji { emoji_id: String },
+}
+
+impl TokenKind {
+    fn span_kind(&self) -> MentionSpanKind {
+        match self {
+            TokenKind::Mention { .. } => MentionSpanKind::Mention,
+            TokenKind::Hashtag { .. } => MentionSpanKind::Hashtag,
+            TokenKind::Emoji { .. } => MentionSpanKind::Emoji,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommittedToken {
+    kind: TokenKind,
+    display: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone)]
+struct ChannelSuggestRaw {
+    channel_id: String,
+    name: String,
+}
+
+#[derive(Clone)]
+struct EmojiSuggestRaw {
+    emoji_id: String,
+    shortname: String,
+    src: String,
+}
+
+#[derive(Clone)]
+enum Suggestion {
+    Here,
+    Member(MentionMemberRaw),
+    Channel(ChannelSuggestRaw),
+    Emoji(EmojiSuggestRaw),
+}
+
+enum PickerRow {
+    Header(SharedString),
+    Emojis(Vec<EmojiSuggestRaw>),
+}
+
+#[derive(Clone)]
+struct StickerCellRaw {
+    id: String,
+    src: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum MentionInputEvent {
+    Submit,
+    SendSticker { url: String, filename: String },
+}
+
+pub struct MentionInput {
+    input: Entity<MentionInputState>,
+    committed: Vec<CommittedToken>,
+    active_at: Option<usize>,
+    active_sigil: Sigil,
+    query_len: usize,
+    suggestions: Vec<Suggestion>,
+    selected: usize,
+    session_members: Vec<MentionMemberRaw>,
+    session_channels: Vec<ChannelSuggestRaw>,
+    session_emojis: Vec<EmojiSuggestRaw>,
+    picker_open: bool,
+    picker_rows: Vec<PickerRow>,
+    picker_scroll: UniformListScrollHandle,
+    sticker_picker_open: bool,
+    sticker_rows: Vec<Vec<StickerCellRaw>>,
+    sticker_scroll: UniformListScrollHandle,
+    avatar_cache: Entity<LruImageCache>,
+    settings: Entity<Settings>,
+    pending_attachments: Vec<PendingAttachment>,
+    _input_sub: Subscription,
+    _emoji_sub: Option<Subscription>,
+    _sticker_sub: Option<Subscription>,
+}
+
+impl EventEmitter<MentionInputEvent> for MentionInput {}
+
+impl MentionInput {
+    pub fn new(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let placeholder = placeholder.into();
+        let input = cx.new(|cx| MentionInputState::new(window, cx).placeholder(placeholder));
+        let input_sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, event: &MentionFieldEvent, window, cx| match event {
+                MentionFieldEvent::Change => this.on_change(cx),
+                MentionFieldEvent::PressEnter => this.on_enter(window, cx),
+                MentionFieldEvent::NavUp => this.on_nav_up(cx),
+                MentionFieldEvent::NavDown => this.on_nav_down(cx),
+            },
+        );
+        let emoji_sub = EmojiStore::try_global(cx).map(|store| {
+            cx.subscribe(&store, |this, _store, _event: &EmojiEvent, cx| {
+                if this.picker_open {
+                    this.rebuild_picker(cx);
+                    cx.notify();
+                }
+            })
+        });
+        let sticker_sub = StickerStore::try_global(cx).map(|store| {
+            cx.subscribe(&store, |this, _store, _event: &StickerEvent, cx| {
+                if this.sticker_picker_open {
+                    this.rebuild_sticker_picker(cx);
+                    cx.notify();
+                }
+            })
+        });
+        let avatar_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "mention-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        Self {
+            input,
+            committed: Vec::new(),
+            active_at: None,
+            active_sigil: Sigil::At,
+            query_len: 0,
+            suggestions: Vec::new(),
+            selected: 0,
+            session_members: Vec::new(),
+            session_channels: Vec::new(),
+            session_emojis: Vec::new(),
+            picker_open: false,
+            picker_rows: Vec::new(),
+            picker_scroll: UniformListScrollHandle::new(),
+            sticker_picker_open: false,
+            sticker_rows: Vec::new(),
+            sticker_scroll: UniformListScrollHandle::new(),
+            avatar_cache,
+            settings,
+            pending_attachments: Vec::new(),
+            _input_sub: input_sub,
+            _emoji_sub: emoji_sub,
+            _sticker_sub: sticker_sub,
+        }
+    }
+
+    pub fn take_payload(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, OutgoingContent, Vec<OutgoingAttachment>)> {
+        let raw = self.input.read(cx).value().to_string();
+        if raw.trim().is_empty() && self.pending_attachments.is_empty() {
+            return None;
+        }
+        let text = if self.committed.is_empty() {
+            raw.trim().to_string()
+        } else {
+            raw.trim_end().to_string()
+        };
+        let mut content = OutgoingContent::default();
+        for token in &self.committed {
+            let s = byte_offset_to_utf16(&raw, token.start) as i32;
+            let e = byte_offset_to_utf16(&raw, token.end) as i32;
+            match &token.kind {
+                TokenKind::Mention { user_id, role_id } => content.mentions.push(OutgoingMention {
+                    user_id: user_id.clone(),
+                    role_id: role_id.clone(),
+                    display: token.display.clone(),
+                    s,
+                    e,
+                }),
+                TokenKind::Hashtag { channel_id } => content.hashtags.push(OutgoingHashtag {
+                    channel_id: channel_id.clone(),
+                    s,
+                    e,
+                }),
+                TokenKind::Emoji { emoji_id } => content.emojis.push(OutgoingEmoji {
+                    emoji_id: emoji_id.clone(),
+                    s,
+                    e,
+                }),
+            }
+        }
+        let attachments: Vec<OutgoingAttachment> = self
+            .pending_attachments
+            .drain(..)
+            .map(|p| OutgoingAttachment {
+                path: p.path,
+                filename: p.filename,
+                filetype: p.filetype,
+            })
+            .collect();
+        self.committed.clear();
+        self.reset_popup();
+        self.picker_open = false;
+        self.input.update(cx, |input, cx| {
+            input.set_mention_spans(Vec::new(), cx);
+            input.set_value("", window, cx);
+        });
+        Some((text, content, attachments))
+    }
+
+    fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let pending = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .filter_map(build_pending)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| this.add_pending(pending, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn add_pending(&mut self, candidates: Vec<PendingAttachment>, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for candidate in candidates {
+            if acceptable(self.pending_attachments.len(), &candidate) {
+                self.pending_attachments.push(candidate);
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.pending_attachments.len() {
+            self.pending_attachments.remove(index);
+            cx.notify();
+        }
+    }
+
+    fn render_attachment_previews(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let chip_bg = theme.bg_tertiary;
+        let badge_bg = theme.bg_floating;
+        let badge_border = theme.border;
+        let muted = theme.text_muted;
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(8.))
+            .px(px(8.))
+            .pt(px(8.));
+        for (index, att) in self.pending_attachments.iter().enumerate() {
+            let preview = if att.is_image {
+                img(att.path.clone())
+                    .size(px(64.))
+                    .rounded(px(6.))
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(64.))
+                    .rounded(px(6.))
+                    .bg(chip_bg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::FileIcon).size_5().text_color(muted))
+                    .into_any_element()
+            };
+            row = row.child(
+                div().relative().child(preview).child(
+                    div()
+                        .id(("remove-attachment", index))
+                        .absolute()
+                        .top(px(-6.))
+                        .right(px(-6.))
+                        .size(px(18.))
+                        .rounded_full()
+                        .bg(badge_bg)
+                        .border_1()
+                        .border_color(badge_border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(Icon::new(IconName::Close).size_3().text_color(muted))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.remove_attachment(index, cx)
+                        })),
+                ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn popup_open(&self) -> bool {
+        self.active_at.is_some() && !self.suggestions.is_empty()
+    }
+
+    fn reset_popup(&mut self) {
+        self.active_at = None;
+        self.query_len = 0;
+        self.suggestions.clear();
+        self.selected = 0;
+    }
+
+    fn hide(&mut self, cx: &mut Context<Self>) {
+        if self.active_at.is_some() || !self.suggestions.is_empty() {
+            self.reset_popup();
+            cx.notify();
+        }
+    }
+
+    fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup_open() {
+            self.accept(self.selected, window, cx);
+        } else {
+            cx.emit(MentionInputEvent::Submit);
+        }
+    }
+
+    fn on_change(&mut self, cx: &mut Context<Self>) {
+        let content = self.input.read(cx).value().to_string();
+        self.revalidate(&content, cx);
+        self.check_trigger(&content, cx);
+    }
+
+    fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {
+        let before = self.committed.len();
+        self.committed
+            .retain(|m| content.get(m.start..m.end) == Some(m.display.as_str()));
+        if self.committed.len() != before {
+            self.sync_ranges(cx);
+        }
+    }
+
+    fn sync_ranges(&self, cx: &mut Context<Self>) {
+        let spans = self
+            .committed
+            .iter()
+            .map(|token| MentionSpan {
+                range: token.start..token.end,
+                kind: token.kind.span_kind(),
+            })
+            .collect();
+        self.input
+            .update(cx, |input, cx| input.set_mention_spans(spans, cx));
+    }
+
+    fn check_trigger(&mut self, content: &str, cx: &mut Context<Self>) {
+        let cursor = self.input.read(cx).cursor().min(content.len());
+        if cursor == 0 || content.is_empty() {
+            self.hide(cx);
+            return;
+        }
+
+        let bytes = content.as_bytes();
+        let mut found = None;
+        let mut index = cursor;
+        while index > 0 {
+            index -= 1;
+            let ch = bytes[index];
+            if let Some(sigil) = Sigil::from_byte(ch)
+                && (index == 0 || bytes[index - 1] == b' ' || bytes[index - 1] == b'\n')
+            {
+                found = Some((index, sigil));
+                break;
+            }
+            if ch == b' ' || ch == b'\n' {
+                break;
+            }
+        }
+
+        let Some((at, sigil)) = found else {
+            self.hide(cx);
+            return;
+        };
+
+        let query = &content[at + 1..cursor];
+        if sigil == Sigil::Colon && query.is_empty() {
+            self.hide(cx);
+            return;
+        }
+
+        if self.active_at != Some(at) || self.active_sigil != sigil {
+            self.refresh_pool(sigil, cx);
+        }
+        self.active_at = Some(at);
+        self.active_sigil = sigil;
+        self.query_len = query.len() + 1;
+        self.build_suggestions(query);
+        if self.suggestions.is_empty() {
+            self.hide(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn refresh_pool(&mut self, sigil: Sigil, cx: &mut Context<Self>) {
+        match sigil {
+            Sigil::At => self.session_members = mention_member_pool(cx),
+            Sigil::Hash => self.session_channels = channel_suggest_pool(cx),
+            Sigil::Colon => {
+                if let Some(store) = EmojiStore::try_global(cx) {
+                    store.update(cx, |store, cx| store.ensure_loaded(cx));
+                }
+                self.session_emojis = emoji_suggest_pool(cx);
+            }
+        }
+    }
+
+    fn build_suggestions(&mut self, query: &str) {
+        let needle = query.to_lowercase();
+        let mut out = Vec::new();
+        match self.active_sigil {
+            Sigil::At => {
+                if "here".starts_with(&needle) {
+                    out.push(Suggestion::Here);
+                }
+                for member in &self.session_members {
+                    if out.len() >= MAX_SUGGESTIONS {
+                        break;
+                    }
+                    if member.display.to_lowercase().starts_with(&needle)
+                        || member.username.to_lowercase().starts_with(&needle)
+                    {
+                        out.push(Suggestion::Member(member.clone()));
+                    }
+                }
+            }
+            Sigil::Hash => {
+                for channel in &self.session_channels {
+                    if out.len() >= MAX_SUGGESTIONS {
+                        break;
+                    }
+                    if channel.name.to_lowercase().starts_with(&needle) {
+                        out.push(Suggestion::Channel(channel.clone()));
+                    }
+                }
+            }
+            Sigil::Colon => {
+                for emoji in &self.session_emojis {
+                    if out.len() >= MAX_SUGGESTIONS {
+                        break;
+                    }
+                    if emoji.shortname.to_lowercase().starts_with(&needle) {
+                        out.push(Suggestion::Emoji(emoji.clone()));
+                    }
+                }
+            }
+        }
+        self.selected = 0;
+        self.suggestions = out;
+    }
+
+    fn accept(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.active_at else {
+            return;
+        };
+        let Some(suggestion) = self.suggestions.get(index).cloned() else {
+            return;
+        };
+        let content_len = self.input.read(cx).value().len();
+        let replace_end = (at + self.query_len).min(content_len);
+        let (display, kind) = match suggestion {
+            Suggestion::Here => (
+                "@here".to_string(),
+                TokenKind::Mention {
+                    user_id: MENTION_HERE_ID.to_string(),
+                    role_id: String::new(),
+                },
+            ),
+            Suggestion::Member(member) => (
+                format!("@{}", member.display),
+                TokenKind::Mention {
+                    user_id: member.user_id,
+                    role_id: String::new(),
+                },
+            ),
+            Suggestion::Channel(channel) => (
+                format!("#{}", channel.name),
+                TokenKind::Hashtag {
+                    channel_id: channel.channel_id,
+                },
+            ),
+            Suggestion::Emoji(emoji) => (
+                format!(":{}:", emoji.shortname),
+                TokenKind::Emoji {
+                    emoji_id: emoji.emoji_id,
+                },
+            ),
+        };
+        let inserted = format!("{display} ");
+        self.input.update(cx, |input, cx| {
+            input.replace_range(at..replace_end, &inserted, window, cx)
+        });
+        let end = at + display.len();
+        self.committed.push(CommittedToken {
+            kind,
+            display,
+            start: at,
+            end,
+        });
+        self.reset_popup();
+        self.sync_ranges(cx);
+        cx.notify();
+    }
+
+    fn toggle_picker(&mut self, cx: &mut Context<Self>) {
+        self.picker_open = !self.picker_open;
+        if self.picker_open {
+            self.sticker_picker_open = false;
+            self.reset_popup();
+            if let Some(store) = EmojiStore::try_global(cx) {
+                store.update(cx, |store, cx| store.ensure_loaded(cx));
+            }
+            self.rebuild_picker(cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_sticker_picker(&mut self, cx: &mut Context<Self>) {
+        self.sticker_picker_open = !self.sticker_picker_open;
+        if self.sticker_picker_open {
+            self.picker_open = false;
+            self.reset_popup();
+            if let Some(store) = StickerStore::try_global(cx) {
+                store.update(cx, |store, cx| store.ensure_loaded(cx));
+            }
+            self.rebuild_sticker_picker(cx);
+        }
+        cx.notify();
+    }
+
+    fn rebuild_sticker_picker(&mut self, cx: &mut Context<Self>) {
+        let active = ClanList::global(cx)
+            .read(cx)
+            .active_clan_id
+            .map(|id| id.to_string());
+        let Some(store) = StickerStore::try_global(cx) else {
+            self.sticker_rows = Vec::new();
+            return;
+        };
+        let store = store.read(cx);
+        let rows = store
+            .active_clan_first(active.as_deref())
+            .chunks(STICKER_COLS)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|s| StickerCellRaw {
+                        id: s.id.clone(),
+                        src: s.src.clone(),
+                    })
+                    .collect()
+            })
+            .collect();
+        self.sticker_rows = rows;
+    }
+
+    fn send_sticker(&mut self, cell: StickerCellRaw, cx: &mut Context<Self>) {
+        self.sticker_picker_open = false;
+        cx.emit(MentionInputEvent::SendSticker {
+            url: cell.src,
+            filename: cell.id,
+        });
+        cx.notify();
+    }
+
+    fn rebuild_picker(&mut self, cx: &mut Context<Self>) {
+        let active = ClanList::global(cx)
+            .read(cx)
+            .active_clan_id
+            .map(|id| id.to_string());
+        let Some(store) = EmojiStore::try_global(cx) else {
+            self.picker_rows = Vec::new();
+            return;
+        };
+        let store = store.read(cx);
+        let mut rows = Vec::new();
+        for (category, emojis) in store.by_category(active.as_deref()) {
+            rows.push(PickerRow::Header(SharedString::from(category)));
+            for chunk in emojis.chunks(PICKER_COLS) {
+                rows.push(PickerRow::Emojis(
+                    chunk
+                        .iter()
+                        .map(|e| EmojiSuggestRaw {
+                            emoji_id: e.id.clone(),
+                            shortname: e.shortname.clone(),
+                            src: e.src.clone(),
+                        })
+                        .collect(),
+                ));
+            }
+        }
+        self.picker_rows = rows;
+    }
+
+    fn insert_emoji(
+        &mut self,
+        emoji: EmojiSuggestRaw,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content_len = self.input.read(cx).value().len();
+        let at = self.input.read(cx).cursor().min(content_len);
+        let display = format!(":{}:", emoji.shortname);
+        let inserted = format!("{display} ");
+        self.input.update(cx, |input, cx| {
+            input.replace_range(at..at, &inserted, window, cx)
+        });
+        let end = at + display.len();
+        self.committed.push(CommittedToken {
+            kind: TokenKind::Emoji {
+                emoji_id: emoji.emoji_id,
+            },
+            display,
+            start: at,
+            end,
+        });
+        self.picker_open = false;
+        self.sync_ranges(cx);
+        let handle = self.input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    fn on_nav_up(&mut self, cx: &mut Context<Self>) {
+        if self.popup_open() {
+            self.selected = self.selected.saturating_sub(1);
+            cx.notify();
+        } else {
+            self.input
+                .update(cx, |input, cx| input.move_caret_line(-1, cx));
+        }
+    }
+
+    fn on_nav_down(&mut self, cx: &mut Context<Self>) {
+        if self.popup_open() {
+            self.selected = (self.selected + 1).min(self.suggestions.len() - 1);
+            cx.notify();
+        } else {
+            self.input
+                .update(cx, |input, cx| input.move_caret_line(1, cx));
+        }
+    }
+
+    fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup_open() {
+            self.accept(self.selected, window, cx);
+        }
+    }
+
+    fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
+        self.hide(cx);
+    }
+
+    fn render_suggestion(
+        &self,
+        index: usize,
+        suggestion: &Suggestion,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let text_primary = theme.text_primary;
+        let text_muted = theme.text_muted;
+        let selected_bg = theme.bg_hover;
+        let is_selected = index == self.selected;
+
+        let (leading, display, secondary): (Option<AnyElement>, SharedString, SharedString) =
+            match suggestion {
+                Suggestion::Here => (
+                    None,
+                    "@here".into(),
+                    mezon_i18n::t(&self.locale(cx), "messageBox.suggestions.notifyEveryone").into(),
+                ),
+                Suggestion::Member(member) => {
+                    let src = if member.avatar_raw.is_empty() {
+                        SharedString::default()
+                    } else {
+                        imgproxy::avatar_url(cx, &member.avatar_raw).into()
+                    };
+                    let mut avatar = Avatar::new()
+                        .name(member.display.clone())
+                        .size_px(px(24.))
+                        .image_cache(self.avatar_cache.clone());
+                    if !src.is_empty() {
+                        avatar = avatar.src(src).fallback_src(member.avatar_raw.clone());
+                    }
+                    (
+                        Some(avatar.into_any_element()),
+                        member.display.clone().into(),
+                        format!("@{}", member.username).into(),
+                    )
+                }
+                Suggestion::Channel(channel) => (
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text_muted)
+                            .child("#")
+                            .into_any_element(),
+                    ),
+                    channel.name.clone().into(),
+                    SharedString::default(),
+                ),
+                Suggestion::Emoji(emoji) => {
+                    let leading = if emoji.src.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            img(SharedString::from(emoji.src.clone()))
+                                .size(px(22.))
+                                .into_any_element(),
+                        )
+                    };
+                    (
+                        leading,
+                        format!(":{}:", emoji.shortname).into(),
+                        SharedString::default(),
+                    )
+                }
+            };
+
+        div()
+            .id(("mention-suggestion", index))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .w_full()
+            .px_3()
+            .py(px(6.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .when(is_selected, |row| row.bg(selected_bg))
+            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                if *hovered && this.selected != index {
+                    this.selected = index;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _event, window, cx| this.accept(index, window, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .when_some(leading, |row, leading| row.child(leading))
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(text_primary)
+                            .child(display),
+                    ),
+            )
+            .when(!secondary.is_empty(), |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_muted)
+                        .child(secondary),
+                )
+            })
+    }
+
+    fn render_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let border = theme.border;
+        let panel_bg = theme.bg_floating;
+        let text_muted = theme.text_muted;
+        let locale = self.locale(cx);
+
+        let panel = div()
+            .id("emoji-picker")
+            .absolute()
+            .bottom_full()
+            .right_0()
+            .mb(px(8.))
+            .w(px(320.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .bg(panel_bg)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.picker_open = false;
+                cx.notify();
+            }));
+
+        if self.picker_rows.is_empty() {
+            return panel
+                .p(px(12.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(text_muted)
+                        .child(mezon_i18n::t(&locale, "common.searchModal.noResults")),
+                )
+                .into_any_element();
+        }
+
+        let entity = cx.entity();
+        let count = self.picker_rows.len();
+        let list_h = (count as f32 * PICKER_ROW_PX).min(264.);
+        let list = uniform_list("emoji-picker-list", count, move |range, _window, cx| {
+            let theme = cx.theme().clone();
+            let this = entity.read(cx);
+            range
+                .map(|ix| match this.picker_rows.get(ix) {
+                    Some(PickerRow::Header(label)) => render_picker_header(&theme, label),
+                    Some(PickerRow::Emojis(emojis)) => {
+                        render_picker_emoji_row(&theme, emojis, &entity)
+                    }
+                    None => div().h(px(PICKER_ROW_PX)).into_any_element(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&self.picker_scroll)
+        .h(px(list_h))
+        .w_full();
+
+        panel.p(px(8.)).child(list).into_any_element()
+    }
+
+    fn render_sticker_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let border = theme.border;
+        let panel_bg = theme.bg_floating;
+        let text_muted = theme.text_muted;
+        let locale = self.locale(cx);
+
+        let panel = div()
+            .id("sticker-picker")
+            .absolute()
+            .bottom_full()
+            .right_0()
+            .mb(px(8.))
+            .w(px(STICKER_PANEL_PX))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .bg(panel_bg)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.sticker_picker_open = false;
+                cx.notify();
+            }));
+
+        if self.sticker_rows.is_empty() {
+            return panel
+                .p(px(12.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(text_muted)
+                        .child(mezon_i18n::t(&locale, "common.searchModal.noResults")),
+                )
+                .into_any_element();
+        }
+
+        let entity = cx.entity();
+        let count = self.sticker_rows.len();
+        let list_h = (count as f32 * STICKER_ROW_PX).min(STICKER_ROW_PX * 3.);
+        let list = uniform_list("sticker-picker-list", count, move |range, _window, cx| {
+            let theme = cx.theme().clone();
+            let this = entity.read(cx);
+            range
+                .map(|ix| match this.sticker_rows.get(ix) {
+                    Some(cells) => render_sticker_row(&theme, cells, &entity),
+                    None => div().h(px(STICKER_ROW_PX)).into_any_element(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&self.sticker_scroll)
+        .h(px(list_h))
+        .w_full();
+
+        panel.p(px(8.)).child(list).into_any_element()
+    }
+
+    fn locale(&self, cx: &App) -> String {
+        self.settings.read(cx).language.clone()
+    }
+}
+
+fn channel_suggest_pool(cx: &App) -> Vec<ChannelSuggestRaw> {
+    let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id else {
+        return Vec::new();
+    };
+    let channel_list = ChannelList::global(cx);
+    let channel_list = channel_list.read(cx);
+    let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for category in channel_list.categories_for_clan(clan_id) {
+        for channel in &category.channels {
+            if channel.channel_type != ChannelType::Text || channel.parent_id.is_some() {
+                continue;
+            }
+            if seen.insert(channel.id) {
+                out.push(ChannelSuggestRaw {
+                    channel_id: channel.id.to_string(),
+                    name: channel.name.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
+    let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id else {
+        return Vec::new();
+    };
+    let clan_id = clan_id.to_string();
+    let Some(store) = EmojiStore::try_global(cx) else {
+        return Vec::new();
+    };
+    let store = store.read(cx);
+    store
+        .for_clan(&clan_id)
+        .into_iter()
+        .map(|emoji| EmojiSuggestRaw {
+            emoji_id: emoji.id.clone(),
+            shortname: emoji.shortname.clone(),
+            src: emoji.src.clone(),
+        })
+        .collect()
+}
+
+fn render_picker_header(theme: &Theme, label: &SharedString) -> AnyElement {
+    div()
+        .h(px(PICKER_ROW_PX))
+        .flex()
+        .items_center()
+        .px_1()
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(label.to_uppercase())
+        .into_any_element()
+}
+
+fn render_picker_emoji_row(
+    theme: &Theme,
+    emojis: &[EmojiSuggestRaw],
+    entity: &Entity<MentionInput>,
+) -> AnyElement {
+    let hover_bg = theme.bg_hover;
+    let mut row = div()
+        .h(px(PICKER_ROW_PX))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1();
+    for emoji in emojis {
+        let raw = emoji.clone();
+        let ent = entity.clone();
+        let cell = div()
+            .id(SharedString::from(format!("pick-{}", emoji.emoji_id)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(PICKER_CELL_PX))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(hover_bg))
+            .when(!emoji.src.is_empty(), |s| {
+                s.child(img(SharedString::from(emoji.src.clone())).size(px(PICKER_EMOJI_PX)))
+            })
+            .on_click(move |_event, window, cx| {
+                ent.update(cx, |this, cx| this.insert_emoji(raw.clone(), window, cx));
+            });
+        row = row.child(cell);
+    }
+    row.into_any_element()
+}
+
+fn render_sticker_row(
+    theme: &Theme,
+    cells: &[StickerCellRaw],
+    entity: &Entity<MentionInput>,
+) -> AnyElement {
+    let hover_bg = theme.bg_hover;
+    let mut row = div()
+        .h(px(STICKER_ROW_PX))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2();
+    for cell in cells {
+        let raw = cell.clone();
+        let ent = entity.clone();
+        let item = div()
+            .id(SharedString::from(format!("sticker-{}", cell.id)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(STICKER_CELL_PX))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|s| s.bg(hover_bg))
+            .when(!cell.src.is_empty(), |s| {
+                s.child(img(SharedString::from(cell.src.clone())).size(px(STICKER_IMG_PX)))
+            })
+            .on_click(move |_event, _window, cx| {
+                ent.update(cx, |this, cx| this.send_sticker(raw.clone(), cx));
+            });
+        row = row.child(item);
+    }
+    row.into_any_element()
+}
+
+impl Render for MentionInput {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.popup_open();
+        let theme = cx.theme();
+        let popup_bg = theme.bg_floating;
+        let border = theme.border;
+        let toggle_color = if self.picker_open {
+            theme.text_primary
+        } else {
+            theme.text_muted
+        };
+        let sticker_color = if self.sticker_picker_open {
+            theme.text_primary
+        } else {
+            theme.text_muted
+        };
+        let plus_color = theme.text_muted;
+        let has_pending = !self.pending_attachments.is_empty();
+
+        let popup = open.then(|| {
+            let rows: Vec<_> = self
+                .suggestions
+                .iter()
+                .enumerate()
+                .map(|(index, suggestion)| {
+                    self.render_suggestion(index, suggestion, cx)
+                        .into_any_element()
+                })
+                .collect();
+            deferred(
+                div()
+                    .id("mention-popup")
+                    .absolute()
+                    .bottom_full()
+                    .left_0()
+                    .right_0()
+                    .mb(px(8.))
+                    .max_h(px(216.))
+                    .overflow_y_scroll()
+                    .p(px(4.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(border)
+                    .bg(popup_bg)
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
+                    .children(rows),
+            )
+        });
+
+        let picker = self.picker_open.then(|| deferred(self.render_picker(cx)));
+        let sticker_picker = self
+            .sticker_picker_open
+            .then(|| deferred(self.render_sticker_picker(cx)));
+        let previews = has_pending.then(|| self.render_attachment_previews(cx));
+
+        let input_area = div()
+            .relative()
+            .w_full()
+            .when(open, |this| {
+                this.key_context(KEY_CONTEXT)
+                    .on_action(cx.listener(Self::on_accept))
+                    .on_action(cx.listener(Self::on_dismiss))
+            })
+            .child(MentionInputField::new(&self.input))
+            .child(
+                div()
+                    .id("attachment-add")
+                    .absolute()
+                    .right(px(64.))
+                    .top(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(IconName::AddCircle)
+                            .size_4()
+                            .text_color(plus_color),
+                    )
+                    .on_click(cx.listener(|this, _event, _window, cx| this.open_file_picker(cx))),
+            )
+            .child(
+                div()
+                    .id("sticker-toggle")
+                    .absolute()
+                    .right(px(36.))
+                    .top(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(IconName::Sticker)
+                            .size_4()
+                            .text_color(sticker_color),
+                    )
+                    .on_click(
+                        cx.listener(|this, _event, _window, cx| this.toggle_sticker_picker(cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("emoji-toggle")
+                    .absolute()
+                    .right(px(8.))
+                    .top(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .child(Icon::new(IconName::Smile).size_4().text_color(toggle_color))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.toggle_picker(cx))),
+            )
+            .when_some(popup, |this, popup| this.child(popup))
+            .when_some(picker, |this, picker| this.child(picker))
+            .when_some(sticker_picker, |this, sticker_picker| {
+                this.child(sticker_picker)
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .when_some(previews, |this, previews| this.child(previews))
+            .child(input_area)
+    }
+}

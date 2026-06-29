@@ -1,44 +1,76 @@
 pub mod account;
 pub mod audio;
+pub mod badge;
 pub mod cache;
 pub mod channel;
+pub mod channel_members;
 pub mod clan;
 pub mod clan_members;
 pub mod config;
 pub mod connection;
 pub mod direct;
+pub mod emoji;
+pub mod group_members;
 pub mod ids;
 pub mod login;
+pub mod message;
 pub mod messages;
+pub mod platform;
 pub mod presence;
 pub mod realtime;
+pub mod roles;
+pub mod sticker;
 pub mod threads;
 pub mod user_profile;
+pub mod users_by_user;
+pub mod voice;
 
 use anyhow::{Context, Result};
 use dirs::config_dir;
 pub use mezon_client::Session;
+pub use mezon_client::transport::MENTION_HERE_ID;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
-pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle, OpenUrlFn};
-pub use cache::KeyedCache;
+pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
+pub use badge::BadgeService;
+pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
+pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
 pub use clan::*;
-pub use clan_members::{ClanMember, ClanMembersEvent, ClanMembersStore, User as ClanUser};
+pub use clan_members::{
+    ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
+};
 pub use config::AppConfig;
-pub use ids::{ChannelId, ClanId, RoleId, UserId};
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
-pub use direct::{DirectChannel, DirectKind, DirectMessageStore};
+pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
+pub use emoji::{Emoji, EmojiEvent, EmojiStore};
+pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
+pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
 pub use login::{LoginStore, token_from_oauth_callback_url};
+pub use message::*;
+pub use message::{
+    COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
+    recompute_message_grouping,
+};
 pub use messages::*;
+pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use roles::{Role, RolesEvent, RolesStore};
+pub use sticker::{Sticker, StickerEvent, StickerStore};
 pub use threads::{ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
+pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
+pub use voice::{
+    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
+    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant, VoiceStore,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    preload_screen_share_options,
+};
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
 
@@ -74,13 +106,13 @@ pub struct Settings {
     pub output_device_id: Option<String>,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
-    pub clan_order: Vec<String>,
+    pub clan_order: Vec<ClanId>,
     /// Last active clan_id (restored on startup to resume where the user left off)
     #[serde(default)]
-    pub last_clan_id: Option<String>,
+    pub last_clan_id: Option<ClanId>,
     /// Last active channel_id within the last clan (restored on startup)
     #[serde(default)]
-    pub last_channel_id: Option<String>,
+    pub last_channel_id: Option<ChannelId>,
 }
 
 impl Default for Settings {

@@ -1,5 +1,5 @@
 use gpui::{App, ClickEvent, Entity, Pixels, Point, WeakEntity, Window};
-use mezon_store::{ChannelList, ChannelType};
+use mezon_store::{ChannelList, ChannelType, ClanId};
 
 use super::ChannelSidebar;
 use crate::app::shell::Shell;
@@ -8,18 +8,18 @@ use crate::components::primitives::ContextMenu;
 pub(super) fn on_channel_click(
     channel_list: Entity<ChannelList>,
     channel_id: String,
-    clan_id: Option<String>,
+    clan_id: Option<ClanId>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         channel_list.update(cx, |m, cx| {
-            m.select_channel(&channel_id, cx);
+            m.select_channel(channel_id.parse().unwrap_or_default(), cx);
         });
         if let Some(ref cid) = clan_id {
             crate::router::navigate(
                 cx,
                 crate::router::Route::Channel {
-                    clan_id: cid.clone(),
-                    channel_id: channel_id.clone(),
+                    clan_id: *cid,
+                    channel_id: channel_id.parse().unwrap_or_default(),
                 },
             );
         }
@@ -28,12 +28,12 @@ pub(super) fn on_channel_click(
 
 pub(super) fn on_category_click(
     channel_list: Entity<ChannelList>,
-    clan_id: String,
+    clan_id: ClanId,
     category_id: String,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         channel_list.update(cx, |m, cx| {
-            m.toggle_category(&clan_id, &category_id, cx);
+            m.toggle_category(clan_id, &category_id, cx);
         });
     }
 }

@@ -114,7 +114,7 @@ impl ProfilePage {
         )
         .detach();
 
-        AccountStore::global(cx).update(cx, |store, cx| store.fetch_account(cx));
+        AccountStore::global(cx).update(cx, |store, cx| store.ensure_account(cx));
 
         Self {
             settings,
@@ -473,8 +473,7 @@ impl Render for ProfilePage {
                             .as_ref()
                             .map(|p| p.username.clone())
                             .unwrap_or_default();
-                        let active_clan_id =
-                            this.clan_list.read(cx).active_clan().map(|c| c.id.clone());
+                        let active_clan_id = this.clan_list.read(cx).active_clan().map(|c| c.id);
                         this.clan_section.get_or_insert_with(|| {
                             cx.new(|cx| {
                                 ClanProfileSection::new(
@@ -488,7 +487,7 @@ impl Render for ProfilePage {
                             section.update(cx, |s, cx| {
                                 s.set_user_profile(display_name, username);
                                 if let Some(ref clan_id) = active_clan_id {
-                                    s.fetch(clan_id, cx);
+                                    s.fetch(&clan_id.to_string(), cx);
                                 }
                             });
                         }

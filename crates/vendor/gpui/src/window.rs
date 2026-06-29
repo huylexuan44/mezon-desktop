@@ -860,6 +860,7 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    window_control_hitboxes_index: usize,
 }
 
 impl Frame {
@@ -1612,11 +1613,12 @@ impl Window {
         });
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
-            Box::new(move || {
+            Box::new(move |position| {
                 handle
                     .update(&mut cx, |_, window, _cx| {
+                        let hit_test = window.rendered_frame.hit_test(position);
                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            if window.mouse_hit_test.ids.contains(&hitbox.id) {
+                            if hit_test.ids.contains(&hitbox.id) {
                                 return Some(*area);
                             }
                         }
@@ -3105,6 +3107,7 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
         }
     }
 
@@ -3140,6 +3143,12 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
+        self.next_frame.window_control_hitboxes.extend(
+            self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
+                ..range.end.window_control_hitboxes_index]
+                .iter()
+                .cloned(),
+        );
         self.next_frame.scene.replay(
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,

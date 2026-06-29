@@ -19,6 +19,7 @@ help:
     @echo "  Development"
     @echo "  ---------------------------------------------"
     @echo "  install           Install development tools (via cargo-binstall)"
+    @echo "  install-linux-deps Install Linux system libraries for GPUI/GTK"
     @echo "  run             Build (debug) and run the app"
     @echo "  watch           Hot-reload development (requires cargo-watch)"
     @echo "  check           Fast clippy checks"
@@ -55,6 +56,10 @@ install:
     cargo install cargo-binstall || true
     cargo binstall -y cargo-watch cargo-nextest cargo-deny cargo-outdated cargo-llvm-cov
 
+# Install Linux system libraries required to build GPUI, GTK tray, and accessibility
+install-linux-deps:
+    @bash scripts/linux-deps
+
 # Run the project with optional arguments
 run *args:
     cargo run {{args}}
@@ -62,6 +67,10 @@ run *args:
 # Hot-reload development (requires cargo-watch)
 watch:
     cargo watch -x run
+
+# Profile with Tracy (open Tracy 0.11.x GUI to connect; CPU + memory + frames)
+tracy:
+    cargo run --profile profiling --features tracy
 
 # Fast check for errors during development
 check:

@@ -1,7 +1,7 @@
-use gpui::{App, ClickEvent, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
-use crate::theme::Theme;
+use crate::theme::ActiveTheme;
 use mezon_store::{AuthState, PresenceStore};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
@@ -17,13 +17,27 @@ pub struct UserInfoBar {
 }
 
 impl UserInfoBar {
-    pub fn new(auth_state: Entity<AuthState>, cx: &App) -> Self {
+    pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&PresenceStore::global(cx), |this, _, cx| {
+            if this.sync_presence(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.observe(&auth_state, |this, _, cx| {
+            if this.sync_presence(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
         let username = Self::read_username(&auth_state, cx);
-        Self {
+        let mut bar = Self {
             auth_state,
             username,
             presence: SharedString::from("Offline"),
-        }
+        };
+        bar.sync_presence(cx);
+        bar
     }
 
     fn read_username(auth_state: &Entity<AuthState>, cx: &App) -> SharedString {
@@ -33,7 +47,9 @@ impl UserInfoBar {
         }
     }
 
-    pub fn sync_presence(&mut self, cx: &App) {
+    pub fn sync_presence(&mut self, cx: &App) -> bool {
+        let prev_username = self.username.clone();
+        let prev_presence = self.presence.clone();
         let user_id = match self.auth_state.read(cx) {
             AuthState::Authenticated(session) => {
                 self.username = SharedString::from(session.username.clone());
@@ -42,17 +58,21 @@ impl UserInfoBar {
             _ => {
                 self.username = SharedString::from("Unknown");
                 self.presence = SharedString::from("Offline");
-                return;
+                return self.username != prev_username || self.presence != prev_presence;
             }
         };
         let online = PresenceStore::global(cx)
             .read(cx)
             .user_online
-            .contains(&user_id);
+            .contains(&user_id.parse().unwrap_or_default());
         self.presence = SharedString::from(if online { "Online" } else { "Offline" });
+        self.username != prev_username || self.presence != prev_presence
     }
+}
 
-    pub fn render(&self, theme: &Theme, _cx: &App) -> impl IntoElement {
+impl Render for UserInfoBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let presence_color = match self.presence.as_ref() {
             "Online" => theme.status_online,
             "Idle" => theme.status_idle,
@@ -73,11 +93,11 @@ impl UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
+        // Positioning (absolute / insets) is applied by the cached wrapper in
+        // the chat layout so this view can be `.cached()`; keep only the visual
+        // box here.
         div()
-            .absolute()
-            .left(px(12.0))
-            .right(px(8.0))
-            .bottom(px(12.0))
+            .w_full()
             .min_h(px(56.0))
             .overflow_hidden()
             .rounded(px(12.0))

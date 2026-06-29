@@ -6,6 +6,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
+use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -25,6 +26,7 @@ pub struct ClanMember {
     pub clan_nick: String,
     pub clan_avatar: String,
     pub role_ids: Vec<RoleId>,
+    pub online: bool,
 }
 
 impl ClanMember {
@@ -78,7 +80,7 @@ impl ClanBucket {
 }
 
 pub struct ClanMembersStore {
-    by_clan: HashMap<ClanId, ClanBucket>,
+    cache: KeyedCache<ClanId, ClanBucket>,
     loading: HashSet<ClanId>,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -110,17 +112,15 @@ impl ClanMembersStore {
         Self::register_realtime(cx);
 
         let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(clan_id_str)) = event
-                && let Ok(clan_id) = clan_id_str.parse::<ClanId>()
-            {
-                this.ensure_loaded(clan_id, cx);
+            if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
+                this.ensure_loaded(*clan_id, cx);
             }
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            by_clan: HashMap::new(),
+            cache: KeyedCache::new(None),
             loading: HashSet::new(),
             api,
             _clan_sub: clan_sub,
@@ -155,7 +155,11 @@ impl ClanMembersStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.refresh_active(cx)).is_err() {
+                    let marked = this.update(cx, |this, cx| {
+                        this.cache.mark_all_stale();
+                        this.refresh_active(cx);
+                    });
+                    if marked.is_err() {
                         break;
                     }
                 } else if !connected {
@@ -166,11 +170,11 @@ impl ClanMembersStore {
     }
 
     pub fn member(&self, clan_id: ClanId, user_id: UserId) -> Option<&ClanMember> {
-        self.by_clan.get(&clan_id)?.by_id.get(&user_id)
+        self.cache.get(&clan_id)?.by_id.get(&user_id)
     }
 
     pub fn members(&self, clan_id: ClanId) -> Vec<&ClanMember> {
-        match self.by_clan.get(&clan_id) {
+        match self.cache.get(&clan_id) {
             Some(bucket) => bucket
                 .ids
                 .iter()
@@ -181,24 +185,17 @@ impl ClanMembersStore {
     }
 
     pub fn count(&self, clan_id: ClanId) -> usize {
-        self.by_clan.get(&clan_id).map(|b| b.ids.len()).unwrap_or(0)
+        self.cache.get(&clan_id).map(|b| b.ids.len()).unwrap_or(0)
     }
 
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
-        if let Some(clan_id_str) = ClanList::global(cx).read(cx).active_clan_id.as_deref()
-            && let Ok(clan_id) = clan_id_str.parse::<ClanId>()
-        {
+        if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
             self.fetch(clan_id, cx);
         }
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        let empty = self
-            .by_clan
-            .get(&clan_id)
-            .map(|b| b.ids.is_empty())
-            .unwrap_or(true);
-        if empty {
+        if !self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.fetch(clan_id, cx);
         }
     }
@@ -213,14 +210,26 @@ impl ClanMembersStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api.list_clan_users(clan_id.get()).await;
+            let (users_result, status_result) = tokio::join!(
+                api.list_clan_users(clan_id.get()),
+                api.list_clan_users_status(clan_id.get()),
+            );
             let _ = this.update(cx, |this, cx| {
                 this.loading.remove(&clan_id);
-                match result {
+                match users_result {
                     Ok(users) => {
+                        let online_ids: std::collections::HashSet<i64> = status_result
+                            .map(|s| {
+                                s.clan_user_statuses
+                                    .into_iter()
+                                    .map(|e| e.user_id)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let mut bucket = ClanBucket::default();
                         for cu in users {
-                            if let Some(member) = clan_member_from_proto(cu) {
+                            if let Some(mut member) = clan_member_from_proto(cu) {
+                                member.online = online_ids.contains(&member.user.id.0);
                                 bucket.upsert(member);
                             }
                         }
@@ -228,7 +237,7 @@ impl ClanMembersStore {
                             "ClanMembersStore: fetched {} members for clan {clan_id}",
                             bucket.ids.len()
                         );
-                        this.by_clan.insert(clan_id, bucket);
+                        this.cache.insert(clan_id, bucket, None);
                         cx.emit(ClanMembersEvent::Changed { clan_id });
                         cx.notify();
                     }
@@ -244,18 +253,18 @@ impl ClanMembersStore {
             RealtimeEvent::AddClanUser(e) => {
                 let clan_id = ClanId(e.clan_id);
                 clan_member_from_redis(e.user.as_ref())
-                    .filter(|member| apply_add_member(&mut self.by_clan, clan_id, member.clone()))
+                    .filter(|member| apply_add_member(&mut self.cache, clan_id, member.clone()))
                     .map(|_| clan_id)
             }
             RealtimeEvent::UserClanRemoved(e) => {
                 let clan_id = ClanId(e.clan_id);
                 let ids: Vec<UserId> = e.user_ids.iter().map(|id| UserId(*id)).collect();
-                apply_remove_members(&mut self.by_clan, clan_id, &ids).then_some(clan_id)
+                apply_remove_members(&mut self.cache, clan_id, &ids).then_some(clan_id)
             }
             RealtimeEvent::ClanProfileUpdated(e) => {
                 let clan_id = ClanId(e.clan_id);
                 apply_profile_update(
-                    &mut self.by_clan,
+                    &mut self.cache,
                     clan_id,
                     UserId(e.user_id),
                     &e.clan_nick,
@@ -275,7 +284,7 @@ impl ClanMembersStore {
 /// Add a member to an **already-loaded** clan bucket. Ignored for a clan we have not fetched yet,
 /// so a partial bucket never blocks the full `list_clan_users` fetch on clan switch.
 fn apply_add_member(
-    by_clan: &mut HashMap<ClanId, ClanBucket>,
+    by_clan: &mut KeyedCache<ClanId, ClanBucket>,
     clan_id: ClanId,
     member: ClanMember,
 ) -> bool {
@@ -289,7 +298,7 @@ fn apply_add_member(
 }
 
 fn apply_remove_members(
-    by_clan: &mut HashMap<ClanId, ClanBucket>,
+    by_clan: &mut KeyedCache<ClanId, ClanBucket>,
     clan_id: ClanId,
     user_ids: &[UserId],
 ) -> bool {
@@ -303,7 +312,7 @@ fn apply_remove_members(
 }
 
 fn apply_profile_update(
-    by_clan: &mut HashMap<ClanId, ClanBucket>,
+    by_clan: &mut KeyedCache<ClanId, ClanBucket>,
     clan_id: ClanId,
     user_id: UserId,
     clan_nick: &str,
@@ -341,6 +350,7 @@ fn clan_member_from_proto(cu: api::clan_user_list::ClanUser) -> Option<ClanMembe
         clan_nick: cu.clan_nick,
         clan_avatar: cu.clan_avatar,
         role_ids: cu.role_id.iter().map(|id| RoleId(*id)).collect(),
+        online: false,
     })
 }
 
@@ -361,6 +371,7 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
         clan_nick: String::new(),
         clan_avatar: String::new(),
         role_ids: Vec::new(),
+        online: false,
     })
 }
 
@@ -501,38 +512,46 @@ mod tests {
         clan_member_from_proto(proto_clan_user(id, name, name, "")).unwrap()
     }
 
-    fn bucket_with(members: Vec<ClanMember>) -> HashMap<ClanId, ClanBucket> {
+    fn bucket_with(members: Vec<ClanMember>) -> KeyedCache<ClanId, ClanBucket> {
         let mut bucket = ClanBucket::default();
         for m in members {
             bucket.upsert(m);
         }
-        HashMap::from([(ClanId(1), bucket)])
+        let mut cache = KeyedCache::new(None);
+        cache.insert(ClanId(1), bucket, None);
+        cache
     }
 
     #[test]
     fn add_member_applies_to_loaded_clan() {
         let mut by_clan = bucket_with(vec![]);
         assert!(apply_add_member(&mut by_clan, ClanId(1), member(1, "a")));
-        assert!(by_clan[&ClanId(1)].by_id.contains_key(&UserId(1)));
+        assert!(
+            by_clan
+                .get(&ClanId(1))
+                .unwrap()
+                .by_id
+                .contains_key(&UserId(1))
+        );
     }
 
     #[test]
     fn add_member_ignored_for_unfetched_clan() {
-        let mut by_clan: HashMap<ClanId, ClanBucket> = HashMap::new();
+        let mut by_clan: KeyedCache<ClanId, ClanBucket> = KeyedCache::new(None);
         assert!(!apply_add_member(&mut by_clan, ClanId(1), member(1, "a")));
-        assert!(by_clan.is_empty());
+        assert!(by_clan.get(&ClanId(1)).is_none());
     }
 
     #[test]
     fn remove_members_drops_from_loaded_bucket() {
         let mut by_clan = bucket_with(vec![member(1, "a"), member(2, "b")]);
         assert!(apply_remove_members(&mut by_clan, ClanId(1), &[UserId(1)]));
-        assert_eq!(by_clan[&ClanId(1)].ids, vec![UserId(2)]);
+        assert_eq!(by_clan.get(&ClanId(1)).unwrap().ids, vec![UserId(2)]);
     }
 
     #[test]
     fn remove_members_ignored_for_unfetched_clan() {
-        let mut by_clan: HashMap<ClanId, ClanBucket> = HashMap::new();
+        let mut by_clan: KeyedCache<ClanId, ClanBucket> = KeyedCache::new(None);
         assert!(!apply_remove_members(&mut by_clan, ClanId(1), &[UserId(1)]));
     }
 
@@ -546,7 +565,8 @@ mod tests {
             "NewNick",
             "new.png"
         ));
-        let updated = &by_clan[&ClanId(1)].by_id[&UserId(1)];
+        let bucket = by_clan.get(&ClanId(1)).unwrap();
+        let updated = &bucket.by_id[&UserId(1)];
         assert_eq!(updated.name(), "NewNick");
         assert_eq!(updated.avatar(), "new.png");
     }
@@ -561,5 +581,20 @@ mod tests {
             "x",
             "y"
         ));
+    }
+
+    #[test]
+    fn reconnect_mark_all_stale_keeps_members_then_refetch_restores_freshness() {
+        let mut by_clan = bucket_with(vec![member(1, "a"), member(2, "b")]);
+        assert!(by_clan.is_fresh(&ClanId(1), crate::CACHE_TTL));
+
+        by_clan.mark_all_stale();
+        assert!(!by_clan.is_fresh(&ClanId(1), crate::CACHE_TTL));
+        assert_eq!(by_clan.get(&ClanId(1)).unwrap().ids.len(), 2);
+
+        let mut refreshed = ClanBucket::default();
+        refreshed.upsert(member(1, "a"));
+        by_clan.insert(ClanId(1), refreshed, None);
+        assert!(by_clan.is_fresh(&ClanId(1), crate::CACHE_TTL));
     }
 }

@@ -1,0 +1,45 @@
+[package]
+name = "mezon-voice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+livekit = { workspace = true }
+cpal = { workspace = true }
+tokio = { workspace = true }
+flume = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+scap = { workspace = true }
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
+
+image = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+scap = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+scap = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
+screencapturekit = "0.2.8"
+core-graphics-helmer-fork = "0.24.0"
+cocoa = "0.25.0"
+objc = "0.2.7"
+block = "0.1.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
+windows-capture = "2.0"

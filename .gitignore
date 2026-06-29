@@ -1,6 +1,5 @@
 # Rust build artifacts
 target/
-Cargo.lock
 
 # macOS
 .DS_Store
@@ -18,6 +17,8 @@ Cargo.lock
 .mcp-sessions.json
 
 # Local agent tooling (Claude Code / Cursor)
+.codebase-memory/
+.agents/
 .claude/
 .cursor/
 .claudeignore

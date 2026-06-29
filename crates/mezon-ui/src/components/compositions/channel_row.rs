@@ -6,6 +6,7 @@ use crate::components::primitives::IconName;
 use crate::theme::Theme;
 
 pub struct ChannelRow {
+    row_id: SharedString,
     name: SharedString,
     channel_type: ChannelType,
     unread: bool,
@@ -15,11 +16,13 @@ pub struct ChannelRow {
     badge_label: SharedString,
     muted: bool,
     is_thread: bool,
+    suppress_hover: bool,
 }
 
 impl ChannelRow {
     pub fn new(name: impl Into<SharedString>, channel_type: ChannelType) -> Self {
         Self {
+            row_id: SharedString::default(),
             name: name.into(),
             channel_type,
             unread: false,
@@ -29,7 +32,18 @@ impl ChannelRow {
             badge_label: SharedString::from(""),
             muted: false,
             is_thread: false,
+            suppress_hover: false,
         }
+    }
+
+    pub fn row_id(mut self, row_id: impl Into<SharedString>) -> Self {
+        self.row_id = row_id.into();
+        self
+    }
+
+    pub fn suppress_hover(mut self, suppress: bool) -> Self {
+        self.suppress_hover = suppress;
+        self
     }
 
     pub fn is_thread(mut self, is_thread: bool) -> Self {
@@ -77,12 +91,15 @@ impl ChannelRow {
             theme.text_secondary
         };
         let selected_bg = theme.bg_primary;
+        let hover_bg = theme.bg_hover;
         let secondary = theme.text_secondary;
         let brand = theme.brand;
         let text_primary = theme.text_primary;
 
+        let suppress_hover = self.suppress_hover;
         div().w_full().px_2().child(
             div()
+                .id(self.row_id.clone())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -92,6 +109,9 @@ impl ChannelRow {
                 .rounded_lg()
                 .cursor_pointer()
                 .when(self.selected, move |el| el.bg(selected_bg))
+                .when(!self.selected && !suppress_hover, move |el| {
+                    el.hover(|s| s.bg(hover_bg))
+                })
                 .text_color(text_color)
                 .child(Icon::new(icon).size(px(16.0)).text_color(secondary))
                 .child(
@@ -105,22 +125,25 @@ impl ChannelRow {
                         })
                         .child(self.name),
                 )
-                .when(self.badge_count > 0 && !self.muted, move |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .min_w(px(16.0))
-                            .h(px(16.0))
-                            .px_1()
-                            .rounded_full()
-                            .bg(brand)
-                            .text_color(text_primary)
-                            .text_xs()
-                            .child(self.badge_label.clone()),
-                    )
-                })
+                .when(
+                    crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0 && !self.muted,
+                    move |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .min_w(px(16.0))
+                                .h(px(16.0))
+                                .px_1()
+                                .rounded_full()
+                                .bg(brand)
+                                .text_color(text_primary)
+                                .text_xs()
+                                .child(self.badge_label.clone()),
+                        )
+                    },
+                )
                 .when(
                     self.badge_count == 0 && self.unread && !self.muted,
                     move |el| el.child(div().size_2().rounded_full().bg(brand)),

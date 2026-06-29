@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui::{App, AppContext, Context, Entity, Global};
+use gpui::{App, AppContext, BackgroundExecutor, Context, Entity, Global};
 use mezon_client::{AppApi, MezonClient, QrLoginId, Session, keychain};
 
 use crate::AuthState;
@@ -75,8 +75,8 @@ impl LoginStore {
         self.client.create_qr_login().await
     }
 
-    pub async fn confirm_qr_login(&self, login_id: &str) -> Result<Session> {
-        self.client.confirm_qr_login(login_id).await
+    pub async fn confirm_qr_login(&self, login_id: &str, is_remember: bool) -> Result<Session> {
+        self.client.confirm_qr_login(login_id, is_remember).await
     }
 
     pub fn persist_session(session: &Session) -> Result<()> {
@@ -84,32 +84,43 @@ impl LoginStore {
     }
 
     pub fn logout(&self, cx: &mut Context<Self>) {
-        let session = cx.read_entity(&self.auth_state, |state, _| match state {
-            AuthState::Authenticated(s) | AuthState::Connecting(s) => {
-                Some((s.token.clone(), s.refresh_token.clone()))
-            }
-            _ => None,
-        });
+        let credentials = cx.read_entity(&self.auth_state, |state, _| session_credentials(state));
 
-        let api = self.api.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if let Some((token, refresh_token)) = session
-                    && let Err(e) = api.session_logout(&token, &refresh_token).await
-                {
-                    tracing::warn!("session_logout request failed (ignored): {e}");
-                }
-                if let Err(e) = keychain::clear_session() {
-                    tracing::warn!("Failed to clear keychain session: {e}");
-                }
-            })
-            .detach();
+        spawn_session_logout(self.api.clone(), credentials, cx.background_executor());
 
         self.auth_state.update(cx, |state, cx| {
             *state = AuthState::NotAuthenticated;
             cx.notify();
         });
     }
+}
+
+pub(crate) fn session_credentials(state: &AuthState) -> Option<(String, String)> {
+    match state {
+        AuthState::Authenticated(s) | AuthState::Connecting(s) => {
+            Some((s.token.clone(), s.refresh_token.clone()))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn spawn_session_logout(
+    api: Arc<AppApi>,
+    credentials: Option<(String, String)>,
+    background: &BackgroundExecutor,
+) {
+    background
+        .spawn(async move {
+            if let Some((token, refresh_token)) = credentials
+                && let Err(e) = api.session_logout(&token, &refresh_token).await
+            {
+                tracing::warn!("session_logout request failed (ignored): {e}");
+            }
+            if let Err(e) = keychain::clear_session() {
+                tracing::warn!("Failed to clear keychain session: {e}");
+            }
+        })
+        .detach();
 }
 
 #[cfg(test)]

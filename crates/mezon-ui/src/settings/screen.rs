@@ -1,7 +1,6 @@
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use gpui::{Context, Entity, ScrollHandle, Window, div, prelude::*, px};
 use mezon_store::{AuthState, ClanList, LoginStore, Settings};
-use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
@@ -189,7 +188,7 @@ impl SettingsScreen {
 }
 
 impl Render for SettingsScreen {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let page = self.current_page;
@@ -274,12 +273,6 @@ impl Render for SettingsScreen {
                     .bg(theme.bg_secondary)
                     .overflow_y_scroll()
                     .track_scroll(&self.nav_scroll)
-                    .custom_scrollbars(
-                        Scrollbars::new(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.nav_scroll),
-                        window,
-                        cx,
-                    )
                     .child(
                         div()
                             .flex()
@@ -428,13 +421,7 @@ impl Render for SettingsScreen {
                         .pl(px(40.0))
                         .pr(px(10.0))
                         .bg(theme.bg_primary)
-                        .child(div().max_w(px(740.0)).child(content))
-                        .custom_scrollbars(
-                            Scrollbars::new(ScrollAxes::Vertical)
-                                .tracked_scroll_handle(&self.scroll),
-                            window,
-                            cx,
-                        ),
+                        .child(div().max_w(px(740.0)).child(content)),
                 ),
             )
             .child(

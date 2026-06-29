@@ -1,9 +1,5 @@
 use anyhow::Result;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -12,8 +8,6 @@ use tray_icon::{
 const SHOW_ID: &str = "show";
 const UPDATE_ID: &str = "update";
 const QUIT_ID: &str = "quit";
-
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[cfg(target_os = "linux")]
 const TRAY_ICON_BYTES: &[u8] = include_bytes!(concat!(
@@ -30,7 +24,7 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!(concat!(
 pub struct MezonTray {
     _icon: TrayIcon,
     update_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    stop_flag: Arc<AtomicBool>,
+    stop_tx: crossbeam_channel::Sender<()>,
 }
 
 impl MezonTray {
@@ -69,54 +63,54 @@ impl MezonTray {
             Arc::new(Mutex::new(None));
         let update_task_thread = Arc::clone(&update_task);
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_thread = Arc::clone(&stop_flag);
+        let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
 
         std::thread::spawn(move || {
             loop {
-                if stop_flag_thread.load(Ordering::Relaxed) {
-                    break;
-                }
-                if let Ok(event) = receiver.recv_timeout(POLL_INTERVAL) {
-                    match event.id().0.as_str() {
-                        SHOW_ID => (on_show)(),
-                        UPDATE_ID => {
-                            let handle = rt_handle.clone();
-                            let join = handle.spawn(async {
-                                match mezon_updater::check_for_updates(env!("CARGO_PKG_VERSION"))
-                                    .await
-                                {
-                                    Ok(Some(version)) => {
-                                        let download_url = "https://mezon.ai/download";
-                                        tracing::info!(
-                                            "Update available: v{version} — download from {download_url}"
-                                        );
-                                        match mezon_updater::validate_update_url(download_url) {
-                                            Ok(()) => {
-                                                let _ = open::that(download_url);
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Blocked open of update URL: {e}");
+                crossbeam_channel::select! {
+                    recv(receiver) -> msg => match msg {
+                        Ok(event) => match event.id().0.as_str() {
+                            SHOW_ID => (on_show)(),
+                            UPDATE_ID => {
+                                let handle = rt_handle.clone();
+                                let join = handle.spawn(async {
+                                    match mezon_updater::check_for_updates(env!("CARGO_PKG_VERSION"))
+                                        .await
+                                    {
+                                        Ok(Some(version)) => {
+                                            let download_url = "https://mezon.ai/download";
+                                            tracing::info!(
+                                                "Update available: v{version} — download from {download_url}"
+                                            );
+                                            match mezon_updater::validate_update_url(download_url) {
+                                                Ok(()) => {
+                                                    let _ = open::that(download_url);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Blocked open of update URL: {e}");
+                                                }
                                             }
                                         }
+                                        Ok(None) => {
+                                            tracing::info!("Mezon is up to date");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Update check failed: {e}");
+                                        }
                                     }
-                                    Ok(None) => {
-                                        tracing::info!("Mezon is up to date");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Update check failed: {e}");
-                                    }
+                                });
+                                if let Ok(mut guard) = update_task_thread.lock()
+                                    && let Some(prior) = guard.replace(join)
+                                {
+                                    prior.abort();
                                 }
-                            });
-                            if let Ok(mut guard) = update_task_thread.lock()
-                                && let Some(prior) = guard.replace(join)
-                            {
-                                prior.abort();
                             }
-                        }
-                        QUIT_ID => (on_quit)(),
-                        _ => {}
-                    }
+                            QUIT_ID => (on_quit)(),
+                            _ => {}
+                        },
+                        Err(_) => break,
+                    },
+                    recv(stop_rx) -> _ => break,
                 }
             }
             tracing::debug!("Tray event-loop thread exiting");
@@ -126,14 +120,14 @@ impl MezonTray {
         Ok(Self {
             _icon: tray,
             update_task,
-            stop_flag,
+            stop_tx,
         })
     }
 }
 
 impl Drop for MezonTray {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
+        let _ = self.stop_tx.send(());
         if let Ok(mut guard) = self.update_task.lock()
             && let Some(handle) = guard.take()
         {

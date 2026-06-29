@@ -1,30 +1,80 @@
+use std::rc::Rc;
+
 use gpui::{
-    Context, Entity, FontWeight, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div,
+    prelude::*, px, uniform_list,
 };
-use mezon_store::{DirectMessageStore, Settings};
+use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
 
 use crate::components::compositions::DmRow;
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
+struct DmItem {
+    channel_id: ChannelId,
+    id: SharedString,
+    label: SharedString,
+    kind: DirectKind,
+    online: bool,
+    avatar_src: SharedString,
+    avatar_raw: SharedString,
+}
+
 pub struct DirectSidebar {
-    direct_store: Entity<DirectMessageStore>,
     settings: Entity<Settings>,
     list_scroll: UniformListScrollHandle,
+    dm_items: Rc<Vec<DmItem>>,
+}
+
+fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
+    let raw: Vec<(ChannelId, String, DirectKind, bool, String)> = store
+        .channels()
+        .iter()
+        .map(|ch| {
+            (
+                ch.id,
+                ch.label.clone(),
+                ch.kind,
+                ch.online,
+                ch.avatar.clone(),
+            )
+        })
+        .collect();
+    Rc::new(
+        raw.into_iter()
+            .map(|(channel_id, label, kind, online, avatar)| DmItem {
+                channel_id,
+                id: SharedString::from(channel_id.to_string()),
+                label: SharedString::from(label),
+                kind,
+                online,
+                avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar)),
+                avatar_raw: SharedString::from(avatar),
+            })
+            .collect(),
+    )
 }
 
 impl DirectSidebar {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         let direct_store = DirectMessageStore::global(cx);
-        cx.observe(&direct_store, |_, _, cx| cx.notify()).detach();
+
+        cx.observe(&direct_store, |this, store, cx| {
+            this.dm_items = build_dm_items(store.read(cx), cx);
+            cx.notify();
+        })
+        .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+
+        let dm_items = build_dm_items(direct_store.read(cx), cx);
+
         Self {
-            direct_store,
             settings,
             list_scroll: UniformListScrollHandle::new(),
+            dm_items,
         }
     }
 
@@ -128,27 +178,25 @@ impl Render for DirectSidebar {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
 
-        let count = self.direct_store.read(cx).channels().len();
+        let count = self.dm_items.len();
         let active_id = match Router::global(cx).read(cx).route() {
             Route::DirectMessage { direct_id, .. } => Some(direct_id),
             _ => None,
         };
-        let store = self.direct_store.clone();
+        let items = self.dm_items.clone();
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
-            let active_id = active_id.clone();
-            let store = store.read(cx);
+            let active_id = active_id;
             range
-                .map(|ix| match store.channels().get(ix) {
-                    Some(channel) => {
-                        let selected = active_id.as_deref() == Some(channel.id.as_str());
-                        let avatar_src = crate::util::imgproxy::avatar_url(cx, &channel.avatar);
-                        DmRow::new(channel.id.clone(), channel.label.clone(), channel.kind)
+                .map(|ix| match items.get(ix) {
+                    Some(item) => {
+                        let selected = active_id == Some(item.channel_id);
+                        DmRow::new(item.id.clone(), item.label.clone(), item.kind)
                             .selected(selected)
-                            .online(channel.online)
-                            .avatar_src(avatar_src)
-                            .avatar_raw(channel.avatar.clone())
+                            .online(item.online)
+                            .avatar_src(item.avatar_src.clone())
+                            .avatar_raw(item.avatar_raw.clone())
                             .render(&theme)
                             .into_any_element()
                     }
