@@ -740,4 +740,14 @@ impl AppApi {
             .logout_device(token, refresh_token, device_id)
             .await
     }
+
+    pub async fn list_user_permission_in_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
+        self.transport
+            .list_user_permission_in_channel(clan_id, channel_id)
+            .await
+    }
 }

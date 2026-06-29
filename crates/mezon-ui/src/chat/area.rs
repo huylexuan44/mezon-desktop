@@ -155,7 +155,8 @@ impl ChatArea {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .child(div().flex_1().min_h_0().child(
+            .overflow_hidden()
+            .child(div().flex_1().min_h_0().overflow_hidden().child(
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
             .child(self.typing.clone())
@@ -165,7 +166,10 @@ impl ChatArea {
             .flex()
             .flex_row()
             .flex_1()
+            .w_full()
+            .h_full()
             .min_h_0()
+            .overflow_hidden()
             .child(message_column)
             .when(show_member_panel, |row| match &self.member_panel {
                 Some(panel) => row.child(
@@ -183,8 +187,11 @@ impl ChatArea {
             .flex()
             .flex_col()
             .flex_1()
+            .w_full()
+            .h_full()
             .min_w_0()
             .min_h_0()
+            .overflow_hidden()
             .child(header)
             .child(body)
             .into_any_element()

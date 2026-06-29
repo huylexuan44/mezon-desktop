@@ -873,4 +873,20 @@ impl TransportClient {
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
+
+    pub async fn list_user_permission_in_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_user_permission_in_channel(clan_id, channel_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
 }

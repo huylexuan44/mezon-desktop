@@ -4,6 +4,7 @@ pub mod badge;
 pub mod cache;
 pub mod channel;
 pub mod channel_members;
+pub mod channel_permissions;
 pub mod clan;
 pub mod clan_members;
 pub mod config;
@@ -40,6 +41,9 @@ pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
+pub use channel_permissions::{
+    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_MANAGE_THREAD,
+};
 pub use clan::*;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
@@ -63,7 +67,10 @@ pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
 pub use sticker::{Sticker, StickerEvent, StickerStore};
 pub use threads::{ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
-pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
+pub use user_profile::{
+    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar,
+    resolve_user_profile,
+};
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
     PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,

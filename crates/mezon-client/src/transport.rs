@@ -511,6 +511,15 @@ fn parse_message_text(content: &str) -> String {
         .unwrap_or_else(|| content.to_string())
 }
 
+/// Prefer clan-scoped avatar in channel/thread contexts
+pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
+    if !clan_avatar.is_empty() {
+        clan_avatar.to_string()
+    } else {
+        user_avatar.to_string()
+    }
+}
+
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     if bytes.is_empty() {
         return Vec::new();
@@ -1204,7 +1213,7 @@ impl MezonTransport {
             code: message.code,
             sender_id: message.sender_id,
             sender_name,
-            avatar: message.avatar,
+            avatar: prioritize_avatar(&message.clan_avatar, &message.avatar),
             create_time: i64::from(message.create_time_seconds),
             update_time: i64::from(message.update_time_seconds),
             hide_editted: message.hide_editted,
@@ -5862,6 +5871,33 @@ mod tests {
     fn non_numeric_user_id_is_dropped_not_zeroed() {
         let bad = user_mention("not-a-number", 0, 4);
         assert!(bad.to_proto().is_none());
+    }
+
+    #[test]
+    fn message_from_proto_prefers_clan_avatar() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            sender_id: 42,
+            avatar: "user.png".into(),
+            clan_avatar: "clan.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(msg);
+        assert_eq!(parsed.avatar, "clan.png");
+        assert_eq!(parsed.content, "hi");
+    }
+
+    #[test]
+    fn message_from_proto_falls_back_to_user_avatar() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            avatar: "user.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(msg);
+        assert_eq!(parsed.avatar, "user.png");
     }
 
     #[test]

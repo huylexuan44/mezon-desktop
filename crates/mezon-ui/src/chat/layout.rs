@@ -10,7 +10,7 @@ use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
-use crate::components::primitives::{InputEvent, InputState, h_flex};
+use crate::components::primitives::{InputEvent, InputState};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::{ChannelSidebar, ClanSidebar, DirectSidebar};
@@ -318,14 +318,19 @@ impl Render for ChatLayout {
         let create_panel = self.build_create_thread_panel(&locale, window, cx);
         let chat_content = self.render_content(cx);
         let main_content = if let Some(panel) = create_panel {
-            h_flex()
+            div()
+                .flex()
+                .flex_row()
                 .flex_1()
+                .w_full()
                 .min_w_0()
                 .h_full()
                 .min_h_0()
                 .overflow_hidden()
                 .child(
                     div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_w_0()
                         .h_full()

@@ -5,14 +5,14 @@ use gpui::{
     Hsla, ListAlignment, ListState, MouseDownEvent, Window, div, img, list, prelude::*, px,
 };
 use mezon_store::{
-    ClanId, ClanList, ClanMembersStore, MessagesStore, ProfileContext, ThreadSummary,
-    ThreadsStore, UserId, group_threads, resolve_user_profile,
+    ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore, MessagesStore, ProfileContext,
+    ThreadSummary, ThreadsStore, UserId, group_threads, resolve_user_profile,
 };
-use ui::prelude::*;
-use ui::{Label, PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
+use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 use ui::utils::{DateTimeType, format_distance_from_now};
 
 use crate::chat::layout::ChatLayout;
+use crate::chat::message::DEFAULT_DISPLAY_NAME_COLOR;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size,
     Spinner, h_flex, v_flex,
@@ -24,7 +24,6 @@ const HEADER_HEIGHT: f32 = 48.;
 const PANEL_MIN_HEIGHT: f32 = 400.;
 const LIST_BODY_HEIGHT: f32 = 500.;
 const PANEL_MAX_VIEWPORT_OFFSET: f32 = 180.;
-const SENDER_NAME_COLOR: u32 = 0x17ac86;
 const THREAD_AVATAR_SIZE: f32 = 16.;
 
 type ThreadPopoverOnOpen = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -63,6 +62,10 @@ impl ThreadsScrollBody {
         .detach();
         cx.observe(&MessagesStore::global(cx), |this, _, cx| {
             this.list_dirty = true;
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&ChannelPermissionsStore::global(cx), |_, _, cx| {
             cx.notify();
         })
         .detach();
@@ -142,6 +145,9 @@ impl Render for ThreadsScrollBody {
                 .h(px(LIST_BODY_HEIGHT))
                 .flex_shrink_0()
                 .overflow_hidden()
+                .px_4()
+                .pb_4()
+                .bg(theme.tokens.theme_setting_primary)
                 .child(
                     list(self.list_state.clone(), {
                         let theme = theme.clone();
@@ -162,11 +168,12 @@ impl Render for ThreadsScrollBody {
         }
 
         if show_spinner {
-            centered_spinner().into_any_element()
+            centered_spinner(&theme).into_any_element()
         } else if search_query.trim().is_empty() {
-            render_empty_body(&locale, &theme, layout).into_any_element()
+            let can_create = ThreadsStore::global(cx).read(cx).can_create_thread(cx);
+            render_empty_body(&locale, &theme, layout, can_create).into_any_element()
         } else {
-            centered_spinner().into_any_element()
+            centered_spinner(&theme).into_any_element()
         }
     }
 }
@@ -183,6 +190,7 @@ impl ThreadsPopoverPanel {
         let scroll_body = cx.new(|cx| ThreadsScrollBody::new(layout.clone(), cx));
 
         cx.observe(&ThreadsStore::global(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&ChannelPermissionsStore::global(cx), |_, _, cx| cx.notify()).detach();
 
         Self {
             layout,
@@ -207,10 +215,12 @@ impl Render for ThreadsPopoverPanel {
         let theme = cx.theme().clone();
         let locale = self.layout.read(cx).settings_language(cx);
         let searching = ThreadsStore::global(cx).read(cx).is_searching();
+        let can_create = ThreadsStore::global(cx).read(cx).can_create_thread(cx);
         let layout = self.layout.clone();
         let search_input = self.search_input.clone();
         let viewport_h = f32::from(window.viewport_size().height);
         let panel_max_h = (viewport_h - PANEL_MAX_VIEWPORT_OFFSET).max(PANEL_MIN_HEIGHT);
+        let tokens = &theme.tokens;
 
         v_flex()
             .key_context("menu")
@@ -225,16 +235,29 @@ impl Render for ThreadsPopoverPanel {
             .min_h(px(PANEL_MIN_HEIGHT))
             .max_h(px(panel_max_h))
             .overflow_hidden()
-            .elevation_2(cx)
-            .child(render_header(
-                &theme,
-                &locale,
-                layout,
-                self.popover_handle.clone(),
-                search_input,
-                searching,
-            ))
-            .child(self.scroll_body.clone())
+            .rounded_md()
+            .border_1()
+            .border_color(tokens.border_primary)
+            .bg(tokens.theme_setting_primary)
+            .text_color(tokens.text_theme_message)
+            .child(
+                v_flex()
+                    .w_full()
+                    .min_h(px(PANEL_MIN_HEIGHT))
+                    .max_h(px(panel_max_h))
+                    .overflow_hidden()
+                    .rounded_md()
+                    .child(render_header(
+                        &theme,
+                        &locale,
+                        layout,
+                        self.popover_handle.clone(),
+                        search_input,
+                        searching,
+                        can_create,
+                    ))
+                    .child(self.scroll_body.clone()),
+            )
     }
 }
 
@@ -245,6 +268,7 @@ fn render_header(
     _handle: PopoverMenuHandle<ThreadsPopoverPanel>,
     search_input: Entity<InputState>,
     searching: bool,
+    can_create: bool,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     let create_layout = layout.clone();
@@ -260,14 +284,17 @@ fn render_header(
         .child(
             Icon::new(IconName::ThreadIcon)
                 .size_4()
-                .text_color(tokens.text_theme_primary),
+                .text_color(tokens.bg_icon_theme),
         )
         .child(
-            Label::new(mezon_i18n::t(
-                locale,
-                "channelTopbar.modals.threads.title",
-            ))
-            .size(LabelSize::Default),
+            div()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tokens.text_theme_message)
+                .child(mezon_i18n::t(
+                    locale,
+                    "channelTopbar.modals.threads.title",
+                )),
         );
 
     let search_icon = Icon::new(if searching {
@@ -309,25 +336,30 @@ fn render_header(
                 .child(search_icon),
         );
 
-    let create_btn = Button::new("thread-create-btn")
-        .label(mezon_i18n::t(locale, "channelTopbar.modals.threads.create"))
-        .primary()
-        .with_size(Size::Small)
-        .on_click(move |_: &ClickEvent, _window, cx| {
-            create_layout.update(cx, |layout, cx| layout.open_create_thread(cx));
-        });
-
     let close_btn = Button::new("thread-close-btn")
         .icon(
             Icon::new(IconName::Close)
                 .size_4()
-                .text_color(tokens.text_theme_primary),
+                .text_color(tokens.text_theme_primary_hover),
         )
         .ghost()
         .with_size(Size::Small)
         .on_click(move |_: &ClickEvent, _window, cx| {
             dismiss_layout.update(cx, |layout, cx| layout.dismiss_threads_popover(cx));
         });
+
+    let mut actions = h_flex().items_center().gap_4().flex_shrink_0();
+    if can_create {
+        let create_btn = Button::new("thread-create-btn")
+            .label(mezon_i18n::t(locale, "channelTopbar.modals.threads.create"))
+            .primary()
+            .with_size(Size::Small)
+            .on_click(move |_: &ClickEvent, _window, cx| {
+                create_layout.update(cx, |layout, cx| layout.open_create_thread(cx));
+            });
+        actions = actions.child(create_btn);
+    }
+    actions = actions.child(close_btn);
 
     h_flex()
         .w_full()
@@ -340,23 +372,17 @@ fn render_header(
         .bg(tokens.theme_setting_nav)
         .child(title_block)
         .child(search_block)
-        .child(
-            h_flex()
-                .items_center()
-                .gap_4()
-                .flex_shrink_0()
-                .child(create_btn)
-                .child(close_btn),
-        )
+        .child(actions)
 }
 
-fn centered_spinner() -> impl IntoElement {
+fn centered_spinner(theme: &Theme) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .justify_center()
         .w_full()
         .min_h(px(PANEL_MIN_HEIGHT))
+        .bg(theme.tokens.theme_setting_primary)
         .child(Spinner::new().with_size(Size::Small))
 }
 
@@ -427,6 +453,7 @@ fn render_search_no_results(locale: &str, theme: &Theme, query: &str) -> impl In
         .justify_center()
         .gap_4()
         .p_8()
+        .bg(tokens.theme_setting_primary)
         .child(
             Icon::new(IconName::Search)
                 .size(px(48.))
@@ -436,7 +463,7 @@ fn render_search_no_results(locale: &str, theme: &Theme, query: &str) -> impl In
             div()
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tokens.text_theme_primary)
+                .text_color(tokens.text_theme_message)
                 .text_center()
                 .child(title),
         )
@@ -462,11 +489,12 @@ fn render_empty_body(
     locale: &str,
     theme: &Theme,
     layout: Entity<ChatLayout>,
+    can_create: bool,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
     let create_layout = layout;
 
-    v_flex()
+    let mut body = v_flex()
         .w_full()
         .flex_1()
         .items_center()
@@ -474,6 +502,7 @@ fn render_empty_body(
         .gap_4()
         .p_12()
         .min_h(px(PANEL_MIN_HEIGHT))
+        .bg(tokens.theme_setting_primary)
         .child(
             div()
                 .relative()
@@ -500,7 +529,7 @@ fn render_empty_body(
             div()
                 .text_2xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tokens.text_theme_primary)
+                .text_color(tokens.text_theme_message)
                 .child(mezon_i18n::t(locale, "channelTopbar.threads.emptyTitle")),
         )
         .child(
@@ -512,15 +541,20 @@ fn render_empty_body(
                     locale,
                     "channelTopbar.threads.emptyDescription",
                 )),
-        )
-        .child(
+        );
+
+    if can_create {
+        body = body.child(
             Button::new("thread-empty-create")
                 .label(mezon_i18n::t(locale, "channelTopbar.threads.createThread"))
                 .primary()
                 .on_click(move |_: &ClickEvent, _window, cx| {
                     create_layout.update(cx, |layout, cx| layout.open_create_thread(cx));
                 }),
-        )
+        );
+    }
+
+    body
 }
 
 fn render_row(
@@ -560,7 +594,7 @@ fn section_header(title: &str, theme: &Theme) -> gpui::AnyElement {
                 .h(px(24.))
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tokens.text_theme_primary)
+                .text_color(tokens.text_secondary)
                 .child(title.to_string()),
         )
         .into_any_element()
@@ -579,7 +613,7 @@ fn thread_card(
     let preview = resolve_thread_preview(thread, cx);
     let (sender_label, avatar_url) = resolve_thread_sender(thread, &preview, cx);
     let time_label = format_thread_time(preview.timestamp, locale);
-    let sender_color = Hsla::from(gpui::rgb(SENDER_NAME_COLOR));
+    let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
 
     let mut avatar = Avatar::new()
         .name(&sender_label)
@@ -612,7 +646,7 @@ fn thread_card(
                     div()
                         .text_base()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(tokens.text_theme_primary)
+                        .text_color(tokens.text_theme_message)
                         .overflow_hidden()
                         .text_ellipsis()
                         .child(thread.channel_label.clone()),
@@ -764,7 +798,13 @@ pub fn thread_popover_on_open(layout: Entity<ChatLayout>) -> ThreadPopoverOnOpen
         if let Some(clan_id_str) = ThreadsStore::global(cx)
             .read(cx)
             .list_clan_id()
-            .or(ClanList::global(cx).read(cx).active_clan_id.as_deref())
+            .map(str::to_string)
+            .or_else(|| {
+                ClanList::global(cx)
+                    .read(cx)
+                    .active_clan_id
+                    .map(|id| id.to_string())
+            })
             && let Ok(clan_id) = clan_id_str.parse::<ClanId>()
         {
             ClanMembersStore::global(cx).update(cx, |store, cx| {

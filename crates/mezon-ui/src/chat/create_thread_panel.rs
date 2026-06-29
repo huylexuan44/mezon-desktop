@@ -37,6 +37,10 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
     let send_layout = layout.clone();
     let name_input = thread_name_input.clone();
     let msg_input = message_input.clone();
+    let private_label = mezon_i18n::t(
+        locale,
+        "channelTopbar.createThread.privateThreadDescription",
+    );
 
     let error_label = name_error.map(|key| match key {
         "thread_name_too_short" => mezon_i18n::t(
@@ -69,6 +73,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
         .border_l_1()
         .border_color(tokens.border_primary)
         .bg(theme.bg_primary)
+        .text_color(tokens.text_theme_message)
         .child(
             h_flex()
                 .items_center()
@@ -86,13 +91,13 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                         .child(
                             Icon::new(thread_icon)
                                 .size_4()
-                                .text_color(tokens.text_theme_primary),
+                                .text_color(tokens.bg_icon_theme),
                         )
                         .child(
                             div()
                                 .text_base()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(tokens.text_theme_primary)
+                                .text_color(tokens.text_secondary)
                                 .child(mezon_i18n::t(
                                     locale,
                                     "channelTopbar.createThread.newThread",
@@ -133,7 +138,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(tokens.bg_option_theme)
+                                .bg(tokens.bg_active_member_channel)
                                 .child(
                                     Icon::new(thread_icon)
                                         .size(px(28.))
@@ -149,11 +154,11 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .mb_2()
-                                        .text_color(tokens.text_theme_primary)
+                                        .text_color(tokens.text_secondary)
                                         .child(mezon_i18n::t(
                                             locale,
                                             "channelTopbar.createThread.threadName",
-                                        )),
+                                        ).to_uppercase()),
                                 )
                                 .child(
                                     div()
@@ -161,7 +166,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                         .items_center()
                                         .h(px(40.))
                                         .rounded_lg()
-                                        .bg(tokens.bg_option_theme)
+                                        .bg(tokens.bg_active_member_channel)
                                         .border_1()
                                         .border_color(tokens.border_primary)
                                         .px(px(10.))
@@ -169,7 +174,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                             Input::new(&thread_name_input)
                                                 .w_full()
                                                 .text_base()
-                                                .text_color(tokens.text_theme_primary),
+                                                .text_color(tokens.text_theme_message),
                                         ),
                                 )
                                 .when_some(error_label, |this, err| {
@@ -192,24 +197,31 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .mb_2()
-                                        .text_color(tokens.text_theme_primary)
+                                        .text_color(tokens.text_secondary)
                                         .child(mezon_i18n::t(
                                             locale,
                                             "channelTopbar.createThread.privateThread",
-                                        )),
+                                        ).to_uppercase()),
                                 )
                                 .child(
-                                    Checkbox::new("create-thread-private")
-                                        .checked(create_private)
-                                        .label(mezon_i18n::t(
-                                            locale,
-                                            "channelTopbar.createThread.privateThreadDescription",
-                                        ))
-                                        .on_click(move |checked, _window, cx| {
-                                            layout_private.update(cx, |layout, cx| {
-                                                layout.set_create_thread_private(*checked, cx);
-                                            });
-                                        }),
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Checkbox::new("create-thread-private")
+                                                .checked(create_private)
+                                                .on_click(move |checked, _window, cx| {
+                                                    layout_private.update(cx, |layout, cx| {
+                                                        layout.set_create_thread_private(*checked, cx);
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .text_color(tokens.text_theme_primary)
+                                                .child(private_label),
+                                        ),
                                 )
                                 .when(create_private, |this| {
                                     this.child(
@@ -248,7 +260,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                             Input::new(&message_input)
                                 .w_full()
                                 .text_sm()
-                                .text_color(tokens.text_theme_primary),
+                                .text_color(tokens.text_theme_message),
                         ),
                 )
                 .child(
@@ -264,7 +276,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                                 .cursor_pointer()
                                 .text_sm()
                                 .text_color(tokens.text_theme_primary)
-                                .hover(|s| s.bg(tokens.bg_hover))
+                                .hover(|s| s.bg(tokens.bg_item_hover))
                                 .child(mezon_i18n::t(locale, "common.cancel"))
                                 .on_click(move |_: &ClickEvent, _window, cx| {
                                     layout_footer_cancel.update(cx, |layout, cx| {

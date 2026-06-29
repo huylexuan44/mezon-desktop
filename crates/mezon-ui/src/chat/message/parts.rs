@@ -1,5 +1,5 @@
-use gpui::{AnyElement, FontWeight, SharedString, div, img, prelude::*, px};
-use mezon_store::{Message, MessageId, MessageReference, MessagesStore, Reaction, ReplyDraft};
+use gpui::{AnyElement, App, FontWeight, SharedString, div, img, prelude::*, px};
+use mezon_store::{Message, MessageId, MessageReference, MessagesStore, Reaction, ReplyDraft, resolve_user_profile};
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
@@ -7,21 +7,47 @@ use crate::theme::Theme;
 
 /// Build the 40px message avatar (proxied src with raw fallback), cf. React
 /// `MessageAvatar`.
-pub fn avatar_element(msg: &Message, ctx: &RowCtx) -> AnyElement {
+pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
+    let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let mut avatar = Avatar::new()
         .name(msg.sender_name.clone())
         .with_size(Size::Small)
         .image_cache(ctx.avatar_cache.clone());
-    let proxied = msg.avatar_proxied.clone();
-    if !proxied.is_empty() {
-        avatar = avatar.src(proxied.clone());
-        if !msg.avatar_url.is_empty() && msg.avatar_url != proxied.as_ref() {
-            avatar = avatar.fallback_src(msg.avatar_url.clone());
+    if let Some(proxied) = proxied {
+        avatar = avatar.src(proxied);
+        if !raw_url.is_empty() {
+            avatar = avatar.fallback_src(raw_url);
         }
-    } else if !msg.avatar_url.is_empty() {
-        avatar = avatar.src(msg.avatar_url.clone());
+    } else if !raw_url.is_empty() {
+        avatar = avatar.src(raw_url);
     }
     avatar.into_any_element()
+}
+
+fn resolve_message_avatar_urls(
+    msg: &Message,
+    ctx: &RowCtx,
+    cx: &App,
+) -> (String, Option<SharedString>) {
+    if let Some(context) = ctx.profile_context {
+        if let Some(user_id) = msg.sender_user_id {
+            if let Some(profile) = resolve_user_profile(user_id, context, cx) {
+                if !profile.avatar_url.is_empty() {
+                    let proxied = crate::util::imgproxy::avatar_url(cx, &profile.avatar_url);
+                    return (
+                        profile.avatar_url,
+                        Some(SharedString::from(proxied)),
+                    );
+                }
+            }
+        }
+    }
+
+    let proxied = msg.avatar_proxied.clone();
+    if !proxied.is_empty() {
+        return (msg.avatar_url.clone(), Some(proxied));
+    }
+    (msg.avatar_url.clone(), None)
 }
 
 /// Username + timestamp header (React `MessageHead`).

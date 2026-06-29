@@ -1,4 +1,4 @@
-use gpui::{Anchor, AnyElement, SharedString, div, prelude::*, px};
+use gpui::{Anchor, AnyElement, App, SharedString, div, prelude::*, px};
 use mezon_store::Message;
 
 use super::content::render_message_content;
@@ -12,7 +12,12 @@ use super::parts::{
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Icon, IconName};
 
-pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyElement {
+pub fn render_user_message(
+    msg: &Message,
+    combined: bool,
+    ctx: &RowCtx,
+    cx: &App,
+) -> AnyElement {
     let theme = ctx.theme;
     let has_reply = !msg.references.is_empty();
     let show_head = !combined;
@@ -61,7 +66,7 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
         .relative()
         .w_full()
         .when_some(
-            show_head.then(|| build_avatar_element(msg, ctx)),
+            show_head.then(|| build_avatar_element(msg, ctx, cx)),
             |d, avatar_element| {
                 d.child(
                     div()
@@ -100,8 +105,8 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
         .into_any_element()
 }
 
-fn build_avatar_element(msg: &Message, ctx: &RowCtx) -> AnyElement {
-    let plain = avatar_element(msg, ctx);
+fn build_avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
+    let plain = avatar_element(msg, ctx, cx);
     let Some(profile_ctx) = ctx.profile_context else {
         return plain;
     };

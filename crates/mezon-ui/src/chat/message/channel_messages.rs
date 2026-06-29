@@ -690,7 +690,7 @@ impl Render for ChannelMessages {
                         profile_context,
                         settings: settings.clone(),
                     };
-                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx)
+                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full(),

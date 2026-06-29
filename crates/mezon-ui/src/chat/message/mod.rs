@@ -15,3 +15,4 @@ mod system_row;
 mod user_row;
 
 pub use channel_messages::ChannelMessages;
+pub use context::DEFAULT_DISPLAY_NAME_COLOR;

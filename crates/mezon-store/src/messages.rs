@@ -9,7 +9,7 @@ use mezon_client::transport::{
     ApiMessage, ApiMessageContent, OutgoingEmoji as TransportEmoji,
     OutgoingHashtag as TransportHashtag, OutgoingMention as TransportMention, OutgoingReply,
     detect_markdown, emoji_content_tokens, hashtag_content_tokens, markdown_content_tokens,
-    mention_content_tokens,
+    mention_content_tokens, prioritize_avatar,
 };
 use mezon_client::{
     AppApi, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile, UrlAttachment,
@@ -17,6 +17,7 @@ use mezon_client::{
 
 use crate::AppConfig;
 use crate::KeyedCache;
+use crate::account::AccountStore;
 use crate::channel::{ChannelEvent, ChannelList};
 use crate::message::{
     Message, MessageAttachment, MessageCode, MessageReference, aggregate_reactions,
@@ -999,7 +1000,12 @@ impl MessagesStore {
             .map(OutgoingEmoji::into_transport)
             .collect();
         let markdowns = detect_markdown(&content);
-        let mut optimistic = Message::new(temp_id, content.clone(), sender_id, sender_name, now);
+        let mut optimistic =
+            enrich_outgoing_sender(
+                Message::new(temp_id, content.clone(), sender_id, sender_name, now),
+                cx,
+                self.active_clan_id,
+            );
         if !transport_mentions.is_empty()
             || !transport_hashtags.is_empty()
             || !transport_emojis.is_empty()
@@ -1156,8 +1162,12 @@ impl MessagesStore {
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
-        let optimistic = Message::new(temp_id, String::new(), sender_id, sender_name, now)
-            .with_attachments(vec![optimistic_attachment]);
+        let optimistic = enrich_outgoing_sender(
+            Message::new(temp_id, String::new(), sender_id, sender_name, now)
+                .with_attachments(vec![optimistic_attachment]),
+            cx,
+            self.active_clan_id,
+        );
         let old_len = channel.messages.len();
         channel.messages.push_trim_regroup(optimistic);
         self.emit_appended(old_len, cx);
@@ -1403,6 +1413,16 @@ impl MessagesStore {
         };
         let msg = message_from_api(MezonTransport::message_from_proto(m.clone()), cfg);
         if channel.messages.contains_id(msg.id) {
+            if let Some(idx) = channel.messages.position(msg.id) {
+                let existing = channel.messages.as_slice()[idx].clone();
+                if message_needs_enrichment(&existing) {
+                    channel.messages.replace_at(idx, msg);
+                    if is_active {
+                        cx.emit(MessagesEvent::Updated);
+                        cx.notify();
+                    }
+                }
+            }
             return;
         }
         let old_len = channel.messages.len();
@@ -1467,7 +1487,9 @@ impl MessagesStore {
             };
             let old_len = channel.messages.len();
             if let Some(idx) = channel.messages.position(temp_id) {
-                channel.messages.replace_at(idx, confirmed);
+                let temp = channel.messages.as_slice()[idx].clone();
+                let merged = merge_confirmed_with_temp(&temp, confirmed);
+                channel.messages.replace_at(idx, merged);
                 (false, old_len)
             } else if !channel.messages.contains_id(confirmed.id) {
                 channel.messages.push_sorted(confirmed);
@@ -1570,6 +1592,92 @@ fn has_more_from_oldest(messages: &[Message]) -> bool {
     messages
         .first()
         .is_some_and(|m| m.code != MessageCode::Indicator)
+}
+
+fn outgoing_sender_profile(cx: &App, clan_id: Option<ClanId>, fallback_name: &str) -> (String, String) {
+    let store = AccountStore::global(cx).read(cx);
+    let account = store.account.as_ref();
+    let clan = store
+        .clan_profile
+        .as_ref()
+        .filter(|profile| clan_id.is_none_or(|id| profile.clan_id == id));
+
+    let name = clan
+        .and_then(|profile| {
+            (!profile.nick_name.is_empty()).then(|| profile.nick_name.clone())
+        })
+        .or_else(|| {
+            account.map(|acct| {
+                if !acct.display_name.is_empty() {
+                    acct.display_name.clone()
+                } else if !acct.username.is_empty() {
+                    acct.username.clone()
+                } else {
+                    fallback_name.to_string()
+                }
+            })
+        })
+        .unwrap_or_else(|| fallback_name.to_string());
+
+    let avatar = prioritize_avatar(
+        clan
+            .and_then(|profile| profile.avatar_url.as_deref())
+            .unwrap_or(""),
+        account
+            .and_then(|acct| acct.avatar_url.as_deref())
+            .unwrap_or(""),
+    );
+
+    (name, avatar)
+}
+
+fn enrich_outgoing_sender(
+    mut msg: Message,
+    cx: &App,
+    clan_id: Option<ClanId>,
+) -> Message {
+    let (name, avatar) = outgoing_sender_profile(cx, clan_id, &msg.sender_name);
+    if !name.is_empty() {
+        msg.sender_name = name;
+    }
+    if !avatar.is_empty() {
+        let proxied = AppConfig::try_global(cx)
+            .map(|cfg| cfg.avatar_proxy(&avatar))
+            .unwrap_or_else(|| avatar.clone());
+        msg = msg.with_avatar(avatar).with_avatar_proxied(proxied);
+    }
+    msg
+}
+
+fn message_needs_enrichment(msg: &Message) -> bool {
+    msg.sender_name.is_empty()
+        || (msg.avatar_url.is_empty() && msg.avatar_proxied.is_empty())
+        || msg.sender_id.is_empty()
+        || msg.sender_id == "0"
+        || msg.create_time == 0
+}
+
+fn merge_confirmed_with_temp(temp: &Message, mut confirmed: Message) -> Message {
+    if confirmed.sender_name.is_empty() {
+        confirmed.sender_name = temp.sender_name.clone();
+    }
+    if confirmed.sender_id.is_empty() || confirmed.sender_id == "0" {
+        confirmed.sender_id = temp.sender_id.clone();
+        confirmed.sender_user_id = temp.sender_user_id;
+    }
+    if confirmed.avatar_url.is_empty() && !temp.avatar_url.is_empty() {
+        confirmed.avatar_url = temp.avatar_url.clone();
+        confirmed.avatar_proxied = temp.avatar_proxied.clone();
+    }
+    if confirmed.create_time == 0 && temp.create_time != 0 {
+        confirmed.create_time = temp.create_time;
+        confirmed.timestamp_label = temp.timestamp_label.clone();
+        confirmed.day_label = temp.day_label.clone();
+    }
+    if confirmed.spans.is_empty() && !temp.spans.is_empty() {
+        confirmed.spans = temp.spans.clone();
+    }
+    confirmed
 }
 
 fn prepare_messages(msgs: Vec<ApiMessage>, cfg: Option<&AppConfig>) -> Vec<Message> {
@@ -1878,7 +1986,9 @@ mod tests {
 
     fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: MessageId, confirmed: Message) {
         if let Some(idx) = ch.messages.position(temp_id) {
-            ch.messages.replace_at(idx, confirmed);
+            let temp = ch.messages.as_slice()[idx].clone();
+            let merged = merge_confirmed_with_temp(&temp, confirmed);
+            ch.messages.replace_at(idx, merged);
         } else if !ch.messages.contains_id(confirmed.id) {
             ch.messages.push_sorted(confirmed);
         }
@@ -1903,6 +2013,23 @@ mod tests {
         let mut ch = channel_msgs(vec![Message::new(MessageId(1), "hello", "u1", "U", 100)]);
         remove_temp_in(&mut ch, non_existent);
         assert_eq!(ch.messages.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_temp_preserves_sender_from_optimistic_when_ack_sparse() {
+        let temp_id = MessageId::next_optimistic();
+        let temp = Message::new(temp_id, "hello", "42", "gia.chuvan", 1_700_000_000)
+            .with_avatar("avatar.png")
+            .with_avatar_proxied(gpui::SharedString::from("proxy.png"));
+        let mut ch = channel_msgs(vec![temp]);
+        let sparse_ack = Message::new(MessageId(99), "hello", "0", String::new(), 0);
+        reconcile_temp_in(&mut ch, temp_id, sparse_ack);
+        let row = &ch.messages.as_slice()[0];
+        assert_eq!(row.id, MessageId(99));
+        assert_eq!(row.sender_id, "42");
+        assert_eq!(row.sender_name, "gia.chuvan");
+        assert_eq!(row.avatar_url, "avatar.png");
+        assert_eq!(row.create_time, 1_700_000_000);
     }
 
     #[test]

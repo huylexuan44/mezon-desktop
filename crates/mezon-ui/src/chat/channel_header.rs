@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, App, ClickEvent, Context, CursorStyle, Entity, Hsla, IntoElement, Render, RenderOnce,
+    Anchor, App, ClickEvent, Context, CursorStyle, Entity, IntoElement, Render, RenderOnce,
     SharedString, Subscription, WeakEntity, Window, div, point, prelude::*, px,
 };
 use mezon_store::{Settings, ThreadsStore};
@@ -11,9 +11,7 @@ use ui::{PopoverMenu, PopoverMenuHandle};
 use crate::app::window_controls;
 use crate::chat::layout::ChatLayout;
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
-use crate::components::primitives::{
-    Button, ButtonVariant, ButtonVariants, Icon, IconName, Sizable, Size,
-};
+use crate::components::primitives::{Icon, IconName};
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
@@ -289,7 +287,10 @@ impl Render for ChatHeader {
 #[derive(IntoElement)]
 struct ThreadPopoverTrigger {
     open: bool,
-    icon_color: Hsla,
+    icon_color: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
     on_click: Option<ThreadTriggerClickHandler>,
 }
 
@@ -297,7 +298,10 @@ impl ThreadPopoverTrigger {
     fn new(theme: &Theme, open: bool) -> Self {
         Self {
             open,
-            icon_color: theme.text_muted.into(),
+            icon_color: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
             on_click: None,
         }
     }
@@ -326,18 +330,31 @@ impl Clickable for ThreadPopoverTrigger {
 
 impl RenderOnce for ThreadPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let mut button = Button::new("hdr-thread-trigger")
-            .with_size(Size::Small)
-            .icon(
+        let tint = if self.open {
+            self.icon_active
+        } else {
+            self.icon_color
+        };
+        let bg_hover = self.bg_hover;
+        let mut button = div()
+            .id("hdr-thread-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(
                 Icon::new(IconName::ThreadIcon)
                     .size(px(20.))
-                    .text_color(self.icon_color),
+                    .text_color(tint),
             );
-        button = if self.open {
-            button.with_variant(ButtonVariant::Secondary)
-        } else {
-            button.ghost()
-        };
+        if self.open {
+            button = button.bg(self.bg_active);
+        }
         if let Some(handler) = self.on_click {
             button.on_click(handler)
         } else {

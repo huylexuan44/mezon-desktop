@@ -9,6 +9,9 @@ use mezon_client::RealtimeEvent;
 use mezon_proto::{api, realtime};
 
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
+use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
+use crate::clan::ClanList;
+use crate::ids::{ChannelId, ClanId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const THREAD_STATUS_ARCHIVED: i32 = 0;
@@ -94,7 +97,7 @@ impl ThreadsStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let channel_sub = cx.subscribe(&ChannelList::global(cx), |this, _list, event, cx| {
             if let ChannelEvent::ActiveChannelChanged(channel_id) = event {
-                this.on_active_channel_changed(channel_id.clone(), cx);
+                this.on_active_channel_changed(*channel_id, cx);
             }
         });
         Self::register_realtime(cx);
@@ -291,6 +294,7 @@ impl ThreadsStore {
     pub fn show_threads_popover(&self, cx: &App) -> bool {
         self.list_channel_id
             .as_ref()
+            .and_then(|id| id.parse::<ChannelId>().ok())
             .and_then(|id| ChannelList::global(cx).read(cx).find_channel(id))
             .is_some_and(|ch| {
                 !matches!(ch.channel_type, ChannelType::Thread)
@@ -303,11 +307,11 @@ impl ThreadsStore {
 
     fn apply_channel(&mut self, channel: &Channel) {
         self.list_channel_id = Some(list_channel_id_for(channel));
-        self.clan_id = Some(channel.clan_id.clone());
+        self.clan_id = Some(channel.clan_id.to_string());
         self.category_id = channel.category_id.clone();
     }
 
-    fn on_active_channel_changed(&mut self, channel_id: Option<String>, cx: &mut Context<Self>) {
+    fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
         match channel_id {
             None => {
                 self.list_channel_id = None;
@@ -315,10 +319,10 @@ impl ThreadsStore {
                 self.category_id = None;
             }
             Some(id) => {
-                if let Some(channel) = ChannelList::global(cx).read(cx).find_channel(&id) {
+                if let Some(channel) = ChannelList::global(cx).read(cx).find_channel(id) {
                     self.apply_channel(channel);
                 } else {
-                    self.list_channel_id = Some(id);
+                    self.list_channel_id = Some(id.to_string());
                     self.clan_id = Some("0".to_string());
                     self.category_id = None;
                 }
@@ -355,11 +359,60 @@ impl ThreadsStore {
         self.threads.clear();
         self.loading = false;
         self.loading_more = false;
+        self.ensure_create_permissions(cx);
         self.ensure_loaded(cx);
     }
 
     pub fn list_clan_id(&self) -> Option<&str> {
         self.clan_id.as_deref()
+    }
+
+    pub fn list_channel_id(&self) -> Option<&str> {
+        self.list_channel_id.as_deref()
+    }
+
+    pub fn can_create_thread(&self, cx: &App) -> bool {
+        let Some(list_id) = self.list_channel_id.as_deref() else {
+            return false;
+        };
+        let Ok(channel_id) = list_id.parse::<ChannelId>() else {
+            return false;
+        };
+        let Some(clan_id) = self
+            .clan_id
+            .as_deref()
+            .and_then(|s| s.parse::<ClanId>().ok())
+            .filter(|id| !id.is_zero())
+            .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
+        else {
+            return false;
+        };
+        ChannelPermissionsStore::global(cx).read(cx).has_permission(
+            PERMISSION_MANAGE_THREAD,
+            clan_id,
+            channel_id,
+        )
+    }
+
+    pub fn ensure_create_permissions(&mut self, cx: &mut Context<Self>) {
+        let Some(list_id) = self.list_channel_id.as_deref() else {
+            return;
+        };
+        let Ok(channel_id) = list_id.parse::<ChannelId>() else {
+            return;
+        };
+        let Some(clan_id) = self
+            .clan_id
+            .as_deref()
+            .and_then(|s| s.parse::<ClanId>().ok())
+            .filter(|id| !id.is_zero())
+            .or_else(|| ClanList::global(cx).read(cx).active_clan_id)
+        else {
+            return;
+        };
+        ChannelPermissionsStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(clan_id, channel_id, cx);
+        });
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -517,6 +570,9 @@ impl ThreadsStore {
     }
 
     pub fn start_create(&mut self, cx: &mut Context<Self>) {
+        if !self.can_create_thread(cx) {
+            return;
+        }
         self.creating = true;
         self.submitting = false;
         self.create_private = 0;
@@ -533,7 +589,7 @@ impl ThreadsStore {
     }
 
     pub fn submit_create(&mut self, name: String, message: String, cx: &mut Context<Self>) {
-        if self.submitting {
+        if self.submitting || !self.can_create_thread(cx) {
             return;
         }
         let name = name.trim().to_string();
@@ -591,11 +647,11 @@ impl ThreadsStore {
 
             let create_result = api
                 .create_channel(
-                    &clan_id,
+                    clan_id.parse::<i64>().unwrap_or(0),
                     &name,
                     CHANNEL_TYPE_THREAD,
-                    category_id.as_deref(),
-                    Some(&parent_id),
+                    category_id.as_deref().and_then(|s| s.parse().ok()),
+                    parent_id.parse::<i64>().ok(),
                     channel_private,
                 )
                 .await;
@@ -615,17 +671,27 @@ impl ThreadsStore {
                 }
             };
 
-            let thread_id = thread.channel_id.clone();
-            let content = serde_json::json!({ "t": message }).to_string();
+            let thread_id = thread.channel_id;
+            let thread_id_str = thread_id.to_string();
+            let clan_id_i64 = clan_id.parse::<i64>().unwrap_or(0);
             if let Err(e) = api
-                .send_channel_message(&clan_id, &thread_id, &content, false, 2)
+                .send_channel_message(
+                    clan_id_i64,
+                    thread_id,
+                    &message,
+                    false,
+                    2,
+                    vec![],
+                    vec![],
+                    vec![],
+                )
                 .await
             {
                 tracing::error!("send starter message to thread failed: {e}");
             }
 
             if let Err(e) = api
-                .join_chat(&clan_id, &thread_id, CHANNEL_TYPE_THREAD as i32, false)
+                .join_chat(clan_id_i64, thread_id, CHANNEL_TYPE_THREAD as i32, false)
                 .await
             {
                 tracing::warn!("join_chat after thread create failed: {e}");
@@ -635,11 +701,12 @@ impl ThreadsStore {
                 this.creating = false;
                 this.submitting = false;
                 this.loaded_channel = None;
+                let clan_id_for_refresh = clan_id.parse::<ClanId>().unwrap_or(ClanId(0));
                 ChannelList::global(cx).update(cx, |list, cx| {
-                    list.refresh_clan(clan_id.clone(), cx);
+                    list.refresh_clan(clan_id_for_refresh, cx);
                 });
                 cx.emit(ThreadsEvent::ThreadCreated {
-                    channel_id: thread_id,
+                    channel_id: thread_id_str,
                     clan_id: clan_id.clone(),
                 });
                 cx.notify();
@@ -653,10 +720,10 @@ fn list_channel_id_for(channel: &Channel) -> String {
     if channel.channel_type == ChannelType::Thread {
         channel
             .parent_id
-            .clone()
-            .unwrap_or_else(|| channel.id.clone())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| channel.id.to_string())
     } else {
-        channel.id.clone()
+        channel.id.to_string()
     }
 }
 
@@ -737,7 +804,7 @@ fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessa
     if msg.code == MESSAGE_CODE_CHAT || msg.code == MESSAGE_CODE_CHAT_UPDATE {
         let api_msg = MezonTransport::message_from_proto(msg.clone());
         thread.last_message_content = api_msg.content;
-        thread.last_message_sender_id = api_msg.sender_id;
+        thread.last_message_sender_id = api_msg.sender_id.to_string();
         thread.last_message_sender_name = api_msg.sender_name;
         thread.last_message_sender_avatar = api_msg.avatar;
     }

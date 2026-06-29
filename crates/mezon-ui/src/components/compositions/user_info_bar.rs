@@ -1,8 +1,13 @@
-use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{App, AppContext, ClickEvent, Context, Entity, SharedString, Window, div, prelude::*, px};
 
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::theme::ActiveTheme;
-use mezon_store::{AuthState, PresenceStore};
+use mezon_store::{
+    AccountStore, AuthState, ClanList, PresenceStore, active_clan_id, current_user_clan_avatar,
+};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -14,29 +19,58 @@ pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
     username: SharedString,
     presence: SharedString,
+    avatar_raw: SharedString,
+    avatar_src: SharedString,
+    avatar_image_cache: Entity<LruImageCache>,
 }
 
 impl UserInfoBar {
     pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&PresenceStore::global(cx), |this, _, cx| {
-            if this.sync_presence(cx) {
+            if this.sync_state(cx) {
                 cx.notify();
             }
         })
         .detach();
         cx.observe(&auth_state, |this, _, cx| {
-            if this.sync_presence(cx) {
+            if this.sync_state(cx) {
                 cx.notify();
             }
         })
         .detach();
+        cx.observe(&AccountStore::global(cx), |this, _, cx| {
+            if this.sync_state(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.observe(&ClanList::global(cx), |this, _, cx| {
+            if this.sync_state(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+
+        let avatar_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "user-info-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+
         let username = Self::read_username(&auth_state, cx);
         let mut bar = Self {
             auth_state,
             username,
             presence: SharedString::from("Offline"),
+            avatar_raw: SharedString::default(),
+            avatar_src: SharedString::default(),
+            avatar_image_cache,
         };
-        bar.sync_presence(cx);
+        bar.sync_state(cx);
         bar
     }
 
@@ -47,9 +81,25 @@ impl UserInfoBar {
         }
     }
 
-    pub fn sync_presence(&mut self, cx: &App) -> bool {
+    fn sync_avatar(&mut self, cx: &App) -> bool {
+        let prev_raw = self.avatar_raw.clone();
+        let prev_src = self.avatar_src.clone();
+        let clan_id = active_clan_id(cx);
+        let raw = current_user_clan_avatar(cx, clan_id);
+        if raw.is_empty() {
+            self.avatar_raw = SharedString::default();
+            self.avatar_src = SharedString::default();
+        } else {
+            self.avatar_raw = SharedString::from(raw.clone());
+            self.avatar_src = SharedString::from(crate::util::imgproxy::avatar_url(cx, &raw));
+        }
+        self.avatar_raw != prev_raw || self.avatar_src != prev_src
+    }
+
+    pub fn sync_state(&mut self, cx: &App) -> bool {
         let prev_username = self.username.clone();
         let prev_presence = self.presence.clone();
+        let avatar_changed = self.sync_avatar(cx);
         let user_id = match self.auth_state.read(cx) {
             AuthState::Authenticated(session) => {
                 self.username = SharedString::from(session.username.clone());
@@ -58,7 +108,9 @@ impl UserInfoBar {
             _ => {
                 self.username = SharedString::from("Unknown");
                 self.presence = SharedString::from("Offline");
-                return self.username != prev_username || self.presence != prev_presence;
+                return self.username != prev_username
+                    || self.presence != prev_presence
+                    || avatar_changed;
             }
         };
         let online = PresenceStore::global(cx)
@@ -66,7 +118,7 @@ impl UserInfoBar {
             .user_online
             .contains(&user_id.parse().unwrap_or_default());
         self.presence = SharedString::from(if online { "Online" } else { "Offline" });
-        self.username != prev_username || self.presence != prev_presence
+        self.username != prev_username || self.presence != prev_presence || avatar_changed
     }
 }
 
@@ -93,9 +145,16 @@ impl Render for UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
-        // Positioning (absolute / insets) is applied by the cached wrapper in
-        // the chat layout so this view can be `.cached()`; keep only the visual
-        // box here.
+        let mut avatar = Avatar::new()
+            .name(self.username.clone())
+            .with_size(Size::Small)
+            .image_cache(self.avatar_image_cache.clone());
+        if !self.avatar_src.is_empty() {
+            avatar = avatar
+                .src(self.avatar_src.clone())
+                .fallback_src(self.avatar_raw.clone());
+        }
+
         div()
             .w_full()
             .min_h(px(56.0))
@@ -129,11 +188,7 @@ impl Render for UserInfoBar {
                             .child(
                                 div()
                                     .relative()
-                                    .child(
-                                        Avatar::new()
-                                            .name(self.username.clone())
-                                            .with_size(Size::Small),
-                                    )
+                                    .child(avatar)
                                     .child(
                                         div()
                                             .absolute()
