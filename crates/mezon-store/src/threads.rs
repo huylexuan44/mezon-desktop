@@ -33,8 +33,11 @@ pub struct ThreadSummary {
     pub parent_id: String,
     pub channel_private: i32,
     pub active: i32,
+    pub creator_id: String,
     pub last_message_content: String,
     pub last_message_sender_id: String,
+    pub last_message_sender_name: String,
+    pub last_message_sender_avatar: String,
     pub last_sent_timestamp: i64,
     pub member_count: i32,
 }
@@ -66,6 +69,7 @@ pub struct ThreadsStore {
     searching: bool,
     creating: bool,
     submitting: bool,
+    create_private: i32,
     name_error: Option<String>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
@@ -110,6 +114,7 @@ impl ThreadsStore {
             searching: false,
             creating: false,
             submitting: false,
+            create_private: 0,
             name_error: None,
             api,
             _channel_sub: channel_sub,
@@ -141,15 +146,15 @@ impl ThreadsStore {
             return;
         };
         match event {
-            RealtimeEvent::ChannelCreated(ev) => {
-                if ev.parent_id != 0 && ev.parent_id.to_string() == list_id {
-                    self.apply_thread_created(ev, cx);
-                }
+            RealtimeEvent::ChannelCreated(ev)
+                if ev.parent_id != 0 && ev.parent_id.to_string() == list_id =>
+            {
+                self.apply_thread_created(ev, cx);
             }
-            RealtimeEvent::ChannelUpdated(ev) => {
-                if ev.channel_type == CHANNEL_TYPE_THREAD as i32 {
-                    self.apply_thread_updated(ev, cx);
-                }
+            RealtimeEvent::ChannelUpdated(ev)
+                if ev.channel_type == CHANNEL_TYPE_THREAD as i32 =>
+            {
+                self.apply_thread_updated(ev, cx);
             }
             RealtimeEvent::ChannelMessage(msg) => self.apply_thread_message(msg, cx),
             RealtimeEvent::ChannelDeleted(ev) => {
@@ -270,6 +275,15 @@ impl ThreadsStore {
         self.submitting
     }
 
+    pub fn create_private(&self) -> bool {
+        self.create_private != 0
+    }
+
+    pub fn set_create_private(&mut self, private: bool, cx: &mut Context<Self>) {
+        self.create_private = i32::from(private);
+        cx.notify();
+    }
+
     pub fn name_error(&self) -> Option<&str> {
         self.name_error.as_deref()
     }
@@ -332,6 +346,20 @@ impl ThreadsStore {
             return;
         }
         self.fetch(cx);
+    }
+
+    pub fn open_popover(&mut self, cx: &mut Context<Self>) {
+        self.loaded_channel = None;
+        self.current_page = 0;
+        self.has_more = false;
+        self.threads.clear();
+        self.loading = false;
+        self.loading_more = false;
+        self.ensure_loaded(cx);
+    }
+
+    pub fn list_clan_id(&self) -> Option<&str> {
+        self.clan_id.as_deref()
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -491,6 +519,7 @@ impl ThreadsStore {
     pub fn start_create(&mut self, cx: &mut Context<Self>) {
         self.creating = true;
         self.submitting = false;
+        self.create_private = 0;
         self.name_error = None;
         cx.notify();
     }
@@ -498,6 +527,7 @@ impl ThreadsStore {
     pub fn cancel_create(&mut self, cx: &mut Context<Self>) {
         self.creating = false;
         self.submitting = false;
+        self.create_private = 0;
         self.name_error = None;
         cx.notify();
     }
@@ -527,6 +557,7 @@ impl ThreadsStore {
             return;
         };
         let category_id = self.category_id.clone();
+        let channel_private = self.create_private;
 
         self.name_error = None;
         self.creating = true;
@@ -565,6 +596,7 @@ impl ThreadsStore {
                     CHANNEL_TYPE_THREAD,
                     category_id.as_deref(),
                     Some(&parent_id),
+                    channel_private,
                 )
                 .await;
 
@@ -664,8 +696,11 @@ fn thread_from_api(t: ApiThreadDesc) -> ThreadSummary {
         parent_id: t.parent_id,
         channel_private: t.channel_private,
         active: t.active,
+        creator_id: t.creator_id,
         last_message_content: t.last_message_content,
         last_message_sender_id: t.last_message_sender_id,
+        last_message_sender_name: t.last_message_sender_name,
+        last_message_sender_avatar: t.last_message_sender_avatar,
         last_sent_timestamp: t.last_sent_timestamp,
         member_count: t.member_count,
     }
@@ -679,8 +714,11 @@ fn thread_from_created_event(ev: &realtime::ChannelCreatedEvent) -> ThreadSummar
         parent_id: ev.parent_id.to_string(),
         channel_private: ev.channel_private,
         active: ev.status,
+        creator_id: ev.creator_id.to_string(),
         last_message_content: String::new(),
         last_message_sender_id: ev.creator_id.to_string(),
+        last_message_sender_name: String::new(),
+        last_message_sender_avatar: String::new(),
         last_sent_timestamp: 0,
         member_count: 0,
     }
@@ -700,6 +738,8 @@ fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessa
         let api_msg = MezonTransport::message_from_proto(msg.clone());
         thread.last_message_content = api_msg.content;
         thread.last_message_sender_id = api_msg.sender_id;
+        thread.last_message_sender_name = api_msg.sender_name;
+        thread.last_message_sender_avatar = api_msg.avatar;
     }
 }
 
@@ -767,8 +807,11 @@ mod tests {
             parent_id: "p".into(),
             channel_private: 0,
             active: THREAD_STATUS_JOINED,
+            creator_id: String::new(),
             last_message_content: String::new(),
             last_message_sender_id: String::new(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
             last_sent_timestamp: 0,
             member_count: 0,
         }];
@@ -782,8 +825,11 @@ mod tests {
                     parent_id: "p".into(),
                     channel_private: 0,
                     active: THREAD_STATUS_JOINED,
+                    creator_id: String::new(),
                     last_message_content: String::new(),
                     last_message_sender_id: String::new(),
+                    last_message_sender_name: String::new(),
+                    last_message_sender_avatar: String::new(),
                     last_sent_timestamp: 0,
                     member_count: 0,
                 },
@@ -794,8 +840,11 @@ mod tests {
                     parent_id: "p".into(),
                     channel_private: 0,
                     active: THREAD_STATUS_JOINED,
+                    creator_id: String::new(),
                     last_message_content: String::new(),
                     last_message_sender_id: String::new(),
+                    last_message_sender_name: String::new(),
+                    last_message_sender_avatar: String::new(),
                     last_sent_timestamp: 0,
                     member_count: 0,
                 },
@@ -814,8 +863,11 @@ mod tests {
             parent_id: "p".into(),
             channel_private: 0,
             active: THREAD_STATUS_JOINED,
+            creator_id: String::new(),
             last_message_content: "old".into(),
             last_message_sender_id: "9".into(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
             last_sent_timestamp: 1,
             member_count: 0,
         };
@@ -842,8 +894,11 @@ mod tests {
             parent_id: "p".into(),
             channel_private: 0,
             active: THREAD_STATUS_JOINED,
+            creator_id: String::new(),
             last_message_content: "keep".into(),
             last_message_sender_id: "9".into(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
             last_sent_timestamp: 1,
             member_count: 0,
         };

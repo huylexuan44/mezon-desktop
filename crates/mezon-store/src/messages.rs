@@ -137,6 +137,12 @@ impl MessagesStore {
             .unwrap_or(&[])
     }
 
+    pub fn last_cached_message(&self, channel_id: &str) -> Option<&Message> {
+        self.cache
+            .get(channel_id)
+            .and_then(|channel| channel.messages.last())
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }

@@ -272,7 +272,30 @@ impl Render for ChatLayout {
         self.chat_area.ensure_input(window, cx);
         let theme = cx.theme().clone();
         let nav_body = self.render_nav_body(cx);
-        let content = self.render_content(window, cx);
+        let locale = self.settings.read(cx).language.clone();
+        let create_panel = self.build_create_thread_panel(&locale, window, cx);
+        let chat_content = self.render_content(window, cx);
+        let main_content = if let Some(panel) = create_panel {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(chat_content),
+                )
+                .child(panel)
+                .into_any_element()
+        } else {
+            chat_content
+        };
 
         div()
             .flex()
@@ -312,9 +335,10 @@ impl Render for ChatLayout {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .min_h_0()
                     .overflow_hidden()
                     .bg(theme.bg_primary)
-                    .child(content),
+                    .child(main_content),
             )
     }
 }
@@ -353,6 +377,12 @@ impl ChatLayout {
         ThreadsStore::global(cx).update(cx, |store, cx| store.cancel_create(cx));
         self.clear_create_thread_inputs(cx);
         cx.notify();
+    }
+
+    pub(crate) fn set_create_thread_private(&mut self, private: bool, cx: &mut Context<Self>) {
+        ThreadsStore::global(cx).update(cx, |store, cx| {
+            store.set_create_private(private, cx);
+        });
     }
 
     pub(crate) fn dismiss_threads_popover(&mut self, cx: &mut Context<Self>) {
@@ -463,13 +493,20 @@ impl ChatLayout {
         if self.thread_name_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
-            self.thread_name_input = Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph)));
+            self.thread_name_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(ph)
+                    .embedded(true)
+            }));
         }
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "chat.messagePlaceholder");
-            self.create_thread_message_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph)));
+            self.create_thread_message_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(ph)
+                    .embedded(true)
+            }));
         }
     }
 
@@ -491,18 +528,20 @@ impl ChatLayout {
             .name_error()
             .map(|s| s.to_string());
         let submitting = ThreadsStore::global(cx).read(cx).is_submitting();
+        let create_private = ThreadsStore::global(cx).read(cx).create_private();
 
-        Some(
-            crate::chat::create_thread_panel::render_create_thread_panel(
-                name_input,
+        Some(crate::chat::create_thread_panel::render_create_thread_panel(
+            crate::chat::create_thread_panel::CreateThreadPanelParams {
+                thread_name_input: name_input,
                 message_input,
-                name_error.as_deref(),
+                name_error: name_error.as_deref(),
                 submitting,
+                create_private,
                 locale,
-                &theme,
-                cx.entity(),
-            ),
-        )
+                theme: &theme,
+                layout: cx.entity(),
+            },
+        ))
     }
 
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
@@ -546,42 +585,9 @@ impl ChatLayout {
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let locale = self.settings.read(cx).language.clone();
-        let create_panel = self.build_create_thread_panel(&locale, window, cx);
         let theme = cx.theme().clone();
         let thread_handle = self.thread_popover_handle.clone();
         let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
-
-        let chat = |content: gpui::AnyElement| {
-            if let Some(panel) = create_panel {
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .w_full()
-                    .h_full()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .h_full()
-                            .overflow_hidden()
-                            .child(content),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(510.))
-                            .min_w(px(510.))
-                            .h_full()
-                            .overflow_hidden()
-                            .child(panel),
-                    )
-                    .into_any_element()
-            } else {
-                content
-            }
-        };
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
@@ -632,24 +638,23 @@ impl ChatLayout {
             let channel_id = ch.id.clone();
             let name = ch.name.clone();
             let typing = self.typing_label_for_channel(&channel_id, &locale, cx);
-            return chat(
-                self.chat_area
-                    .render(
-                        ChatAreaRenderParams {
-                            theme: &theme,
-                            locale: &locale,
-                            layout_entity: cx.entity(),
-                            channel_name: &name,
-                            is_dm: false,
-                            typing_label: typing,
-                            thread_handle: Some(thread_handle),
-                            show_threads,
-                        },
-                        window,
-                        cx,
-                    )
-                    .into_any_element(),
-            );
+            return self
+                .chat_area
+                .render(
+                    ChatAreaRenderParams {
+                        theme: &theme,
+                        locale: &locale,
+                        layout_entity: cx.entity(),
+                        channel_name: &name,
+                        is_dm: false,
+                        typing_label: typing,
+                        thread_handle: Some(thread_handle),
+                        show_threads,
+                    },
+                    window,
+                    cx,
+                )
+                .into_any_element();
         }
 
         let router = Router::global(cx);

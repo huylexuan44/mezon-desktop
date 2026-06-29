@@ -130,6 +130,14 @@ impl AppApi {
         self.transport.list_clan_descs().await
     }
 
+    pub async fn list_clan_users(
+        &self,
+        clan_id: i64,
+    ) -> Result<Vec<mezon_proto::api::clan_user_list::ClanUser>> {
+        let lists = self.transport.list_clan_users(&clan_id.to_string()).await?;
+        Ok(lists.into_iter().flat_map(|list| list.clan_users).collect())
+    }
+
     pub async fn create_clan_desc(
         &self,
         clan_name: &str,
@@ -226,9 +234,17 @@ impl AppApi {
         channel_type: u32,
         category_id: Option<&str>,
         parent_id: Option<&str>,
+        channel_private: i32,
     ) -> Result<ApiChannelDesc> {
         self.transport
-            .create_channel(clan_id, channel_label, channel_type, category_id, parent_id)
+            .create_channel(
+                clan_id,
+                channel_label,
+                channel_type,
+                category_id,
+                parent_id,
+                channel_private,
+            )
             .await
     }
 

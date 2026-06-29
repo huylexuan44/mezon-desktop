@@ -521,8 +521,11 @@ pub struct ApiThreadDesc {
     pub channel_private: i32,
     pub member_count: i32,
     pub active: i32,
+    pub creator_id: String,
     pub last_message_content: String,
     pub last_message_sender_id: String,
+    pub last_message_sender_name: String,
+    pub last_message_sender_avatar: String,
     pub last_sent_timestamp: i64,
 }
 
@@ -719,8 +722,11 @@ impl MezonTransport {
             channel_private: channel.channel_private,
             member_count: channel.member_count,
             active: channel.active,
+            creator_id: channel.creator_id.to_string(),
             last_message_content,
             last_message_sender_id,
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
             last_sent_timestamp,
         }
     }
@@ -2603,11 +2609,12 @@ impl MezonTransport {
     /// Create a new channel.
     pub async fn create_channel(
         &self,
-        _clan_id: &str,
+        clan_id: &str,
         channel_label: &str,
         channel_type: u32,
         category_id: Option<&str>,
         parent_id: Option<&str>,
+        channel_private: i32,
     ) -> Result<ApiChannelDesc> {
         let cid = self.generate_cid();
 
@@ -2620,11 +2627,12 @@ impl MezonTransport {
             None => 0,
         };
         let body = api::CreateChannelDescRequest {
-            clan_id: parse_id(_clan_id)?,
+            clan_id: parse_id(clan_id)?,
             channel_label: channel_label.to_string(),
             r#type: channel_type as i32,
             category_id,
             parent_id,
+            channel_private,
             ..Default::default()
         }
         .encode_to_vec();

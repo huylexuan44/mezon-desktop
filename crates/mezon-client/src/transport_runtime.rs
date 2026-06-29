@@ -309,6 +309,19 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_clan_users(
+        &self,
+        clan_id: &str,
+    ) -> Result<Vec<mezon_proto::api::ClanUserList>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move { transport.list_clan_users(&clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Create a new clan.
     pub async fn create_clan_desc(
         &self,
@@ -493,6 +506,7 @@ impl TransportClient {
         channel_type: u32,
         category_id: Option<&str>,
         parent_id: Option<&str>,
+        channel_private: i32,
     ) -> Result<crate::transport::ApiChannelDesc> {
         let transport = self.inner.clone();
         let clan_id = clan_id.to_string();
@@ -509,6 +523,7 @@ impl TransportClient {
                         channel_type,
                         category_id.as_deref(),
                         parent_id.as_deref(),
+                        channel_private,
                     )
                     .await
             })

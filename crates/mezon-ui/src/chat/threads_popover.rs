@@ -2,11 +2,15 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    ListAlignment, ListState, MouseDownEvent, Window, div, img, list, prelude::*, px,
+    Hsla, ListAlignment, ListState, MouseDownEvent, Window, div, img, list, prelude::*, px,
 };
-use mezon_store::{ThreadSummary, ThreadsStore, group_threads};
+use mezon_store::{
+    ClanId, ClanList, ClanMembersStore, MessagesStore, ProfileContext, ThreadSummary,
+    ThreadsStore, UserId, group_threads, resolve_user_profile,
+};
 use ui::prelude::*;
 use ui::{Label, PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
+use ui::utils::{DateTimeType, format_distance_from_now};
 
 use crate::chat::layout::ChatLayout;
 use crate::components::primitives::{
@@ -20,6 +24,8 @@ const HEADER_HEIGHT: f32 = 48.;
 const PANEL_MIN_HEIGHT: f32 = 400.;
 const LIST_BODY_HEIGHT: f32 = 500.;
 const PANEL_MAX_VIEWPORT_OFFSET: f32 = 180.;
+const SENDER_NAME_COLOR: u32 = 0x17ac86;
+const THREAD_AVATAR_SIZE: f32 = 16.;
 
 type ThreadPopoverOnOpen = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -33,18 +39,33 @@ pub struct ThreadsPopoverPanel {
 
 enum ThreadRow {
     SectionHeader(String),
-    Card(ThreadSummary),
+    Card(Box<ThreadSummary>),
     LoadingMore,
 }
 
 struct ThreadsScrollBody {
     list_state: ListState,
     layout: Entity<ChatLayout>,
+    list_dirty: bool,
 }
 
 impl ThreadsScrollBody {
     fn new(layout: Entity<ChatLayout>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&ThreadsStore::global(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&ThreadsStore::global(cx), |this, _, cx| {
+            this.list_dirty = true;
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.list_dirty = true;
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&MessagesStore::global(cx), |this, _, cx| {
+            this.list_dirty = true;
+            cx.notify();
+        })
+        .detach();
         let list_state = ListState::new(0, ListAlignment::Top, px(400.)).measure_all();
         list_state.set_scroll_handler(move |event, _window, cx| {
             let visible_end = event.visible_range.end;
@@ -55,7 +76,17 @@ impl ThreadsScrollBody {
         Self {
             list_state,
             layout,
+            list_dirty: true,
         }
+    }
+
+    fn sync_list(&mut self, row_count: usize) {
+        if row_count != self.list_state.item_count() {
+            self.list_state.reset(row_count);
+        } else if self.list_dirty {
+            self.list_state.remeasure();
+        }
+        self.list_dirty = false;
     }
 }
 
@@ -63,32 +94,48 @@ impl Render for ThreadsScrollBody {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let locale = self.layout.read(cx).settings_language(cx);
-        let store = ThreadsStore::global(cx);
-        let store_ref = store.read(cx);
-        let threads = store_ref.threads();
-        let search_results = store_ref.search_results();
-        let search_query = store_ref.search_query();
-        let loading = store_ref.is_loading();
-        let loading_more = store_ref.is_loading_more();
         let layout = self.layout.clone();
-        let query = search_query.trim();
-        let show_search_no_results = !query.is_empty()
-            && !store_ref.is_searching()
-            && search_results.is_some_and(|results| results.is_empty());
+
+        let (rows, show_spinner, show_search_no_results, search_query, clan_ids) = {
+            let store = ThreadsStore::global(cx);
+            let store_ref = store.read(cx);
+            let threads = store_ref.threads();
+            let search_results = store_ref.search_results();
+            let search_query = store_ref.search_query().to_string();
+            let loading = store_ref.is_loading();
+            let loading_more = store_ref.is_loading_more();
+            let query = search_query.trim();
+            let show_search_no_results = !query.is_empty()
+                && !store_ref.is_searching()
+                && search_results.is_some_and(|results| results.is_empty());
+            let rows = build_rows(threads, search_results, query, &locale, loading_more);
+            let show_spinner = (!query.is_empty()
+                && (store_ref.is_searching() || search_results.is_none()))
+                || (query.is_empty() && loading && threads.is_empty());
+            let displayed_threads: &[ThreadSummary] = if query.is_empty() {
+                threads
+            } else {
+                search_results.unwrap_or(&[])
+            };
+            let clan_ids = clan_ids_from_threads(displayed_threads);
+            (
+                rows,
+                show_spinner,
+                show_search_no_results,
+                search_query,
+                clan_ids,
+            )
+        };
+
+        ensure_clan_members(clan_ids, cx);
 
         if show_search_no_results {
-            return render_search_no_results(&locale, theme.as_ref(), query)
+            return render_search_no_results(&locale, theme.as_ref(), search_query.trim())
                 .into_any_element();
         }
 
-        let rows = build_rows(threads, search_results, query, &locale, loading_more);
-        let show_spinner = (!query.is_empty() && (store_ref.is_searching() || search_results.is_none()))
-            || (query.is_empty() && loading && threads.is_empty());
-
         if let Some(rows) = rows {
-            if rows.len() != self.list_state.item_count() {
-                self.list_state.reset(rows.len());
-            }
+            self.sync_list(rows.len());
             let rows = Rc::new(rows);
             return div()
                 .w_full()
@@ -99,8 +146,8 @@ impl Render for ThreadsScrollBody {
                     list(self.list_state.clone(), {
                         let theme = theme.clone();
                         let locale = locale.to_string();
-                        move |ix, _window, _cx| {
-                            render_row(&rows[ix], &theme, &locale, layout.clone())
+                        move |ix, _window, cx| {
+                            render_row(&rows[ix], &theme, &locale, layout.clone(), cx)
                         }
                     })
                     .size_full(),
@@ -116,7 +163,7 @@ impl Render for ThreadsScrollBody {
 
         if show_spinner {
             centered_spinner().into_any_element()
-        } else if query.is_empty() {
+        } else if search_query.trim().is_empty() {
             render_empty_body(&locale, &theme, layout).into_any_element()
         } else {
             centered_spinner().into_any_element()
@@ -329,7 +376,7 @@ fn build_rows(
         );
         let mut rows = Vec::with_capacity(results.len() + 1);
         rows.push(ThreadRow::SectionHeader(title));
-        rows.extend(results.iter().cloned().map(ThreadRow::Card));
+        rows.extend(results.iter().cloned().map(|t| ThreadRow::Card(Box::new(t))));
         return Some(rows);
     }
 
@@ -353,7 +400,7 @@ fn build_rows(
             mezon_i18n::t(locale, key).to_uppercase(),
             bucket.len()
         )));
-        rows.extend(bucket.into_iter().cloned().map(ThreadRow::Card));
+        rows.extend(bucket.into_iter().cloned().map(|t| ThreadRow::Card(Box::new(t))));
     }
 
     if loading_more {
@@ -481,13 +528,14 @@ fn render_row(
     theme: &Theme,
     locale: &str,
     layout: Entity<ChatLayout>,
+    cx: &App,
 ) -> gpui::AnyElement {
     match row {
         ThreadRow::SectionHeader(title) => section_header(title, theme),
         ThreadRow::Card(thread) => div()
             .w_full()
             .px_4()
-            .child(thread_card(thread, theme, locale, layout))
+            .child(thread_card(thread.as_ref(), theme, locale, layout, cx))
             .into_any_element(),
         ThreadRow::LoadingMore => div()
             .w_full()
@@ -523,31 +571,29 @@ fn thread_card(
     theme: &Theme,
     locale: &str,
     layout: Entity<ChatLayout>,
+    cx: &App,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let channel_id = thread.channel_id.clone();
     let clan_id = thread.clan_id.clone();
-    let sender_label = if thread.last_message_sender_id.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "User {}",
-            &thread.last_message_sender_id[..thread.last_message_sender_id.len().min(6)]
-        )
-    };
+    let preview = resolve_thread_preview(thread, cx);
+    let (sender_label, avatar_url) = resolve_thread_sender(thread, &preview, cx);
+    let time_label = format_thread_time(preview.timestamp, locale);
+    let sender_color = Hsla::from(gpui::rgb(SENDER_NAME_COLOR));
 
-    let preview = if thread.last_message_content.is_empty() {
-        "…".to_string()
-    } else {
-        thread.last_message_content.clone()
-    };
-
-    let time_label = format_relative_time(thread.last_sent_timestamp, locale);
-    let avatar = Avatar::new().name(&sender_label).with_size(Size::Small);
-    let sender_color = theme.brand;
+    let mut avatar = Avatar::new()
+        .name(&sender_label)
+        .size_px(px(THREAD_AVATAR_SIZE));
+    if !avatar_url.is_empty() {
+        let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_url);
+        avatar = avatar.src(proxied).fallback_src(avatar_url);
+    }
 
     h_flex()
-        .id(format!("thread-item-{}", thread.channel_id))
+        .id(format!(
+            "thread-item-{}-{}-{}",
+            thread.channel_id, preview.timestamp, preview.sender_id_raw
+        ))
         .w_full()
         .h(px(72.))
         .mb_2()
@@ -577,14 +623,19 @@ fn thread_card(
                         .gap_2()
                         .min_w_0()
                         .child(avatar)
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(sender_color)
-                                .flex_shrink_0()
-                                .child(format!("{sender_label}:")),
-                        )
+                        .when(!sender_label.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .max_w(px(150.))
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(sender_color)
+                                    .flex_shrink_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(format!("{sender_label}:")),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()
@@ -593,16 +644,18 @@ fn thread_card(
                                 .text_color(tokens.text_theme_message)
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(preview),
+                                .child(preview.content),
                         )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(tokens.text_theme_primary)
-                                .child(format!("• {time_label}")),
-                        ),
+                        .when(!time_label.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(tokens.text_theme_primary)
+                                    .child(format!("• {time_label}")),
+                            )
+                        }),
                 ),
         )
         .on_click(move |_: &ClickEvent, _window, cx| {
@@ -613,25 +666,91 @@ fn thread_card(
         .into_any_element()
 }
 
-fn format_relative_time(timestamp_sec: i64, locale: &str) -> String {
+struct ThreadCardPreview {
+    content: String,
+    sender_id_raw: String,
+    sender_name: String,
+    sender_avatar: String,
+    timestamp: i64,
+}
+
+fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview {
+    if let Some(message) = MessagesStore::global(cx)
+        .read(cx)
+        .last_cached_message(&thread.channel_id)
+    {
+        return ThreadCardPreview {
+            content: message.content.clone(),
+            sender_id_raw: message.sender_id.clone(),
+            sender_name: message.sender_name.clone(),
+            sender_avatar: message.avatar_url.clone(),
+            timestamp: message.create_time,
+        };
+    }
+
+    let sender_id_raw = if !thread.last_message_sender_id.is_empty() {
+        thread.last_message_sender_id.clone()
+    } else {
+        thread.creator_id.clone()
+    };
+
+    ThreadCardPreview {
+        content: thread.last_message_content.clone(),
+        sender_id_raw,
+        sender_name: thread.last_message_sender_name.clone(),
+        sender_avatar: thread.last_message_sender_avatar.clone(),
+        timestamp: thread.last_sent_timestamp,
+    }
+}
+
+fn resolve_thread_sender(
+    thread: &ThreadSummary,
+    preview: &ThreadCardPreview,
+    cx: &App,
+) -> (String, String) {
+    let clan_id = thread
+        .clan_id
+        .parse::<ClanId>()
+        .ok()
+        .or_else(|| {
+            ThreadsStore::global(cx)
+                .read(cx)
+                .list_clan_id()
+                .and_then(|id| id.parse::<ClanId>().ok())
+        });
+
+    if let (Some(user_id), Some(clan_id)) = (
+        preview.sender_id_raw.parse::<UserId>().ok(),
+        clan_id,
+    ) && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
+    {
+        return (profile.display_name, profile.avatar_url);
+    }
+
+    if !preview.sender_name.is_empty() {
+        return (
+            preview.sender_name.clone(),
+            preview.sender_avatar.clone(),
+        );
+    }
+
+    (String::new(), String::new())
+}
+
+fn format_thread_time(timestamp_sec: i64, locale: &str) -> String {
     if timestamp_sec <= 0 {
         return String::new();
+    }
+    let now = chrono::Local::now().timestamp();
+    let diff = now.saturating_sub(timestamp_sec);
+    if diff <= 1 {
+        return mezon_i18n::t(locale, "common.justNow").to_string();
     }
     let Some(utc) = chrono::DateTime::from_timestamp(timestamp_sec, 0) else {
         return String::new();
     };
-    let local = utc.with_timezone(&chrono::Local);
-    let date = local.date_naive();
-    let today = chrono::Local::now().date_naive();
-    let time = local.format("%H:%M").to_string();
-
-    if date == today {
-        return format!("{} {}", mezon_i18n::t(locale, "common.todayAt"), time);
-    }
-    if Some(date) == today.pred_opt() {
-        return format!("{} {}", mezon_i18n::t(locale, "common.yesterdayAt"), time);
-    }
-    local.format("%d/%m/%Y").to_string()
+    let naive = utc.with_timezone(&chrono::Local).naive_local();
+    format_distance_from_now(DateTimeType::Naive(naive), false, true, false)
 }
 
 pub fn thread_popover_on_open(layout: Entity<ChatLayout>) -> ThreadPopoverOnOpen {
@@ -639,6 +758,41 @@ pub fn thread_popover_on_open(layout: Entity<ChatLayout>) -> ThreadPopoverOnOpen
         layout.update(cx, |layout, cx| {
             layout.ensure_thread_search_input(window, cx);
         });
-        ThreadsStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        ThreadsStore::global(cx).update(cx, |store, cx| {
+            store.open_popover(cx);
+        });
+        if let Some(clan_id_str) = ThreadsStore::global(cx)
+            .read(cx)
+            .list_clan_id()
+            .or(ClanList::global(cx).read(cx).active_clan_id.as_deref())
+            && let Ok(clan_id) = clan_id_str.parse::<ClanId>()
+        {
+            ClanMembersStore::global(cx).update(cx, |store, cx| {
+                store.ensure_loaded(clan_id, cx);
+                cx.notify();
+            });
+        }
     })
+}
+
+fn clan_ids_from_threads(threads: &[ThreadSummary]) -> Vec<ClanId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    for thread in threads {
+        let Ok(clan_id) = thread.clan_id.parse::<ClanId>() else {
+            continue;
+        };
+        if seen.insert(clan_id) {
+            ids.push(clan_id);
+        }
+    }
+    ids
+}
+
+fn ensure_clan_members(clan_ids: Vec<ClanId>, cx: &mut App) {
+    for clan_id in clan_ids {
+        ClanMembersStore::global(cx).update(cx, |store, cx| {
+            store.ensure_loaded(clan_id, cx);
+        });
+    }
 }

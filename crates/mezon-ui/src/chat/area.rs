@@ -105,6 +105,7 @@ impl ChatArea {
             .min_w_0()
             .min_h_0()
             .w_full()
+            .h_full()
             .overflow_hidden()
             .child(header.render(params.theme, window, cx))
             .child(
