@@ -6,6 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
+use gstreamer_video::VideoFrameExt;
 
 use crate::{PlayerError, VideoFrame};
 
