@@ -1,6 +1,11 @@
-use gpui::Entity;
+use std::collections::HashMap;
+
+use gpui::{Entity, WeakEntity};
 use mezon_store::{MessageId, ProfileContext, Settings};
 
+use super::channel_messages::ChannelMessages;
+use super::gif_video::GifVideoView;
+use super::video_player::VideoPlayerView;
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -14,6 +19,9 @@ pub struct RowCtx<'a> {
     pub highlight_id: Option<MessageId>,
     pub profile_context: Option<ProfileContext>,
     pub settings: Entity<Settings>,
+    pub active_videos: &'a HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
+    pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
+    pub video_host: WeakEntity<ChannelMessages>,
 }
 
 pub const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17_ac_86;

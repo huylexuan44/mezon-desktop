@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_store::{ClanId, ClanList, Settings};
+use mezon_store::{ClanId, ClanList, DirectMessageStore, Settings};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
@@ -14,18 +14,22 @@ use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
+mod direct_unread_list;
 use clan_row::{ClanRow, render_clan_row, render_pill};
+use direct_unread_list::{DirectUnreadItem, build_direct_unread_items, render_direct_unread_list};
 
 pub struct ClanSidebar {
     clan_list: Entity<ClanList>,
     settings: Entity<Settings>,
     rows: Rc<Vec<ClanRow>>,
+    direct_unread_items: Rc<Vec<DirectUnreadItem>>,
     list_state: ListState,
     active_clan_id: Option<ClanId>,
     dm_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
     _clan_sub: Subscription,
+    _direct_sub: Subscription,
     _settings_sub: Subscription,
     _router_sub: Subscription,
 }
@@ -36,6 +40,13 @@ impl ClanSidebar {
         settings: Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let direct_store = DirectMessageStore::global(cx);
+        let direct_sub = cx.observe(&direct_store, |this, store, cx| {
+            this.direct_unread_items =
+                Rc::new(build_direct_unread_items(store.read(cx), cx));
+            cx.notify();
+        });
+
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
             this.sync_rows(clan_list.read(cx), cx);
             cx.notify();
@@ -72,12 +83,17 @@ impl ClanSidebar {
             clan_list,
             settings,
             rows: Rc::new(Vec::new()),
+            direct_unread_items: Rc::new(build_direct_unread_items(
+                direct_store.read(cx),
+                cx,
+            )),
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(48.)),
             active_clan_id: None,
             dm_active: initial_dm_active,
             can_go_back: initial_can_go_back,
             can_go_forward: initial_can_go_forward,
             _clan_sub: clan_sub,
+            _direct_sub: direct_sub,
             _settings_sub: settings_sub,
             _router_sub: router_sub,
         };
@@ -98,7 +114,7 @@ impl ClanSidebar {
                 let proxied_avatar_url: Option<SharedString> =
                     clan.avatar_url.as_deref().map(|url| {
                         SharedString::from(crate::util::imgproxy::proxied(
-                            cx, url, 100, 100, "fill",
+                            cx, url, 100, 100, "fill-down",
                         ))
                     });
                 ClanRow {
@@ -162,6 +178,8 @@ impl Render for ClanSidebar {
         })
         .size_full();
 
+        let unread_list = render_direct_unread_list(&self.direct_unread_items);
+
         div()
             .flex()
             .flex_col()
@@ -204,6 +222,7 @@ impl Render for ClanSidebar {
                                 .object_fit(gpui::ObjectFit::Cover),
                             ),
                     )
+                    .child(unread_list)
                     .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3()),
             )
             .child(div().flex_1().min_h_0().w_full().child(list_element))

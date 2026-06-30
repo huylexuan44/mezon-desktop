@@ -85,7 +85,7 @@ impl ChannelRow {
         let icon = channel_type_icon(self.channel_type, self.private);
         let text_color = if self.muted {
             theme.text_muted
-        } else if self.selected {
+        } else if self.selected || self.unread {
             theme.text_primary
         } else {
             theme.text_secondary
@@ -95,9 +95,25 @@ impl ChannelRow {
         let secondary = theme.text_secondary;
         let brand = theme.brand;
         let text_primary = theme.text_primary;
+        let unread_nub = self.unread
+            && !self.selected
+            && !self.muted
+            && shows_left_unread_nub(self.channel_type);
+        let nub_color = theme.tokens.text_secondary;
 
         let suppress_hover = self.suppress_hover;
-        div().w_full().px_2().child(
+        div().w_full().relative().when(unread_nub, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(12.))
+                    .w(px(4.))
+                    .h(px(8.))
+                    .rounded_r(px(4.))
+                    .bg(nub_color),
+            )
+        }).px_2().child(
             div()
                 .id(self.row_id.clone())
                 .flex()
@@ -150,6 +166,13 @@ impl ChannelRow {
                 ),
         )
     }
+}
+
+fn shows_left_unread_nub(channel_type: ChannelType) -> bool {
+    !matches!(
+        channel_type,
+        ChannelType::Voice | ChannelType::Stream | ChannelType::App | ChannelType::Unknown(_)
+    )
 }
 
 fn channel_type_icon(channel_type: ChannelType, private: bool) -> IconName {

@@ -13,6 +13,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
+const IMAGE_CLIENT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
 #[cfg(feature = "tracy")]
 #[global_allocator]
 static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
@@ -187,7 +189,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let app = application()
         .with_http_client(Arc::new(
             mezon_client::image_disk_cache::DiskImageCacheClient::new(
-                mezon_client::transport_runtime::new_http_client(),
+                mezon_client::transport_runtime::new_http_client_with_user_agent(IMAGE_CLIENT_USER_AGENT),
             ),
         ))
         .with_assets(mezon_ui::util::assets::Assets);
@@ -438,6 +440,7 @@ fn open_main_window(
     mezon_store::InboxStore::init(api.clone(), cx);
     mezon_store::TopicsStore::init(api.clone(), cx);
     mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
+    mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);

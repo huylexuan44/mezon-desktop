@@ -1,12 +1,14 @@
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings, VoiceStore,
+    DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PinnedMessagesStore,
+    Settings, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 
 use crate::chat::area::ChatArea;
 use crate::chat::inbox::InboxPopoverPanel;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
@@ -28,6 +30,7 @@ pub struct ChatLayout {
     prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
     inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
+    pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
 }
 
 impl ChatLayout {
@@ -69,14 +72,26 @@ impl ChatLayout {
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |_, _, cx| cx.notify()).detach();
 
+        let pinned_store = PinnedMessagesStore::global(cx);
+        cx.observe(&pinned_store, |_, _, cx| cx.notify()).detach();
+
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
+            this.dismiss_inbox_popover(cx);
+            this.pin_popover_handle.hide(cx);
             cx.notify();
         })
         .detach();
         cx.observe(&Router::global(cx), |this, _, cx| {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::Direct | Route::DirectMessage { .. }
+            ) {
+                this.dismiss_inbox_popover(cx);
+                this.pin_popover_handle.hide(cx);
+            }
             this.sync_active_from_route(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
@@ -109,6 +124,7 @@ impl ChatLayout {
             prefetched_voice_channel: None,
             show_member_list: true,
             inbox_handle: PopoverMenuHandle::default(),
+            pin_popover_handle: PopoverMenuHandle::default(),
         };
         this.sync_active_from_route(cx);
         this.sync_inbox_context(cx);
@@ -321,15 +337,6 @@ impl Render for ChatLayout {
         self.chat_area.ensure_input(window, cx);
         self.maybe_prefetch_voice_token(cx);
 
-        if let Some(ch) = self.channel_list.read(cx).active_channel()
-            && ch.channel_type == ChannelType::Voice
-        {
-            let channel_id = ch.id;
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
-        }
-
         let nav_body = self.render_nav_body(cx);
         let content = self.render_content(cx);
         let voice_mini_bar = self.render_voice_mini_bar(cx);
@@ -474,6 +481,7 @@ impl ChatLayout {
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_clan_id = self.active_clan_id(cx);
+        let pin_handle = self.pin_popover_handle.clone();
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
@@ -488,6 +496,7 @@ impl ChatLayout {
                         is_group,
                         is_group && self.show_member_list,
                         false,
+                        None,
                         None,
                         None,
                         cx,
@@ -508,6 +517,7 @@ impl ChatLayout {
                         false,
                         false,
                         false,
+                        None,
                         None,
                         None,
                         cx,
@@ -574,6 +584,7 @@ impl ChatLayout {
                     true,
                     Some(inbox_handle),
                     active_clan_id,
+                    Some(pin_handle),
                     cx,
                 )
                 .into_any_element();
@@ -598,6 +609,7 @@ impl ChatLayout {
                     true,
                     Some(inbox_handle),
                     active_clan_id,
+                    None,
                     cx,
                 )
                 .into_any_element();

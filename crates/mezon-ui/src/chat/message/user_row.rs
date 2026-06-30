@@ -15,13 +15,15 @@ use crate::components::primitives::{Icon, IconName};
 pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let has_reply = !msg.references.is_empty();
-    let show_head = !combined;
-    let group_name = SharedString::from(format!("msg-{}", msg.id.0));
+    let show_head = mezon_store::should_show_message_head(msg, combined);
+    let row_key = msg.row_anchor_id.0;
+    let group_name = SharedString::from(format!("msg-{row_key}"));
 
     let mut body_column = div()
         .flex()
         .flex_col()
         .w_full()
+        .min_w_0()
         .pl(px(CONTENT_INSET))
         .pr(px(CONTENT_RIGHT_PAD));
 
@@ -45,12 +47,12 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
     }
 
     if show_head {
-        body_column = body_column.child(render_head(msg, theme, DEFAULT_DISPLAY_NAME_COLOR));
+        body_column = body_column.child(render_head(msg, ctx, DEFAULT_DISPLAY_NAME_COLOR));
     }
 
     body_column = body_column.child(render_message_content(msg, ctx));
 
-    if let Some(attachments) = render_attachments(msg, theme) {
+    if let Some(attachments) = render_attachments(msg, ctx) {
         body_column = body_column.child(attachments);
     }
     if let Some(reactions) = render_reactions(msg, ctx) {
@@ -79,7 +81,7 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
     let hover_bg = theme.bg_hover;
     let highlighted = ctx.highlight_id.is_some_and(|id| id == msg.id);
     div()
-        .id(SharedString::from(format!("msg-row-{}", msg.id.0)))
+        .id(SharedString::from(format!("msg-row-{row_key}")))
         .group(group_name.clone())
         .relative()
         .w_full()

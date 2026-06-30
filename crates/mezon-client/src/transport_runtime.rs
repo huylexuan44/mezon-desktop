@@ -24,6 +24,11 @@ pub fn new_http_client() -> ReqwestClient {
     ReqwestClient::new()
 }
 
+pub fn new_http_client_with_user_agent(agent: &str) -> ReqwestClient {
+    let _guard = runtime().enter();
+    ReqwestClient::user_agent(agent).unwrap_or_else(|_| ReqwestClient::new())
+}
+
 fn runtime() -> &'static Runtime {
     TRANSPORT_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -109,7 +114,7 @@ impl TransportClient {
     pub async fn connect(
         &self,
         host: &str,
-        port: Option<u16>,
+        port: u16,
         token: &str,
         on_event: impl Fn(crate::transport::RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
@@ -400,13 +405,53 @@ impl TransportClient {
         message_id: i64,
         direction: i32,
         limit: u32,
-    ) -> Result<Vec<crate::transport::ApiMessage>> {
+    ) -> Result<crate::transport::ListChannelMessagesResult> {
         let transport = self.inner.clone();
 
         runtime()
             .spawn(async move {
                 transport
                     .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Get pin messages list for a channel.
+    pub async fn get_pin_messages_list(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<Vec<crate::transport::ApiPinMessage>> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move { transport.get_pin_messages_list(&channel_id, &clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Unpin (delete) a pinned message.
+    pub async fn delete_pin_message(
+        &self,
+        id: &str,
+        message_id: &str,
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let id = id.to_string();
+        let message_id = message_id.to_string();
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_pin_message(&id, &message_id, &channel_id, &clan_id)
                     .await
             })
             .await
@@ -435,6 +480,33 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.join_clan_chat(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn write_last_seen_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        timestamp_seconds: u32,
+        badge_count: i32,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .write_last_seen_message(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        mode,
+                        timestamp_seconds,
+                        badge_count,
+                    )
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

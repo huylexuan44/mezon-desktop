@@ -102,7 +102,13 @@ impl DirectChannelList {
         self.reindex();
     }
 
-    fn replace(&mut self, channels: Vec<DirectChannel>) {
+    fn replace(&mut self, mut channels: Vec<DirectChannel>, badge_map: &HashMap<ChannelId, i32>) {
+        let local_counts: HashMap<ChannelId, u32> = self
+            .channels
+            .iter()
+            .map(|c| (c.id, c.unread_count))
+            .collect();
+        merge_dm_unread_counts(&mut channels, badge_map, &local_counts);
         self.channels = channels;
         self.sort_by_recent();
     }
@@ -244,14 +250,25 @@ impl DirectMessageStore {
         self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api.list_dm_channels(next_page as i32).await;
+            let (result, badges) = tokio::join!(
+                api.list_dm_channels(next_page as i32),
+                api.list_channel_badge_counts(0),
+            );
+            let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
                     Ok(list) => {
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
-                        let new_channels: Vec<DirectChannel> =
+                        let mut new_channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
+                        let local_counts: HashMap<ChannelId, u32> = this
+                            .channels
+                            .as_slice()
+                            .iter()
+                            .map(|c| (c.id, c.unread_count))
+                            .collect();
+                        merge_dm_unread_counts(&mut new_channels, &badge_map, &local_counts);
                         this.channels.extend_new(new_channels);
                         this.has_more = has_more;
                         this.current_page = next_page;
@@ -272,7 +289,11 @@ impl DirectMessageStore {
         self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = api.list_dm_channels(1).await;
+            let (result, badges) = tokio::join!(
+                api.list_dm_channels(1),
+                api.list_channel_badge_counts(0),
+            );
+            let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
@@ -281,7 +302,7 @@ impl DirectMessageStore {
                         let has_more = list.len() >= DM_PAGE_SIZE as usize;
                         let channels: Vec<DirectChannel> =
                             list.into_iter().map(direct_from_api).collect();
-                        this.channels.replace(channels);
+                        this.channels.replace(channels, &badge_map);
                         this.freshness.mark_fetched();
                         this.has_more = has_more;
                         this.current_page = 1;
@@ -335,6 +356,7 @@ impl DirectMessageStore {
         channel_id: ChannelId,
         ts: i64,
         from_me: bool,
+        increment_unread: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(channel) = self.channels.find_mut(channel_id) else {
@@ -347,7 +369,7 @@ impl DirectMessageStore {
             if ts > 0 {
                 channel.last_seen_timestamp = ts;
             }
-        } else {
+        } else if increment_unread {
             channel.unread_count = channel.unread_count.saturating_add(1);
         }
         self.channels.sort_by_recent();
@@ -370,6 +392,33 @@ impl DirectMessageStore {
 
 fn sort_by_recent(channels: &mut [DirectChannel]) {
     channels.sort_by_key(|c| std::cmp::Reverse(c.last_sent_timestamp));
+}
+
+fn badge_map_from_descs(
+    descs: Vec<mezon_client::transport::ApiChannelDesc>,
+) -> HashMap<ChannelId, i32> {
+    descs
+        .into_iter()
+        .map(|d| (ChannelId(d.channel_id), d.badge_count))
+        .collect()
+}
+
+/// Merge server badge counts with in-memory WS increments (React keeps dm meta + badge API).
+fn merge_dm_unread_counts(
+    channels: &mut [DirectChannel],
+    badge_map: &HashMap<ChannelId, i32>,
+    local_counts: &HashMap<ChannelId, u32>,
+) {
+    for ch in channels.iter_mut() {
+        let from_list = ch.unread_count;
+        let from_badges = badge_map
+            .get(&ch.id)
+            .copied()
+            .unwrap_or(0)
+            .max(0) as u32;
+        let from_local = local_counts.get(&ch.id).copied().unwrap_or(0);
+        ch.unread_count = from_list.max(from_badges).max(from_local);
+    }
 }
 
 fn direct_from_channel_desc(desc: &mezon_proto::api::ChannelDescription) -> ApiDirectChannel {
@@ -630,7 +679,7 @@ mod tests {
 
     fn list_from(channels: Vec<DirectChannel>) -> DirectChannelList {
         let mut list = DirectChannelList::default();
-        list.replace(channels);
+        list.replace(channels, &HashMap::new());
         list
     }
 
@@ -708,5 +757,20 @@ mod tests {
         assert_eq!(ids, vec![ChannelId(2), ChannelId(3), ChannelId(1)]);
         assert_index_consistent(&list);
         assert_eq!(list.find(ChannelId(3)).unwrap().label, "c");
+    }
+
+    #[test]
+    fn merge_dm_unread_counts_takes_max_of_list_badges_and_local() {
+        let mut channels = vec![DirectChannel {
+            id: ChannelId(1),
+            unread_count: 1,
+            ..direct_from_api(api_dm(1, "a", 3))
+        }];
+        let mut badge_map = HashMap::new();
+        badge_map.insert(ChannelId(1), 5);
+        let mut local = HashMap::new();
+        local.insert(ChannelId(1), 3);
+        merge_dm_unread_counts(&mut channels, &badge_map, &local);
+        assert_eq!(channels[0].unread_count, 5);
     }
 }

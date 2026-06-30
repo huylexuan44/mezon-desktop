@@ -3,6 +3,7 @@ use mezon_store::{Message, MessageCode};
 
 use super::content::render_message_content;
 use super::context::{CONTENT_INSET, CONTENT_RIGHT_PAD, RowCtx};
+use super::time::format_message_time;
 use crate::components::primitives::{Icon, IconName};
 
 /// Render a system message row (React `MessageWithSystem`): an icon plus the
@@ -51,7 +52,7 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
             div()
                 .text_xs()
                 .text_color(theme.text_muted)
-                .child(msg.timestamp_label.clone()),
+                .child(format_message_time(msg.create_time, ctx.locale)),
         )
         .into_any_element()
 }

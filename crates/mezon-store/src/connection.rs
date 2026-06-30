@@ -12,7 +12,7 @@ use gpui::{
 use mezon_client::{
     AppApi, ConnectionStatus, DEFAULT_WS_HOST, NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT,
     RealtimeEvent, Session, TransportClient, favicon_probe_url, keychain,
-    probe_network_reachability, socket_connect_label,
+    probe_network_reachability,
 };
 
 use crate::login::{session_credentials, spawn_session_logout};
@@ -183,7 +183,7 @@ impl ConnectionStore {
                     .or(session.ws_host.clone())
                     .unwrap_or_else(|| DEFAULT_WS_HOST.to_string());
                 let explicit_port = resolve_tcp_port(&session, tcp_default_port);
-                let endpoint_label = socket_connect_label(&host, explicit_port);
+                let endpoint_label = format!("{host}:{explicit_port}");
 
                 if transport.is_open().await
                     && let Err(e) = transport.close().await
@@ -399,11 +399,12 @@ fn promote_connecting_to_authenticated(auth_state: &Entity<AuthState>, cx: &mut 
     });
 }
 
-pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> Option<u16> {
+pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> u16 {
     session
         .tcp_port
         .or(session.ws_port)
         .or(default_port)
+        .unwrap_or(DEV_ABRIDGED_TCP_PORT)
 }
 
 /// Restore a stored session from the OS keychain.
@@ -439,7 +440,7 @@ mod tests {
             ws_port: Some(1111),
             ..Default::default()
         };
-        assert_eq!(resolve_tcp_port(&s, Some(4433)), Some(9999));
+        assert_eq!(resolve_tcp_port(&s, Some(4433)), 9999);
     }
 
     #[test]
@@ -448,7 +449,7 @@ mod tests {
             ws_port: Some(8888),
             ..Default::default()
         };
-        assert_eq!(resolve_tcp_port(&s, Some(4433)), Some(8888));
+        assert_eq!(resolve_tcp_port(&s, Some(4433)), 8888);
     }
 
     #[test]
@@ -457,15 +458,15 @@ mod tests {
             tcp_host: Some("mezon.ai".to_owned()),
             ..Default::default()
         };
-        assert_eq!(
-            resolve_tcp_port(&s, Some(DEV_ABRIDGED_TCP_PORT)),
-            Some(7349)
-        );
+        assert_eq!(resolve_tcp_port(&s, Some(DEV_ABRIDGED_TCP_PORT)), 7349);
     }
 
     #[test]
-    fn resolve_tcp_port_defaults_to_none_for_prod_sock_host() {
-        assert_eq!(resolve_tcp_port(&Session::default(), None), None);
+    fn resolve_tcp_port_falls_back_to_dev_port_when_unset() {
+        assert_eq!(
+            resolve_tcp_port(&Session::default(), None),
+            DEV_ABRIDGED_TCP_PORT
+        );
     }
 
     #[test]

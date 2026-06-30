@@ -25,6 +25,7 @@ rand.workspace = true
 url.workspace = true
 async-trait = "0.1"
 bytes.workspace = true
+foyer.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

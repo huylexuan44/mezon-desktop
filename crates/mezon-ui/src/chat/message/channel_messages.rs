@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -7,13 +8,16 @@ use gpui::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, MessageId, MessagesEvent, MessagesStore,
-    ProfileContext, Settings,
+    BadgeService, ChannelId, ChannelList, ClanId, ClanList, MessageId, MessagesEvent,
+    MessagesStore, ProfileContext, Settings, UserId, message::Message,
 };
 
 use super::context::RowCtx;
 use super::dispatch::render_message_item;
+use super::gif_video::GifVideoView;
 use super::skeleton::message_skeleton;
+use super::video_player::{VideoActivation, VideoPlayerView};
+use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
     MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
@@ -37,10 +41,25 @@ const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 /// and racing through cached history). Leading-edge throttle, like React's
 /// debounced `loadMore`.
 const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
+/// Max number of tenor GIFs played as inline video at once. Beyond this the
+/// extra ones fall back to the static-poster image, bounding concurrent
+/// `VideoPlayer`s + frame pumps to the visible set.
+const MAX_GIF_VIDEOS: usize = 6;
+
+struct PendingGif {
+    key: (MessageId, usize),
+    mp4: SharedString,
+    fallback: SharedString,
+    width: f32,
+    height: f32,
+}
 const SKELETON_THRESHOLD_MS: u64 = 500;
 const SKELETON_FADE_IN_MS: u64 = 150;
 const SKELETON_SETTLE_MS: u64 = 250;
 const SKELETON_FADE_OUT_MS: u64 = 180;
+/// Minimum loaded rows before FAB click refetches present instead of paging
+/// forward (React `messageIds.length >= 20` in `ScrollDownButton`).
+const JUMP_PRESENT_MIN_MESSAGES: usize = 20;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SkeletonPhase {
@@ -154,6 +173,8 @@ pub struct ChannelMessages {
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
+    active_videos: HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
+    gif_videos: HashMap<(MessageId, usize), Entity<GifVideoView>>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
     skeleton_key: SkeletonKey,
@@ -167,12 +188,8 @@ pub struct ChannelMessages {
     last_paginate: Option<Instant>,
     /// Last scroll event time, used to release hover suppression after idle.
     last_scroll_at: Option<Instant>,
-    /// Whether the list is auto-following the tail. Only enabled when the window
-    /// reaches the true newest message; disabled while `has_more_bottom` so
-    /// scrolling down loads newer pages instead of snapping to the bottom.
-    /// Whether the newest message is currently in view, so appended messages
-    /// should keep the bottom pinned (React: scroll to bottom when not viewing
-    /// older). Maintained from the scroll handler.
+    /// Whether the newest rows are in view (from the scroll handler). Drives
+    /// auto-follow on append; separate from `has_more_bottom` (data not loaded).
     at_bottom: bool,
     /// Absolute list index of the first visible row, captured from the latest
     /// scroll event. Used to re-anchor the viewport after a forward-page append
@@ -188,6 +205,12 @@ pub struct ChannelMessages {
     pending_jump: Option<MessageId>,
     highlight_id: Option<MessageId>,
     _highlight_timer: Option<Task<()>>,
+    /// Last message id seen while parked at the true bottom (React
+    /// `lastSeenAtBottomRef`). Drives the FAB unread badge.
+    last_seen_at_bottom: Option<MessageId>,
+    /// After `jump_to_present`, scroll to end once the buffer resets.
+    fab_scroll_pending: bool,
+    window_was_active: bool,
 }
 
 impl ChannelMessages {
@@ -204,16 +227,27 @@ impl ChannelMessages {
         cx.subscribe(&store, |this, _store, event, cx| {
             match event {
                 MessagesEvent::Reset { count } => {
+                    this.active_videos.clear();
+                    this.gif_videos.clear();
                     this.list_state.reset(*count);
-                    // Open pinned to the newest message (React opens a channel at
-                    // the bottom). We never use gpui's auto-tail; instead we scroll
-                    // explicitly so loading older/newer pages never yanks the view
-                    // to an edge.
                     this.list_state.scroll_to_end();
                     this.at_bottom = true;
-                    // `reset` drops every row including the header; render re-adds
-                    // it if more history exists.
                     this.header_shown = false;
+                    this.fab_scroll_pending = false;
+                    if let Some(channel_id) = _store.read(cx).active_channel_id() {
+                        _store.update(cx, |store, _cx| {
+                            store.set_viewing_older(channel_id, false);
+                        });
+                    }
+                    if let Some(last) = _store
+                        .read(cx)
+                        .viewport_messages()
+                        .last()
+                        .filter(|m| !m.id.is_optimistic())
+                    {
+                        this.last_seen_at_bottom = Some(last.id);
+                    }
+                    this.sync_channel_seen(cx);
                 }
                 MessagesEvent::Shifted {
                     added_top,
@@ -250,6 +284,7 @@ impl ChannelMessages {
                         // Parked at the true newest: follow the appended message
                         // (React `scrollToBottom` when not viewing older).
                         this.list_state.scroll_to_end();
+                        this.sync_channel_seen(cx);
                     } else if *added_top > 0 {
                         // Prepend (older page): anchor to the first real message so
                         // the skeleton header at index 0 doesn't keep the view at
@@ -327,6 +362,17 @@ impl ChannelMessages {
             let _ = timeline.update(cx, |this, cx| {
                 this.at_bottom = at_bottom;
                 this.last_visible_start = visible_start;
+
+                let store_entity = MessagesStore::global(cx);
+                if let Some(channel_id) = store_entity.read(cx).active_channel_id() {
+                    store_entity.update(cx, |store, _cx| {
+                        store.set_viewing_older(channel_id, !at_bottom);
+                    });
+                }
+                if at_bottom && !store_entity.read(cx).has_more_bottom() {
+                    this.sync_channel_seen(cx);
+                }
+
                 // Suppress hover affordances while scrolling. Record the time on
                 // every event (cheap) but spawn the release watcher only once per
                 // scroll session — the list fires ~120 events/sec, so spawning a
@@ -390,7 +436,7 @@ impl ChannelMessages {
         });
 
         let image_cache = cx.new(|cx| {
-            LruImageCache::labeled(
+            LruImageCache::message(
                 "msg-image",
                 MESSAGE_IMAGE_CACHE_CAPACITY,
                 MESSAGE_IMAGE_CACHE_BYTES,
@@ -413,6 +459,8 @@ impl ChannelMessages {
             settings,
             image_cache,
             avatar_image_cache,
+            active_videos: HashMap::new(),
+            gif_videos: HashMap::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
             skeleton_key: SkeletonKey::None,
@@ -430,6 +478,101 @@ impl ChannelMessages {
             pending_jump: None,
             highlight_id: None,
             _highlight_timer: None,
+            last_seen_at_bottom: None,
+            fab_scroll_pending: false,
+            window_was_active: true,
+        }
+    }
+
+    pub fn activate_video(
+        &mut self,
+        key: (MessageId, usize),
+        activation: VideoActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_videos.contains_key(&key) {
+            return;
+        }
+        self.active_videos.clear();
+        let view = cx.new(|cx| VideoPlayerView::new(activation, window, cx));
+        self.active_videos.insert(key, view);
+        cx.notify();
+    }
+
+    /// Reconcile the set of tenor GIFs playing as inline video to the rows
+    /// currently inside the viewport: spin up a `GifVideoView` for each visible
+    /// tenor GIF (up to `MAX_GIF_VIDEOS`) and drop the players for rows that
+    /// scrolled off (cancelling their frame pump). Driven from `render` via
+    /// `defer_in`, so player entities are created after layout, never inside
+    /// `render`.
+    fn apply_gif_reconcile(&mut self, cx: &mut Context<Self>) {
+        let header = usize::from(self.header_shown);
+        let count = self.list_state.item_count();
+        let mut wanted: Vec<PendingGif> = Vec::new();
+        {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            let messages = store.viewport_messages();
+            for list_ix in header..count {
+                if self.list_state.item_is_above_viewport(list_ix) != Some(false)
+                    || self.list_state.item_is_below_viewport(list_ix) != Some(false)
+                {
+                    continue;
+                }
+                let Some(message) = messages.get(list_ix - header) else {
+                    continue;
+                };
+                let image_count = message
+                    .attachments
+                    .iter()
+                    .filter(|att| !att.is_unsupported_media() && !att.is_video() && att.is_image())
+                    .count();
+                if image_count >= 2 && message.album_layout.is_some() {
+                    continue;
+                }
+                let first_image = message
+                    .attachments
+                    .iter()
+                    .enumerate()
+                    .find(|(_, att)| {
+                        !att.is_unsupported_media() && !att.is_video() && att.is_image()
+                    });
+                if let Some((att_ix, att)) = first_image
+                    && let Some(mp4) = att.tenor_mp4.clone()
+                {
+                    wanted.push(PendingGif {
+                        key: (message.id, att_ix),
+                        mp4,
+                        fallback: att.proxied_src.clone(),
+                        width: att.display_width,
+                        height: att.display_height,
+                    });
+                }
+            }
+        }
+
+        let wanted_keys: std::collections::HashSet<(MessageId, usize)> =
+            wanted.iter().map(|gif| gif.key).collect();
+        let before = self.gif_videos.len();
+        self.gif_videos.retain(|key, _| wanted_keys.contains(key));
+        let mut changed = self.gif_videos.len() != before;
+
+        for gif in wanted {
+            if self.gif_videos.len() >= MAX_GIF_VIDEOS {
+                break;
+            }
+            if self.gif_videos.contains_key(&gif.key) {
+                continue;
+            }
+            let view =
+                cx.new(|cx| GifVideoView::new(gif.mp4, gif.fallback, gif.width, gif.height, cx));
+            self.gif_videos.insert(gif.key, view);
+            changed = true;
+        }
+
+        if changed {
+            cx.notify();
         }
     }
 
@@ -516,10 +659,136 @@ impl ChannelMessages {
             return;
         }
         self.cached_for_channel = channel_id;
+        self.last_seen_at_bottom = None;
+        self.fab_scroll_pending = false;
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
         self.avatar_image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
+    }
+
+    fn shrink_decoded_on_deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = window.is_window_active();
+        if self.window_was_active && !active {
+            self.image_cache
+                .update(cx, |cache, cx| cache.shrink_to(0, window, cx));
+        }
+        self.window_was_active = active;
+    }
+
+    fn sync_channel_seen(&mut self, cx: &mut Context<Self>) {
+        let store_entity = MessagesStore::global(cx);
+        if store_entity.read(cx).has_more_bottom() {
+            return;
+        }
+        let app_focused = cx.active_window().is_some();
+        let Some(last) = store_entity
+            .read(cx)
+            .viewport_messages()
+            .last()
+            .filter(|m| !m.id.is_optimistic())
+            .cloned()
+        else {
+            return;
+        };
+        self.last_seen_at_bottom = Some(last.id);
+        store_entity.update(cx, |store, cx| {
+            store.note_viewport_seen(&last, app_focused, cx);
+        });
+    }
+
+    fn scroll_down_clicked(&mut self, cx: &mut Context<Self>) {
+        let store_entity = MessagesStore::global(cx);
+        let (has_more_bottom, buffer_len) = {
+            let s = store_entity.read(cx);
+            (s.has_more_bottom(), s.viewport_messages().len())
+        };
+
+        if has_more_bottom && buffer_len >= JUMP_PRESENT_MIN_MESSAGES {
+            self.fab_scroll_pending = true;
+            store_entity.update(cx, |store, cx| store.jump_to_present(cx));
+            return;
+        }
+
+        if has_more_bottom {
+            store_entity.update(cx, |store, cx| store.scroll_reached_bottom(cx));
+        }
+        self.list_state.scroll_to_end();
+        self.at_bottom = true;
+        if let Some(channel_id) = store_entity.read(cx).active_channel_id() {
+            store_entity.update(cx, |store, _cx| {
+                store.set_viewing_older(channel_id, false);
+            });
+        }
+        if let Some(last) = store_entity
+            .read(cx)
+            .viewport_messages()
+            .last()
+            .filter(|m| !m.id.is_optimistic())
+        {
+            self.last_seen_at_bottom = Some(last.id);
+        }
+        cx.notify();
+    }
+
+    fn scroll_down_fab(
+        &self,
+        visible: bool,
+        unread_count: u32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let badge_label = if unread_count > 99 {
+            "99+".to_string()
+        } else {
+            unread_count.to_string()
+        };
+
+        div()
+            .id("scroll-down-fab")
+            .absolute()
+            .bottom(px(20.))
+            .right(px(12.))
+            .size(px(32.))
+            .rounded_full()
+            .bg(theme.bg_tertiary)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .opacity(if visible { 1.0 } else { 0.0 })
+            .when(visible, |el| {
+                el.on_click(cx.listener(|this, _event, _window, cx| {
+                    this.scroll_down_clicked(cx);
+                }))
+            })
+            .when(unread_count > 0, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.))
+                        .right(px(-4.))
+                        .min_w(px(18.))
+                        .h(px(18.))
+                        .px_1()
+                        .rounded_full()
+                        .bg(theme.status_dnd)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(badge_label),
+                )
+            })
+            .child(
+                Icon::new(IconName::ArrowDown)
+                    .size(px(18.))
+                    .text_color(theme.text_primary),
+            )
     }
 
     fn advance_skeleton(&mut self, loading: bool, key: SkeletonKey, cx: &mut Context<Self>) {
@@ -631,8 +900,10 @@ impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelMessages");
         self.clear_image_cache_if_channel_changed(window, cx);
+        self.shrink_decoded_on_deactivate(window, cx);
         self.image_cache
             .update(cx, |cache, cx| cache.sweep(window, cx));
+        cx.defer_in(window, |this, _window, cx| this.apply_gif_reconcile(cx));
 
         let store = MessagesStore::global(cx);
         let active_clan = ClanList::global(cx).read(cx).active_clan_id;
@@ -658,10 +929,20 @@ impl Render for ChannelMessages {
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
         let avatar_image_cache = self.avatar_image_cache.clone();
-        let unread_boundary_id = unread_boundary(&store, cx);
+        let unread_boundary_id = unread_boundary(&store, self.last_seen_at_bottom, cx);
         let highlight_id = self.highlight_id;
         let profile_context = channel_profile_context(is_dm, dm_channel, active_clan, cx);
         let settings = self.settings.clone();
+        let active_videos = self.active_videos.clone();
+        let gif_videos = self.gif_videos.clone();
+        let video_host = cx.entity().downgrade();
+        let has_more_bottom = store.read(cx).has_more_bottom();
+        let show_scroll_down = has_more_bottom || !self.at_bottom;
+        let unread_count = fab_unread_count(
+            self.last_seen_at_bottom,
+            store.read(cx).channel_tail_message_id(),
+        );
+        let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
         div()
             .size_full()
@@ -689,6 +970,9 @@ impl Render for ChannelMessages {
                         highlight_id,
                         profile_context,
                         settings: settings.clone(),
+                        active_videos: &active_videos,
+                        gif_videos: &gif_videos,
+                        video_host: video_host.clone(),
                     };
                     render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx)
                 })
@@ -696,6 +980,7 @@ impl Render for ChannelMessages {
                 .size_full(),
             )
             .children(skeleton_overlay)
+            .child(scroll_down_fab)
             .custom_scrollbars(
                 Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
                 window,
@@ -703,6 +988,22 @@ impl Render for ChannelMessages {
             )
             .into_any_element()
     }
+}
+
+/// Unread count for the scroll-down FAB badge (cf. React snowflake delta in
+/// `ScrollDownButton`).
+fn fab_unread_count(
+    last_seen_at_bottom: Option<MessageId>,
+    channel_tail: Option<MessageId>,
+) -> u32 {
+    let (Some(seen), Some(tail)) = (last_seen_at_bottom, channel_tail) else {
+        return 0;
+    };
+    if tail <= seen || tail.is_optimistic() {
+        return 0;
+    }
+    let diff = (tail.get() >> 22).saturating_sub(seen.get() >> 22);
+    diff.min(99) as u32
 }
 
 fn channel_profile_context(
@@ -718,29 +1019,50 @@ fn channel_profile_context(
     }
 }
 
-/// Find the id of the first message newer than the channel's last-seen
-/// timestamp — the row above which the "New messages" break is shown. Returns
-/// `None` when the channel has never been seen or is fully caught up.
-fn unread_boundary(
-    store: &Entity<MessagesStore>,
-    cx: &Context<ChannelMessages>,
+/// Compute the row id that receives the "New messages" break above it (React
+/// `shouldShowUnreadBreak` in `ChannelMessages.tsx`).
+pub(crate) fn unread_boundary_for_messages(
+    messages: &[Message],
+    last_read: Option<MessageId>,
+    channel_tail: Option<MessageId>,
+    current_user_id: Option<UserId>,
 ) -> Option<MessageId> {
-    let channel_list = ChannelList::global(cx);
-    let cl = channel_list.read(cx);
-    let last_seen = cl
-        .active_channel_id
-        .and_then(|id| cl.find_channel(id))
-        .map(|c| c.last_seen_timestamp)
-        .unwrap_or(0);
-    if last_seen <= 0 {
+    let last_read = last_read.filter(|id| !id.is_zero())?;
+    if messages.is_empty() {
         return None;
     }
-    store
-        .read(cx)
-        .viewport_messages()
-        .iter()
-        .find(|m| m.create_time > last_seen)
+    for i in 1..messages.len() {
+        let prev = &messages[i - 1];
+        let curr = &messages[i];
+        if prev.id != last_read {
+            continue;
+        }
+        if channel_tail.is_some_and(|tail| prev.id == tail) {
+            return None;
+        }
+        if current_user_id.is_some_and(|uid| curr.sender_user_id == Some(uid)) {
+            return None;
+        }
+        return Some(curr.id);
+    }
+    None
+}
+
+fn unread_boundary(
+    store: &Entity<MessagesStore>,
+    last_seen_at_bottom: Option<MessageId>,
+    cx: &Context<ChannelMessages>,
+) -> Option<MessageId> {
+    let store_read = store.read(cx);
+    let messages = store_read.viewport_messages();
+    let last_read = last_seen_at_bottom.or_else(|| store_read.last_read_message_id());
+    let channel_tail = messages
+        .last()
+        .filter(|m| !m.id.is_optimistic())
         .map(|m| m.id)
+        .or_else(|| store_read.channel_tail_message_id());
+    let current_user_id = BadgeService::global(cx).read(cx).current_user_id(cx);
+    unread_boundary_for_messages(messages, last_read, channel_tail, current_user_id)
 }
 
 #[cfg(test)]
@@ -919,5 +1241,26 @@ mod skeleton_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unread_break_hidden_for_own_message_after_last_read() {
+        use super::unread_boundary_for_messages;
+        use mezon_store::{Message, MessageId, UserId};
+
+        let read = MessageId(10);
+        let own = Message::new(MessageId(11), "hi", "1", "me", 0);
+        let messages = vec![Message::new(read, "old", "2", "them", 0), own.clone()];
+        assert_eq!(
+            unread_boundary_for_messages(&messages, Some(read), Some(own.id), Some(UserId(1))),
+            None
+        );
+
+        let other = Message::new(MessageId(12), "hey", "2", "them", 0);
+        let messages = vec![Message::new(read, "old", "2", "them", 0), other.clone()];
+        assert_eq!(
+            unread_boundary_for_messages(&messages, Some(read), Some(other.id), Some(UserId(1))),
+            Some(other.id)
+        );
     }
 }

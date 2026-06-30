@@ -13,6 +13,7 @@ use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::message::ChannelMessages;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{InputEvent, InputState};
 use crate::theme::ActiveTheme;
 
@@ -108,6 +109,7 @@ impl ChatArea {
         show_inbox: bool,
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
@@ -131,6 +133,7 @@ impl ChatArea {
                 show_inbox,
                 inbox_handle,
                 clan_id,
+                pin_handle,
                 Some(locale.to_string()),
                 cx,
             );

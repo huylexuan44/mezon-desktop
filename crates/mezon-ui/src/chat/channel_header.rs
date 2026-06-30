@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, App, Context, Entity, Render, SharedString, Subscription, WeakEntity, Window, div,
-    prelude::*, px,
+    Anchor, App, ClickEvent, Context, CursorStyle, Entity, Hsla, IntoElement, Render, RenderOnce,
+    SharedString, Subscription, WeakEntity, Window, div, point, prelude::*, px,
 };
 use mezon_store::Settings;
-use ui::{ButtonLike, PopoverMenu, PopoverMenuHandle, Toggleable};
+use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
-use crate::components::primitives::{Icon, IconName};
+use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
+use crate::components::primitives::{
+    Button, ButtonVariant, ButtonVariants, Icon, IconName, Sizable, Size,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
@@ -24,6 +27,8 @@ pub struct ChannelHeader {
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
     locale: Option<String>,
+    pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+    settings: Option<Entity<Settings>>,
 }
 
 impl ChannelHeader {
@@ -38,6 +43,8 @@ impl ChannelHeader {
             inbox_handle: None,
             clan_id: None,
             locale: None,
+            pin_handle: None,
+            settings: None,
         }
     }
 
@@ -77,11 +84,23 @@ impl ChannelHeader {
         self
     }
 
+    pub fn pin_popover(
+        mut self,
+        handle: PopoverMenuHandle<PinnedPopoverPanel>,
+        settings: Entity<Settings>,
+    ) -> Self {
+        self.pin_handle = Some(handle);
+        self.settings = Some(settings);
+        self
+    }
+
     pub fn render(&self, theme: &Theme, window: &mut Window, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
         let icon_color = theme.text_muted;
         let icon_active = theme.text_primary;
+        let pin_handle = self.pin_handle.clone();
+        let settings = self.settings.clone();
         let actions = [
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
@@ -138,6 +157,34 @@ impl ChannelHeader {
                             .into_iter()
                             .filter(|(id, _)| *id != "hdr-members" || self.members_action)
                             .map(|(id, icon)| {
+                                if id == "hdr-pin"
+                                    && let (Some(handle), Some(settings)) =
+                                        (pin_handle.clone(), settings.clone())
+                                {
+                                    let menu_handle = handle.clone();
+                                    return PopoverMenu::new("hdr-pin-popover")
+                                        .with_handle(handle)
+                                        .anchor(Anchor::TopRight)
+                                        .attach(Anchor::BottomRight)
+                                        .offset(point(px(0.), px(9.)))
+                                        .on_open(pin_popover_on_open())
+                                        .menu({
+                                            let settings = settings.clone();
+                                            move |window, cx| {
+                                                Some(cx.new(|cx| {
+                                                    PinnedPopoverPanel::new(
+                                                        settings.clone(),
+                                                        menu_handle.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }))
+                                            }
+                                        })
+                                        .trigger(PinPopoverTrigger::new(theme, false))
+                                        .into_any_element();
+                                }
+
                                 let is_members = id == "hdr-members";
                                 let active = is_members && self.members_active;
                                 let tint = if active { icon_active } else { icon_color };
@@ -161,7 +208,7 @@ impl ChannelHeader {
                                     button =
                                         button.on_click(move |_, window, cx| handler(window, cx));
                                 }
-                                button
+                                button.into_any_element()
                             }),
                     )
                     .when(self.show_inbox && !self.dm, |row| {
@@ -266,6 +313,7 @@ pub struct ChatHeader {
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
     locale: Option<String>,
+    pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     layout: WeakEntity<crate::ChatLayout>,
     settings: Entity<Settings>,
     _settings_observe: Subscription,
@@ -287,6 +335,7 @@ impl ChatHeader {
             inbox_handle: None,
             clan_id: None,
             locale: None,
+            pin_handle: None,
             layout,
             settings: settings.clone(),
             _settings_observe,
@@ -302,10 +351,13 @@ impl ChatHeader {
         show_inbox: bool,
         inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
         clan_id: Option<String>,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         locale: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let name = name.unwrap_or_else(|| self.name.clone());
+        self.inbox_handle = inbox_handle;
+        self.pin_handle = pin_handle;
         if self.name == name
             && self.dm == dm
             && self.members_action == members_action
@@ -321,7 +373,6 @@ impl ChatHeader {
         self.members_action = members_action;
         self.members_active = members_active;
         self.show_inbox = show_inbox;
-        self.inbox_handle = inbox_handle;
         self.clan_id = clan_id;
         self.locale = locale;
         cx.notify();
@@ -332,6 +383,7 @@ impl Render for ChatHeader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let layout = self.layout.clone();
+        let settings = self.settings.clone();
         let mut header = ChannelHeader::new(self.name.to_string())
             .dm(self.dm)
             .members_action(self.members_action)
@@ -347,6 +399,69 @@ impl Render for ChatHeader {
         ) {
             header = header.inbox_popover(handle).inbox_context(clan_id, locale);
         }
+        if let Some(handle) = self.pin_handle.clone() {
+            header = header.pin_popover(handle, settings);
+        }
         header.render(theme, window, cx).into_any_element()
+    }
+}
+
+#[derive(IntoElement)]
+struct PinPopoverTrigger {
+    open: bool,
+    icon_color: Hsla,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl PinPopoverTrigger {
+    fn new(theme: &Theme, open: bool) -> Self {
+        Self {
+            open,
+            icon_color: theme.text_muted.into(),
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for PinPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for PinPopoverTrigger {
+    fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for PinPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut button = Button::new("hdr-pin-trigger")
+            .with_size(Size::Small)
+            .icon(
+                Icon::new(IconName::PinRight)
+                    .size(px(20.))
+                    .text_color(self.icon_color),
+            );
+        button = if self.open {
+            button.with_variant(ButtonVariant::Secondary)
+        } else {
+            button.ghost()
+        };
+        if let Some(handler) = self.on_click {
+            button.on_click(handler)
+        } else {
+            button
+        }
     }
 }
