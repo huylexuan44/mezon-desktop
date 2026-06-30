@@ -1,16 +1,45 @@
 use gpui::{App, AppContext, Context, Entity, Global};
 use mezon_client::RealtimeEvent;
+use mezon_proto::api::ChannelMessage;
 
 use crate::AuthState;
 use crate::channel::ChannelList;
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
-use crate::ids::{ChannelId, ClanId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::message::MessageCode;
+use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const STREAM_MODE_GROUP: i32 = 3;
 const STREAM_MODE_DM: i32 = 4;
+
+fn is_dm_message(m: &ChannelMessage) -> bool {
+    m.mode == STREAM_MODE_GROUP || m.mode == STREAM_MODE_DM || m.clan_id == 0
+}
+
+fn is_content_mutation(m: &ChannelMessage) -> bool {
+    matches!(
+        MessageCode::from_raw(m.code),
+        MessageCode::ChatUpdate
+            | MessageCode::ChatRemove
+            | MessageCode::UpdateEphemeralMsg
+            | MessageCode::DeleteEphemeralMsg
+    )
+}
+
+/// Matches React `ChatContext` `isNotCurrentDirect` before `badgeService.incrementDm`.
+fn should_increment_dm_unread(cx: &App, channel_id: ChannelId, from_me: bool) -> bool {
+    if from_me {
+        return false;
+    }
+    let messages = MessagesStore::global(cx).read(cx);
+    let app_focused = cx.active_window().is_some();
+    let viewing_this_dm =
+        messages.is_dm() && messages.active_channel_id() == Some(channel_id) && app_focused;
+    !viewing_this_dm
+}
 
 pub struct BadgeService {
     auth_state: Entity<AuthState>,
@@ -30,6 +59,10 @@ impl BadgeService {
         cx.global::<GlobalBadgeService>().0.clone()
     }
 
+    pub fn current_user_id(&self, cx: &App) -> Option<UserId> {
+        self.current_user_id_raw(cx).map(UserId)
+    }
+
     fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
@@ -46,7 +79,7 @@ impl BadgeService {
         Self { auth_state }
     }
 
-    fn current_user_id(&self, cx: &App) -> Option<i64> {
+    fn current_user_id_raw(&self, cx: &App) -> Option<i64> {
         match self.auth_state.read(cx) {
             AuthState::Authenticated(session) | AuthState::Connecting(session) => {
                 session.user_id.parse::<i64>().ok()
@@ -80,12 +113,15 @@ impl BadgeService {
                 } else {
                     0
                 };
-                let user_id = self.current_user_id(cx);
+                let user_id = self.current_user_id_raw(cx);
                 let from_me = matches!(user_id, Some(uid) if uid == m.sender_id);
+                let message_id = MessageId(m.message_id);
 
-                if m.mode == STREAM_MODE_GROUP || m.mode == STREAM_MODE_DM {
+                if is_dm_message(m) {
+                    let increment_unread =
+                        should_increment_dm_unread(cx, channel_id, from_me) && !is_content_mutation(m);
                     DirectMessageStore::global(cx).update(cx, |dm, cx| {
-                        dm.note_message(channel_id, ts, from_me, cx);
+                        dm.note_message(channel_id, ts, from_me, increment_unread, cx);
                     });
                 } else {
                     let clan_id = ClanId(m.clan_id);
@@ -101,8 +137,21 @@ impl BadgeService {
                             .unwrap_or(false)
                     };
                     ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.note_channel_message(clan_id, channel_id, is_mention, seen, ts, cx)
+                        cl.note_channel_message(
+                            clan_id,
+                            channel_id,
+                            is_mention,
+                            seen,
+                            ts,
+                            message_id,
+                            cx,
+                        )
                     });
+                    if seen {
+                        MessagesStore::global(cx).update(cx, |store, _| {
+                            store.set_last_read_message(channel_id, message_id);
+                        });
+                    }
                     if !seen {
                         ClanList::global(cx).update(cx, |cls, cx| {
                             cls.note_channel_message(clan_id, is_mention, cx)
@@ -124,9 +173,28 @@ impl BadgeService {
                 let clan_id = ClanId(e.clan_id);
                 let new_badge = e.badge_count.max(0) as u32;
                 let seen_ts = i64::from(e.timestamp_seconds);
-                ChannelList::global(cx).update(cx, |cl, cx| {
-                    cl.apply_last_seen(clan_id, channel_id, new_badge, seen_ts, cx)
-                });
+                let seen_message_id = MessageId(e.message_id);
+                if clan_id.is_zero() {
+                    DirectMessageStore::global(cx).update(cx, |dm, cx| {
+                        dm.note_read(channel_id, cx);
+                    });
+                } else {
+                    ChannelList::global(cx).update(cx, |cl, cx| {
+                        cl.apply_last_seen(
+                            clan_id,
+                            channel_id,
+                            new_badge,
+                            seen_ts,
+                            seen_message_id,
+                            cx,
+                        )
+                    });
+                }
+                if !seen_message_id.is_zero() {
+                    MessagesStore::global(cx).update(cx, |store, _| {
+                        store.set_last_read_message(channel_id, seen_message_id);
+                    });
+                }
             }
             _ => {}
         }

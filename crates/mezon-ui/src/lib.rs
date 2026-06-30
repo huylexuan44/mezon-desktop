@@ -25,7 +25,7 @@ pub use sidebar::direct_sidebar::DirectSidebar;
 pub use theme::Theme;
 pub use theme::tokens::ThemeTokens;
 
-pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = false;
+pub(crate) const SHOW_UNREAD_BADGE_COUNT: bool = true;
 
 gpui::actions!(
     mezon,

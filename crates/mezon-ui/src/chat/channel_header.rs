@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, App, ClickEvent, Context, CursorStyle, Entity, IntoElement, Render, RenderOnce,
+    Anchor, App, ClickEvent, Context, CursorStyle, Entity, Hsla, IntoElement, Render, RenderOnce,
     SharedString, Subscription, WeakEntity, Window, div, point, prelude::*, px,
 };
 use mezon_store::{Settings, ThreadsStore};
-use ui::prelude::*;
-use ui::{PopoverMenu, PopoverMenuHandle};
+use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
 use crate::chat::layout::ChatLayout;
+use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{
+    Button, ButtonVariant, ButtonVariants, Icon, IconName, Sizable, Size,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
@@ -26,6 +28,8 @@ pub struct ChannelHeader {
     show_threads: bool,
     layout: Option<Entity<ChatLayout>>,
     thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
+    pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
+    settings: Option<Entity<Settings>>,
 }
 
 impl ChannelHeader {
@@ -39,6 +43,8 @@ impl ChannelHeader {
             show_threads: false,
             layout: None,
             thread_handle: None,
+            pin_handle: None,
+            settings: None,
         }
     }
 
@@ -77,6 +83,16 @@ impl ChannelHeader {
         self
     }
 
+    pub fn pin_popover(
+        mut self,
+        handle: PopoverMenuHandle<PinnedPopoverPanel>,
+        settings: Entity<Settings>,
+    ) -> Self {
+        self.pin_handle = Some(handle);
+        self.settings = Some(settings);
+        self
+    }
+
     pub fn render(&self, theme: &Theme) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
@@ -85,6 +101,8 @@ impl ChannelHeader {
         let layout = self.layout.clone();
         let thread_handle = self.thread_handle.clone();
         let show_threads = self.show_threads;
+        let pin_handle = self.pin_handle.clone();
+        let settings = self.settings.clone();
         let actions = [
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
@@ -176,6 +194,35 @@ impl ChannelHeader {
                                 .into_any_element(),
                         );
                     }
+                    if id == "hdr-pin"
+                        && let (Some(handle), Some(settings)) =
+                            (pin_handle.clone(), settings.clone())
+                    {
+                        let menu_handle = handle.clone();
+                        return Some(
+                            PopoverMenu::new("hdr-pin-popover")
+                                .with_handle(handle)
+                                .anchor(Anchor::TopRight)
+                                .attach(Anchor::BottomRight)
+                                .offset(point(px(0.), px(9.)))
+                                .on_open(pin_popover_on_open())
+                                .menu({
+                                    let settings = settings.clone();
+                                    move |window, cx| {
+                                        Some(cx.new(|cx| {
+                                            PinnedPopoverPanel::new(
+                                                settings.clone(),
+                                                menu_handle.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                        }))
+                                    }
+                                })
+                                .trigger(PinPopoverTrigger::new(theme, false))
+                                .into_any_element(),
+                        );
+                    }
 
                     let is_members = id == "hdr-members";
                     let active = is_members && self.members_active;
@@ -209,7 +256,9 @@ pub struct ChatHeader {
     dm: bool,
     members_action: bool,
     members_active: bool,
+    pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
+    settings: Entity<Settings>,
     _settings_observe: Subscription,
 }
 
@@ -225,7 +274,9 @@ impl ChatHeader {
             dm: false,
             members_action: true,
             members_active: false,
+            pin_handle: None,
             layout,
+            settings: settings.clone(),
             _settings_observe,
         }
     }
@@ -236,9 +287,11 @@ impl ChatHeader {
         dm: bool,
         members_action: bool,
         members_active: bool,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         cx: &mut Context<Self>,
     ) {
         let name = name.unwrap_or_else(|| self.name.clone());
+        self.pin_handle = pin_handle;
         if self.name == name
             && self.dm == dm
             && self.members_action == members_action
@@ -258,6 +311,7 @@ impl Render for ChatHeader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let layout_weak = self.layout.clone();
+        let settings = self.settings.clone();
         let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
         let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
@@ -279,6 +333,9 @@ impl Render for ChatHeader {
                         .thread_popover(thread_handle);
                 }
             }
+        }
+        if let Some(handle) = self.pin_handle.clone() {
+            header = header.pin_popover(handle, settings);
         }
         header.render(theme).into_any_element()
     }
@@ -355,6 +412,66 @@ impl RenderOnce for ThreadPopoverTrigger {
         if self.open {
             button = button.bg(self.bg_active);
         }
+        if let Some(handler) = self.on_click {
+            button.on_click(handler)
+        } else {
+            button
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct PinPopoverTrigger {
+    open: bool,
+    icon_color: Hsla,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl PinPopoverTrigger {
+    fn new(theme: &Theme, open: bool) -> Self {
+        Self {
+            open,
+            icon_color: theme.text_muted.into(),
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for PinPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for PinPopoverTrigger {
+    fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for PinPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut button = Button::new("hdr-pin-trigger")
+            .with_size(Size::Small)
+            .icon(
+                Icon::new(IconName::PinRight)
+                    .size(px(20.))
+                    .text_color(self.icon_color),
+            );
+        button = if self.open {
+            button.with_variant(ButtonVariant::Secondary)
+        } else {
+            button.ghost()
+        };
         if let Some(handler) = self.on_click {
             button.on_click(handler)
         } else {

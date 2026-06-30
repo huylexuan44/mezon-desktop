@@ -1,4 +1,4 @@
-use crate::ids::{ChannelId, ClanId, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -10,6 +10,8 @@ use mezon_client::{ApiChannelApp, AppApi, ConnectionStatus, RealtimeEvent};
 
 use crate::KeyedCache;
 use crate::clan::{ClanEvent, ClanList};
+use crate::message_time::local_day_key;
+use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
@@ -95,7 +97,9 @@ pub struct Channel {
     pub badge_count: u32,
     pub muted: bool,
     pub parent_id: Option<ChannelId>,
+    pub last_seen_message_id: MessageId,
     pub last_seen_timestamp: i64,
+    pub last_sent_message_id: MessageId,
     pub last_sent_timestamp: i64,
     pub voice_members: Vec<VoiceMember>,
     pub is_favorite: bool,
@@ -143,7 +147,6 @@ pub struct Message {
     pub avatar_url: String,
     pub avatar_proxied: SharedString,
     pub create_time: i64,
-    pub timestamp_label: String,
     pub day_label: String,
     pub combined_with_prev: bool,
     pub reactions: Vec<String>,
@@ -186,8 +189,7 @@ impl Message {
             avatar_url: String::new(),
             avatar_proxied: SharedString::default(),
             create_time,
-            timestamp_label: format_clock(create_time),
-            day_label: format_day(create_time),
+            day_label: local_day_key(create_time),
             combined_with_prev: false,
             reactions: Vec::new(),
             attachments: Vec::new(),
@@ -208,27 +210,6 @@ impl Message {
         self.avatar_proxied = proxied.into();
         self
     }
-}
-
-fn format_clock(ts: i64) -> String {
-    let seconds_since_midnight = ts.rem_euclid(86_400);
-    let hours = seconds_since_midnight / 3600;
-    let minutes = (seconds_since_midnight % 3600) / 60;
-    let period = if hours >= 12 { "PM" } else { "AM" };
-    let display_hour = if hours == 0 {
-        12
-    } else if hours > 12 {
-        hours - 12
-    } else {
-        hours
-    };
-    format!("{display_hour}:{minutes:02} {period}")
-}
-
-fn format_day(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.format("%B %d, %Y").to_string())
-        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -386,11 +367,17 @@ impl ChannelList {
         cx.spawn(async move |this, cx| {
             let result = Self::fetch_clan_data(&api, clan_id).await;
             match result {
-                Ok((categories, app_channels)) => {
+                Ok((categories, app_channels, last_messages)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.cache.insert(clan_id, categories, None);
+                        if let Some(store) = MessagesStore::try_global(cx) {
+                            store.update(cx, |store, cx| {
+                                store.set_many_last_messages(last_messages);
+                                cx.notify();
+                            });
+                        }
                         cx.notify();
                     });
                 }
@@ -409,7 +396,7 @@ impl ChannelList {
     async fn fetch_clan_data(
         api: &AppApi,
         clan_id: ClanId,
-    ) -> anyhow::Result<(Vec<Category>, Vec<AppChannel>)> {
+    ) -> anyhow::Result<(Vec<Category>, Vec<AppChannel>, Vec<(ChannelId, MessageId)>)> {
         let (channels_res, categories_res, badges_res, voice_res, favorites_res, apps_res) = tokio::join!(
             api.list_channel_descs(clan_id.get(), 1),
             api.list_categories_typed(clan_id.get()),
@@ -470,6 +457,16 @@ impl ChannelList {
             })
             .collect();
 
+        let last_messages: Vec<(ChannelId, MessageId)> = api_channels
+            .iter()
+            .filter_map(|c| {
+                (c.last_sent_message_id > 0).then_some((
+                    ChannelId(c.channel_id),
+                    MessageId(c.last_sent_message_id),
+                ))
+            })
+            .collect();
+
         let mut channels: Vec<Channel> = api_channels
             .into_iter()
             .map(|c| {
@@ -485,6 +482,7 @@ impl ChannelList {
         Ok((
             assemble_with_favorites(categories, &favorite_ids, clan_id),
             app_channels,
+            last_messages,
         ))
     }
 
@@ -501,6 +499,7 @@ impl ChannelList {
         is_mention: bool,
         seen: bool,
         ts: i64,
+        message_id: MessageId,
         cx: &mut Context<Self>,
     ) {
         let mut visible_changed = false;
@@ -514,8 +513,14 @@ impl ChannelList {
             let was_badge_zero = ch.badge_count == 0;
             if ts > 0 {
                 ch.last_sent_timestamp = ts;
+                if !message_id.is_zero() {
+                    ch.last_sent_message_id = message_id;
+                }
                 if seen {
                     ch.last_seen_timestamp = ts;
+                    if !message_id.is_zero() {
+                        ch.last_seen_message_id = message_id;
+                    }
                 }
             }
             if is_mention && !seen {
@@ -540,6 +545,7 @@ impl ChannelList {
             became_read = ch.is_unread();
             ch.badge_count = 0;
             ch.last_seen_timestamp = ch.last_sent_timestamp;
+            ch.last_seen_message_id = ch.last_sent_message_id;
         }
         if became_read {
             self.notify_if_active(clan_id, cx);
@@ -552,6 +558,7 @@ impl ChannelList {
         channel_id: ChannelId,
         new_badge: u32,
         seen_ts: i64,
+        seen_message_id: MessageId,
         cx: &mut Context<Self>,
     ) {
         let mut visible_changed = false;
@@ -565,6 +572,9 @@ impl ChannelList {
             ch.badge_count = new_badge;
             if seen_ts > ch.last_seen_timestamp {
                 ch.last_seen_timestamp = seen_ts;
+            }
+            if !seen_message_id.is_zero() {
+                ch.last_seen_message_id = seen_message_id;
             }
             visible_changed = was_unread != ch.is_unread();
         }
@@ -591,7 +601,9 @@ impl ChannelList {
                         badge_count: 0,
                         muted: false,
                         parent_id: Some(ChannelId(e.parent_id)).filter(|c| !c.is_zero()),
+                        last_seen_message_id: MessageId(0),
                         last_seen_timestamp: 0,
+                        last_sent_message_id: MessageId(0),
                         last_sent_timestamp: 0,
                         voice_members: Vec::new(),
                         is_favorite: false,
@@ -721,7 +733,9 @@ impl ChannelList {
                     badge_count: 0,
                     muted: false,
                     parent_id: Some(ChannelId(desc.parent_id)).filter(|c| !c.is_zero()),
+                    last_seen_message_id: MessageId(0),
                     last_seen_timestamp: 0,
+                    last_sent_message_id: MessageId(0),
                     last_sent_timestamp: 0,
                     voice_members: Vec::new(),
                     is_favorite: false,
@@ -972,7 +986,9 @@ fn channel_from_desc(
         badge_count,
         muted: c.is_mute,
         parent_id: Some(ChannelId(c.parent_id)).filter(|p| !p.is_zero()),
+        last_seen_message_id: MessageId(c.last_seen_message_id),
         last_seen_timestamp: c.last_seen_timestamp,
+        last_sent_message_id: MessageId(c.last_sent_message_id),
         last_sent_timestamp: c.last_sent_timestamp,
         voice_members,
         is_favorite,
@@ -1281,7 +1297,9 @@ mod tests {
             badge_count: 0,
             muted: false,
             parent_id: None,
+            last_seen_message_id: MessageId(0),
             last_seen_timestamp: 0,
+            last_sent_message_id: MessageId(0),
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: false,
@@ -1477,16 +1495,10 @@ mod tests {
     }
 
     #[test]
-    fn message_precomputes_clock_and_day_labels() {
-        let msg = Message::new("1", "hi", "u", "User", 1_609_459_200 + 48_300);
-        assert_eq!(msg.timestamp_label, "1:25 PM");
-        assert_eq!(msg.day_label, "January 01, 2021");
-    }
-
-    #[test]
-    fn message_clock_label_handles_midnight() {
-        let msg = Message::new("1", "hi", "u", "User", 1_609_459_200);
-        assert_eq!(msg.timestamp_label, "12:00 AM");
+    fn message_precomputes_local_day_key() {
+        let ts = 1_609_459_200 + 48_300;
+        let msg = Message::new("1", "hi", "u", "User", ts);
+        assert_eq!(msg.day_label, crate::message_time::local_day_key(ts));
     }
 
     #[test]
@@ -1567,7 +1579,9 @@ mod tests {
             badge_count: 0,
             muted: false,
             parent_id: None,
+            last_seen_message_id: MessageId(0),
             last_seen_timestamp: 0,
+            last_sent_message_id: MessageId(0),
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: true,
@@ -1590,7 +1604,9 @@ mod tests {
                 badge_count: 0,
                 muted: false,
                 parent_id: None,
+                last_seen_message_id: MessageId(0),
                 last_seen_timestamp: 0,
+                last_sent_message_id: MessageId(0),
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: false,
@@ -1607,7 +1623,9 @@ mod tests {
                 badge_count: 0,
                 muted: false,
                 parent_id: None,
+                last_seen_message_id: MessageId(0),
                 last_seen_timestamp: 0,
+                last_sent_message_id: MessageId(0),
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: true,

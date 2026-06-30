@@ -1,8 +1,5 @@
 use crate::tls_crypto;
-use crate::{resolve_connect_port, socket_connect_label};
-use anyhow::{Context as _, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use rand::Rng as _;
+use anyhow::Result;
 use async_trait::async_trait;
 use prost::Message;
 use std::collections::HashMap;
@@ -102,9 +99,6 @@ const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 11;
 const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
 const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
-const WS_OPCODE_BINARY: u8 = 0x82;
-const LINK_ABRIDGED: u8 = 0;
-const LINK_WEBSOCKET: u8 = 1;
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
@@ -246,8 +240,6 @@ pub struct AbridgedTcpAdapter {
     handlers: Arc<Mutex<AdapterHandlers>>,
     is_connected: Arc<AtomicBool>,
     io_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// [`LINK_ABRIDGED`] (dev TCP port) vs [`LINK_WEBSOCKET`] (prod WSS on 443).
-    link_mode: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl AbridgedTcpAdapter {
@@ -257,12 +249,7 @@ impl AbridgedTcpAdapter {
             handlers: Arc::new(Mutex::new(AdapterHandlers::default())),
             is_connected: Arc::new(AtomicBool::new(false)),
             io_task: Arc::new(Mutex::new(None)),
-            link_mode: Arc::new(std::sync::atomic::AtomicU8::new(LINK_ABRIDGED)),
         }
-    }
-
-    fn uses_websocket(&self) -> bool {
-        self.link_mode.load(Ordering::Acquire) == LINK_WEBSOCKET
     }
 }
 
@@ -420,7 +407,6 @@ impl IoLoopState {
                     FrameStep::Reset(reason) => {
                         tracing::warn!("frame desync ({reason}), resetting read buffer");
                         buf.clear();
-                        drop(buf);
                         self.streams.lock().await.clear();
                         return Ok(());
                     }
@@ -608,107 +594,6 @@ impl AbridgedTcpAdapter {
     }
 }
 
-fn build_ws_handshake_request(host: &str, token: &str) -> Result<String> {
-    let ws_key = B64.encode(rand::rng().random::<[u8; 16]>());
-    let mut url =
-        url::Url::parse(&format!("https://{host}/")).context("invalid WebSocket host")?;
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.clear();
-        pairs.append_pair("lang", "en");
-        pairs.append_pair("status", "true");
-        pairs.append_pair("token", token);
-    }
-    let path = match url.query() {
-        Some(query) => format!("{}?{query}", url.path()),
-        None => url.path().to_string(),
-    };
-    Ok(format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Version: 13\r\n\
-         Sec-WebSocket-Key: {ws_key}\r\n\
-         \r\n"
-    ))
-}
-
-async fn perform_ws_upgrade(tls: &mut TlsStream, host: &str, token: &str) -> Result<()> {
-    let request = build_ws_handshake_request(host, token)?;
-    tracing::debug!("WebSocket upgrade request:\n{request}");
-    tls.write_all(request.as_bytes())
-        .await
-        .context("WebSocket upgrade write failed")?;
-    tls.flush().await.context("WebSocket upgrade flush failed")?;
-
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 4096];
-    loop {
-        let n = tls
-            .read(&mut tmp)
-            .await
-            .context("WebSocket upgrade read failed")?;
-        if n == 0 {
-            bail!("EOF during WebSocket upgrade");
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-        if buf.len() > 16_384 {
-            bail!("WebSocket upgrade response too large");
-        }
-    }
-
-    let response = String::from_utf8_lossy(&buf);
-    let status_line = response.lines().next().unwrap_or_default();
-    if !status_line.contains("101") {
-        bail!(
-            "WebSocket upgrade failed (expected 101): {}",
-            status_line.trim()
-        );
-    }
-    tracing::debug!("WebSocket upgrade OK: {}", status_line.trim());
-    Ok(())
-}
-
-fn ws_binary_frame(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len();
-    let mut frame = Vec::with_capacity(2 + len.min(8) + len);
-    frame.push(WS_OPCODE_BINARY);
-    if len < 126 {
-        frame.push(len as u8);
-    } else if len < 65_536 {
-        frame.push(126);
-        frame.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        frame.push(127);
-        frame.extend_from_slice(&(len as u64).to_be_bytes());
-    }
-    frame.extend_from_slice(payload);
-    frame
-}
-
-fn build_abridged_packet(message: &[u8]) -> Vec<u8> {
-    let padding_needed = (4 - (message.len() % 4)) % 4;
-    let mut final_payload = message.to_vec();
-    final_payload.extend(vec![0u8; padding_needed]);
-
-    let len_div4 = final_payload.len() / 4;
-    let header = if len_div4 < 127 {
-        vec![len_div4 as u8]
-    } else {
-        let mut h = vec![PREFIX_EXTENDED, 0, 0, 0];
-        h[1..4].copy_from_slice(&(len_div4 as u32).to_le_bytes()[..3]);
-        h
-    };
-
-    let mut packet = header;
-    packet.extend(&final_payload);
-    packet
-}
-
 fn frame_handshake(token: &str) -> Vec<u8> {
     let token_bytes = token.as_bytes();
     let padding = (4 - (token_bytes.len() % 4)) % 4;
@@ -732,40 +617,16 @@ impl Default for AbridgedTcpAdapter {
     }
 }
 
-fn resolve_tls_handshake<T>(
-    outcome: std::result::Result<std::io::Result<T>, tokio::time::error::Elapsed>,
-) -> Result<T> {
-    match outcome {
-        Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(e)) => Err(anyhow::anyhow!("TLS handshake failed: {e}")),
-        Err(_) => Err(anyhow::anyhow!("TLS handshake timed out after 15s")),
-    }
-}
-
 #[async_trait]
 impl TransportAdapter for AbridgedTcpAdapter {
-    async fn connect(&self, host: &str, port: Option<u16>, token: &str) -> Result<()> {
-        let use_websocket = port.is_none();
-        self.link_mode.store(
-            if use_websocket {
-                LINK_WEBSOCKET
-            } else {
-                LINK_ABRIDGED
-            },
-            Ordering::Release,
-        );
-
-        tracing::info!(
-            "=== CONNECT START: {} ===",
-            socket_connect_label(host, port)
-        );
+    async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()> {
+        tracing::info!("=== CONNECT START: {}:{} ===", host, port);
 
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let connect_port = resolve_connect_port(port);
-        let addr = format!("{host}:{connect_port}");
-        tracing::debug!("TCP connecting to {addr}...");
+        let addr = format!("{}:{}", host, port);
+        tracing::debug!("TCP connecting...");
         let tcp = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             TcpStream::connect(&addr),
@@ -782,18 +643,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
             .map_err(|e| anyhow::anyhow!("Invalid DNS name: {e}"))?;
 
         tracing::debug!("Starting TLS handshake...");
-        let mut tls = resolve_tls_handshake(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                connector.connect(domain, tcp),
-            )
-            .await,
-        )?;
+        let tls = connector
+            .connect(domain, tcp)
+            .await
+            .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
         tracing::debug!("TLS handshake complete");
-
-        if use_websocket {
-            perform_ws_upgrade(&mut tls, host, token).await?;
-        }
 
         let (ready_tx, ready_rx) = oneshot::channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
@@ -822,15 +676,13 @@ impl TransportAdapter for AbridgedTcpAdapter {
         tracing::info!("I/O loop confirmed READY");
         *self.io_task.lock().await = Some(task);
 
-        if !use_websocket {
-            let handshake = frame_handshake(token);
-            tracing::debug!("Sending abridged TCP handshake");
-            write_tx
-                .send(handshake)
-                .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
-        } else {
-            tracing::debug!("WebSocket auth via query token — no abridged handshake");
-        }
+        let handshake = frame_handshake(token);
+
+        tracing::debug!("Sending handshake");
+        write_tx
+            .send(handshake)
+            .map_err(|_| anyhow::anyhow!("Write channel closed early"))?;
+        tracing::debug!("Handshake queued via mpsc channel");
 
         *self.write_tx.lock().await = Some(write_tx);
         self.is_connected.store(true, Ordering::Release);
@@ -867,18 +719,30 @@ impl TransportAdapter for AbridgedTcpAdapter {
         }
         tracing::trace!("Connection is open");
 
-        let packet = if self.uses_websocket() {
-            ws_binary_frame(&message)
-        } else {
-            build_abridged_packet(&message)
-        };
+        let padding_needed = (4 - (message.len() % 4)) % 4;
+        let mut final_payload = message;
+        final_payload.extend(vec![0u8; padding_needed]);
         tracing::trace!(
-            "Outbound {} frame: {} bytes {:02x?}",
-            if self.uses_websocket() {
-                "WebSocket"
-            } else {
-                "abridged"
-            },
+            "Padded to {} bytes (+{} padding)",
+            final_payload.len(),
+            padding_needed
+        );
+
+        let len_div4 = final_payload.len() / 4;
+        let header = if len_div4 < 127 {
+            tracing::trace!("Abridged header: 1-byte ({})", len_div4);
+            vec![len_div4 as u8]
+        } else {
+            let mut h = vec![PREFIX_EXTENDED, 0, 0, 0];
+            h[1..4].copy_from_slice(&(len_div4 as u32).to_le_bytes()[..3]);
+            tracing::trace!("Abridged header: 4-byte extended ({})", len_div4);
+            h
+        };
+
+        let mut packet = header;
+        packet.extend(&final_payload);
+        tracing::trace!(
+            "Full abridged packet: {} bytes {:02x?}",
             packet.len(),
             &packet[..packet.len().min(64)]
         );
@@ -906,16 +770,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
             return Err(anyhow::anyhow!("Connection is not open"));
         }
         let mut buffer = vec![0x00];
-        buffer.extend_from_slice(&cid.to_be_bytes());
-        let packet = if self.uses_websocket() {
-            ws_binary_frame(&buffer)
-        } else {
-            buffer
-        };
+        buffer.extend(&cid.to_be_bytes());
         let guard = self.write_tx.lock().await;
         match *guard {
             Some(ref tx) => tx
-                .send(packet)
+                .send(buffer)
                 .map_err(|_| anyhow::anyhow!("Write channel closed"))?,
             None => return Err(anyhow::anyhow!("Write channel not available")),
         }
@@ -953,31 +812,6 @@ impl TransportAdapter for AbridgedTcpAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn tls_handshake_timeout_maps_to_error() {
-        let elapsed = tokio::time::timeout(
-            std::time::Duration::from_millis(1),
-            std::future::pending::<std::io::Result<()>>(),
-        )
-        .await
-        .expect_err("future should time out");
-        let err = resolve_tls_handshake::<()>(Err(elapsed)).expect_err("should be an error");
-        assert!(err.to_string().contains("timed out after 15s"));
-    }
-
-    #[test]
-    fn tls_handshake_io_error_maps_to_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
-        let err = resolve_tls_handshake::<()>(Ok(Err(io_err))).expect_err("should be an error");
-        assert!(err.to_string().contains("TLS handshake failed"));
-    }
-
-    #[test]
-    fn tls_handshake_success_passes_through() {
-        let stream = resolve_tls_handshake::<u8>(Ok(Ok(7))).expect("should pass through");
-        assert_eq!(stream, 7);
-    }
 
     #[test]
     fn delimits_ack_body_before_next_frame() {
@@ -1118,22 +952,6 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].0, 8);
         assert_eq!(received[0].2, body);
-    }
-
-    #[test]
-    fn ws_binary_frame_short_payload() {
-        let frame = ws_binary_frame(b"abc");
-        assert_eq!(frame, vec![0x82, 3, b'a', b'b', b'c']);
-    }
-
-    #[test]
-    fn ws_handshake_request_includes_ws_path_and_token() {
-        let req = build_ws_handshake_request("sock.mezon.ai", "tok/en+test").unwrap();
-        assert!(req.starts_with("GET /?"));
-        assert!(!req.starts_with("GET /ws"));
-        assert!(req.contains("Host: sock.mezon.ai"));
-        assert!(req.contains("Upgrade: websocket"));
-        assert!(req.contains("token=tok%2Fen%2Btest") || req.contains("token=tok/en+test"));
     }
 
     #[test]

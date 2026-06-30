@@ -354,10 +354,6 @@ impl AppConfig {
         cx.try_global::<GlobalAppConfig>().map(|g| g.0.as_ref())
     }
 
-    pub fn is_dev_imgproxy(&self) -> bool {
-        self.imgproxy_base_url.contains("dev-imgproxy")
-    }
-
     pub fn imgproxy_url(
         &self,
         source_image_url: &str,
@@ -373,9 +369,6 @@ impl AppConfig {
         {
             return source_image_url.to_string();
         }
-        if self.is_dev_imgproxy() {
-            return source_image_url.to_string();
-        }
         let processing_options = format!("rs:{}:{}:{}:1/mb:2097152", resize_type, width, height);
         let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
         let base = self.imgproxy_base_url.trim_end_matches('/');
@@ -383,7 +376,7 @@ impl AppConfig {
     }
 
     pub fn avatar_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 100, 100, "fill")
+        self.imgproxy_url(source, 100, 100, "fit")
     }
 
     pub fn profile_proxy(&self, source: &str) -> String {
@@ -400,8 +393,8 @@ impl AppConfig {
         if source.is_empty() {
             return (String::new(), display_w, display_h);
         }
-        let proxy_w = (display_w * 2.0).ceil().max(1.0) as u32;
-        let proxy_h = (display_h * 2.0).ceil().max(1.0) as u32;
+        let proxy_w = display_w.ceil().max(1.0) as u32;
+        let proxy_h = display_h.ceil().max(1.0) as u32;
         let resize = if real_width == 0 || real_height == 0 {
             "fill"
         } else if real_width < proxy_w || real_height < proxy_h {
@@ -417,17 +410,96 @@ impl AppConfig {
     }
 }
 
-pub const ATTACHMENT_MAX_W: f32 = 400.0;
-pub const ATTACHMENT_MAX_H: f32 = 300.0;
+pub const REM: f32 = 16.0;
+const SMALL_IMAGE_THRESHOLD: f32 = 12.0;
+const MIN_MESSAGE_LENGTH_FOR_BLUR: usize = 40;
+const MIN_MEDIA_WIDTH_WITH_TEXT: f32 = 20.0 * REM;
+const MIN_MEDIA_WIDTH: f32 = SMALL_IMAGE_THRESHOLD * REM;
+const MIN_MEDIA_HEIGHT: f32 = 5.0 * REM;
+const MESSAGE_MAX_WIDTH_REM: f32 = 29.0;
+const MESSAGE_OWN_MAX_WIDTH_REM: f32 = 30.0;
+const AVAILABLE_HEIGHT_REM: f32 = 27.0;
+const DEFAULT_MEDIA_SIDE: f32 = 100.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MediaDimensions {
+    pub width: f32,
+    pub height: f32,
+    pub is_small: bool,
+}
+
+pub fn media_available_width(is_own: bool) -> f32 {
+    let rem = if is_own {
+        MESSAGE_OWN_MAX_WIDTH_REM
+    } else {
+        MESSAGE_MAX_WIDTH_REM
+    };
+    rem * REM
+}
+
+fn fit_within_box(
+    available_width: f32,
+    available_height: f32,
+    media_width: f32,
+    media_height: f32,
+) -> (f32, f32) {
+    let aspect_ratio = media_height / media_width;
+    let calculated_width = media_width.min(available_width);
+    let calculated_height = (calculated_width * aspect_ratio).round();
+    if calculated_height > available_height {
+        ((available_height / aspect_ratio).round(), available_height)
+    } else {
+        (calculated_width, calculated_height)
+    }
+}
+
+fn min_media_width_for_text(message_text_len: usize) -> f32 {
+    if message_text_len > MIN_MESSAGE_LENGTH_FOR_BLUR {
+        MIN_MEDIA_WIDTH_WITH_TEXT
+    } else {
+        MIN_MEDIA_WIDTH
+    }
+}
+
+pub fn calculate_media_dimensions(
+    real_width: u32,
+    real_height: u32,
+    is_own: bool,
+    message_text_len: usize,
+) -> MediaDimensions {
+    let (base_width, base_height) = if real_width == 0 || real_height == 0 {
+        (DEFAULT_MEDIA_SIDE, DEFAULT_MEDIA_SIDE)
+    } else {
+        (real_width as f32, real_height as f32)
+    };
+    let (width, height) = fit_within_box(
+        media_available_width(is_own),
+        AVAILABLE_HEIGHT_REM * REM,
+        base_width,
+        base_height,
+    );
+    let min_width = min_media_width_for_text(message_text_len);
+    let mut stretch_factor = 1.0;
+    if width < min_width && (min_width - width) < SMALL_IMAGE_THRESHOLD {
+        stretch_factor = min_width / width;
+    }
+    if height * stretch_factor < MIN_MEDIA_HEIGHT
+        && (MIN_MEDIA_HEIGHT - height * stretch_factor) < SMALL_IMAGE_THRESHOLD
+    {
+        stretch_factor = MIN_MEDIA_HEIGHT / height;
+    }
+    let final_width = (width * stretch_factor).round();
+    let final_height = (height * stretch_factor).round();
+    MediaDimensions {
+        width: final_width,
+        height: final_height,
+        is_small: final_width < min_width || final_height < MIN_MEDIA_HEIGHT,
+    }
+}
 
 pub fn attachment_display_dimensions(real_width: u32, real_height: u32) -> (f32, f32) {
-    let w = real_width as f32;
-    let h = real_height as f32;
-    if w <= 0.0 || h <= 0.0 {
-        return (280.0, 150.0);
-    }
-    let scale = (ATTACHMENT_MAX_W / w).min(ATTACHMENT_MAX_H / h).min(1.0);
-    (w * scale, h * scale)
+    let dimensions = calculate_media_dimensions(real_width, real_height, false, 0);
+    (dimensions.width, dimensions.height)
 }
 
 struct GlobalAppConfig(Arc<AppConfig>);
@@ -469,6 +541,42 @@ fn opt_bool(value: Option<&'static str>, default: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dims(w: u32, h: u32) -> (f32, f32, bool) {
+        let d = calculate_media_dimensions(w, h, false, 0);
+        (d.width, d.height, d.is_small)
+    }
+
+    #[test]
+    fn media_dimensions_landscape_caps_to_available_width() {
+        assert_eq!(dims(800, 600), (464.0, 348.0, false));
+    }
+
+    #[test]
+    fn media_dimensions_own_message_uses_wider_box() {
+        let d = calculate_media_dimensions(800, 600, true, 0);
+        assert_eq!((d.width, d.height), (480.0, 360.0));
+    }
+
+    #[test]
+    fn media_dimensions_tall_image_is_small() {
+        assert_eq!(dims(100, 400), (100.0, 400.0, true));
+    }
+
+    #[test]
+    fn media_dimensions_panorama_caps_height_band() {
+        assert_eq!(dims(2000, 100), (464.0, 23.0, true));
+    }
+
+    #[test]
+    fn media_dimensions_small_image_min_stretch() {
+        assert_eq!(dims(185, 75), (197.0, 80.0, false));
+    }
+
+    #[test]
+    fn media_dimensions_unknown_defaults_to_hundred_square() {
+        assert_eq!(dims(0, 0), (100.0, 100.0, true));
+    }
 
     #[test]
     fn dev_defaults_match_legacy_constants() {
@@ -526,15 +634,50 @@ mod tests {
     }
 
     #[test]
-    fn imgproxy_url_skips_dev_proxy() {
+    fn imgproxy_url_proxies_cdn_on_dev_base() {
         let cfg = AppConfig::dev_defaults();
         let src = "https://cdn.mezon.ai/images/avatar.png";
-        assert_eq!(cfg.imgproxy_url(src, 100, 100, "fit"), src);
+        let out = cfg.imgproxy_url(src, 100, 100, "fit");
+        assert!(out.starts_with("https://dev-imgproxy.nccsoft.vn/"));
+        assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
+        assert!(out.contains(src));
+        assert!(out.ends_with("@webp"));
     }
 
     #[test]
     fn imgproxy_url_empty_returns_empty() {
         let cfg = AppConfig::dev_defaults();
         assert_eq!(cfg.imgproxy_url("", 100, 100, "fit"), "");
+    }
+
+    #[test]
+    fn avatar_proxy_matches_react_fit_100() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let out = cfg.avatar_proxy("https://cdn.mezon.ai/a.png");
+        assert!(
+            out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
+            "avatar must be 100x100 fit like React MessageAvatar: {out}"
+        );
+    }
+
+    #[test]
+    fn attachment_proxy_uses_one_x_display_dims_like_react() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = "https://cdn.mezon.ai/images/photo.png";
+        let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
+        let pw = display_w.ceil() as u32;
+        let ph = display_h.ceil() as u32;
+        assert!(
+            url.contains(&format!("rs:fill:{pw}:{ph}:1/mb:2097152/plain/")),
+            "attachment proxy must be 1x display dims like React Photo.tsx: {url}"
+        );
     }
 }

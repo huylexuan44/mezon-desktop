@@ -1,5 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use futures::future::{AbortHandle, Abortable};
 use futures::{AsyncReadExt as _, FutureExt};
@@ -32,6 +34,26 @@ pub const AVATAR_ENTRY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const SHARED_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+const GRACE_PERIOD: Duration = Duration::from_secs(2);
+const STATS_LOG_INTERVAL: u64 = 600;
+const MESSAGE_ANIMATION_MAX_PX: u32 = 400;
+
+#[derive(Default)]
+struct CacheMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ImageCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub current_bytes: u64,
+    pub items: usize,
+}
+
 struct CacheEntry {
     item: ImageCacheItem,
     abort: AbortHandle,
@@ -39,6 +61,7 @@ struct CacheEntry {
     bytes: Option<u64>,
     /// The sweep epoch in which this entry was last requested.
     touched_epoch: u64,
+    last_used: Instant,
 }
 
 /// Sum of the decoded byte size across all frames of an image.
@@ -47,6 +70,10 @@ fn image_bytes(image: &RenderImage) -> u64 {
         .filter_map(|frame| image.as_bytes(frame))
         .map(|buf| buf.len() as u64)
         .sum()
+}
+
+fn entry_is_stale(touched_epoch: u64, epoch: u64, age: Duration, grace: Duration) -> bool {
+    touched_epoch != epoch && age > grace
 }
 
 /// An LRU image cache bounded by both an item count and a decoded-byte budget.
@@ -66,6 +93,7 @@ enum LoaderKind {
     /// Decodes only the first frame and downscales to avatar size, so even an
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
     AvatarThumbnail,
+    Message,
 }
 
 pub struct LruImageCache {
@@ -80,6 +108,8 @@ pub struct LruImageCache {
     max_entry_bytes: u64,
     total_bytes: u64,
     epoch: u64,
+    sweeps: u64,
+    metrics: CacheMetrics,
     cache: IndexMap<u64, CacheEntry>,
 }
 
@@ -124,6 +154,23 @@ impl LruImageCache {
         )
     }
 
+    pub fn message(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::Message,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
     fn with_loader(
         label: &'static str,
         loader: LoaderKind,
@@ -152,7 +199,19 @@ impl LruImageCache {
             max_entry_bytes,
             total_bytes: 0,
             epoch: 0,
+            sweeps: 0,
+            metrics: CacheMetrics::default(),
             cache: IndexMap::with_capacity(max_items),
+        }
+    }
+
+    pub fn stats(&self) -> ImageCacheStats {
+        ImageCacheStats {
+            hits: self.metrics.hits.load(Ordering::Relaxed),
+            misses: self.metrics.misses.load(Ordering::Relaxed),
+            evictions: self.metrics.evictions.load(Ordering::Relaxed),
+            current_bytes: self.total_bytes,
+            items: self.cache.len(),
         }
     }
 
@@ -175,12 +234,20 @@ impl LruImageCache {
         let stale: Vec<u64> = self
             .cache
             .iter()
-            .filter(|(_, entry)| entry.touched_epoch != epoch)
+            .filter(|(_, entry)| {
+                entry_is_stale(
+                    entry.touched_epoch,
+                    epoch,
+                    entry.last_used.elapsed(),
+                    GRACE_PERIOD,
+                )
+            })
             .map(|(key, _)| *key)
             .collect();
         for key in stale {
             if let Some(mut entry) = self.cache.shift_remove(&key) {
                 entry.abort.abort();
+                self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
                 if let Some(bytes) = entry.bytes {
                     self.total_bytes = self.total_bytes.saturating_sub(bytes);
                 }
@@ -190,6 +257,36 @@ impl LruImageCache {
             }
         }
         self.epoch = self.epoch.wrapping_add(1);
+        self.sweeps = self.sweeps.wrapping_add(1);
+        if self.sweeps.is_multiple_of(STATS_LOG_INTERVAL) {
+            let stats = self.stats();
+            tracing::debug!(
+                label = self.label,
+                instance = self.instance,
+                hits = stats.hits,
+                misses = stats.misses,
+                evictions = stats.evictions,
+                current_bytes = stats.current_bytes,
+                items = stats.items,
+                "image cache stats"
+            );
+        }
+    }
+
+    pub fn shrink_to(&mut self, max_bytes: u64, window: &mut Window, cx: &mut App) {
+        while self.total_bytes > max_bytes {
+            let Some((_, mut evicted)) = self.cache.shift_remove_index(0) else {
+                break;
+            };
+            evicted.abort.abort();
+            self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
+            if let Some(bytes) = evicted.bytes {
+                self.total_bytes = self.total_bytes.saturating_sub(bytes);
+            }
+            if let Some(Ok(image)) = evicted.item.get() {
+                cx.drop_image(image, Some(window));
+            }
+        }
     }
 
     /// Evict least-recently-used entries until both the item-count and
@@ -203,6 +300,7 @@ impl LruImageCache {
                 break;
             };
             evicted.abort.abort();
+            self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
             if let Some(bytes) = evicted.bytes {
                 self.total_bytes = self.total_bytes.saturating_sub(bytes);
             }
@@ -222,6 +320,7 @@ impl LruImageCache {
 
         if let Some(entry) = self.cache.shift_remove(&hash) {
             self.cache.insert(hash, entry);
+            self.metrics.hits.fetch_add(1, Ordering::Relaxed);
 
             enum Measured {
                 /// Nothing new to account for (already measured, or still loading).
@@ -236,6 +335,7 @@ impl LruImageCache {
             let (res, measured) = {
                 let entry = self.cache.get_mut(&hash).expect("just re-inserted");
                 entry.touched_epoch = self.epoch;
+                entry.last_used = Instant::now();
                 let res = entry.item.get();
                 let measured = if entry.bytes.is_none()
                     && let Some(Ok(image)) = res.as_ref()
@@ -278,13 +378,17 @@ impl LruImageCache {
             }
         }
 
-        let fut = match self.loader {
+        self.metrics.misses.fetch_add(1, Ordering::Relaxed);
+        let loader = match self.loader {
             LoaderKind::Full => AssetLogger::<ImageAssetLoader>::load(resource.clone(), cx).boxed(),
             LoaderKind::AvatarThumbnail => {
                 AssetLogger::<AvatarImageLoader>::load(resource.clone(), cx).boxed()
             }
+            LoaderKind::Message => {
+                AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
+            }
         };
-        let task = cx.background_executor().spawn(fut).shared();
+        let task = cx.background_executor().spawn(loader).shared();
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
 
         self.cache.insert(
@@ -294,6 +398,7 @@ impl LruImageCache {
                 abort: abort_handle,
                 bytes: None,
                 touched_epoch: self.epoch,
+                last_used: Instant::now(),
             },
         );
         self.evict_to_budget(window, cx);
@@ -413,5 +518,196 @@ impl Asset for AvatarImageLoader {
                     .map_err(Into::into)
             }
         }
+    }
+}
+
+fn downscale_dimensions(width: u32, height: u32, max_px: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    if longest == 0 || longest <= max_px {
+        (width.max(1), height.max(1))
+    } else {
+        let scale = max_px as f32 / longest as f32;
+        (
+            ((width as f32 * scale).round() as u32).max(1),
+            ((height as f32 * scale).round() as u32).max(1),
+        )
+    }
+}
+
+fn full_resolution_bgra_frame(decoded: image::DynamicImage) -> image::Frame {
+    let mut data = decoded.into_rgba8();
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    image::Frame::new(data)
+}
+
+fn downscaled_animation_frames<I>(
+    frames: I,
+    max_px: u32,
+) -> Result<Vec<image::Frame>, ImageCacheError>
+where
+    I: Iterator<Item = image::ImageResult<image::Frame>>,
+{
+    let mut out: Vec<image::Frame> = Vec::new();
+    let mut target: Option<(u32, u32)> = None;
+    for frame in frames {
+        let frame = frame?;
+        let delay = frame.delay();
+        let buffer = frame.into_buffer();
+        let (tw, th) = *target
+            .get_or_insert_with(|| downscale_dimensions(buffer.width(), buffer.height(), max_px));
+        let mut buffer = if buffer.width() == tw && buffer.height() == th {
+            buffer
+        } else {
+            image::imageops::resize(&buffer, tw, th, image::imageops::FilterType::Triangle)
+        };
+        for pixel in buffer.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        out.push(image::Frame::from_parts(buffer, 0, 0, delay));
+    }
+    if out.is_empty() {
+        return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
+            "animation decoded to zero frames"
+        ))));
+    }
+    Ok(out)
+}
+
+fn decode_message_image(
+    bytes: &[u8],
+    animation_max_px: u32,
+) -> Result<Arc<RenderImage>, ImageCacheError> {
+    use image::AnimationDecoder as _;
+    let format = image::guess_format(bytes)?;
+    let frames = match format {
+        image::ImageFormat::Gif => {
+            let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+            downscaled_animation_frames(decoder.into_frames(), animation_max_px)?
+        }
+        image::ImageFormat::WebP => {
+            let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+            if decoder.has_animation() {
+                downscaled_animation_frames(decoder.into_frames(), animation_max_px)?
+            } else {
+                vec![full_resolution_bgra_frame(image::DynamicImage::from_decoder(
+                    decoder,
+                )?)]
+            }
+        }
+        _ => vec![full_resolution_bgra_frame(
+            image::load_from_memory_with_format(bytes, format)?,
+        )],
+    };
+    Ok(Arc::new(RenderImage::new(frames)))
+}
+
+/// An [`Asset`] loader for message attachments. Animated GIF/WebP are decoded at
+/// every frame so they still animate, but each frame is downscaled to at most
+/// [`MESSAGE_ANIMATION_MAX_PX`], so a long high-resolution animation cannot
+/// expand to hundreds of MB of decoded BGRA. Static images keep full resolution.
+pub enum MessageImageLoader {}
+
+impl Asset for MessageImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        let client = cx.http_client();
+        let svg_renderer = cx.svg_renderer();
+        let asset_source = cx.asset_source().clone();
+        async move {
+            let bytes = match source.clone() {
+                Resource::Path(uri) => std::fs::read(uri.as_ref())?,
+                Resource::Uri(uri) => {
+                    use anyhow::Context as _;
+
+                    let mut response = client
+                        .get(uri.as_ref(), ().into(), true)
+                        .await
+                        .with_context(|| format!("loading image from {uri:?}"))?;
+                    let mut body = Vec::new();
+                    response.body_mut().read_to_end(&mut body).await?;
+                    if !response.status().is_success() {
+                        let mut body = String::from_utf8_lossy(&body).into_owned();
+                        let first_line = body.lines().next().unwrap_or("").trim_end();
+                        body.truncate(first_line.len());
+                        return Err(ImageCacheError::BadStatus {
+                            uri,
+                            status: response.status(),
+                            body,
+                        });
+                    }
+                    body
+                }
+                Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
+                    Some(data) => data.to_vec(),
+                    None => {
+                        return Err(ImageCacheError::Asset(
+                            format!("Embedded resource not found: {path}").into(),
+                        ));
+                    }
+                },
+            };
+
+            if image::guess_format(&bytes).is_ok() {
+                decode_message_image(&bytes, MESSAGE_ANIMATION_MAX_PX)
+            } else {
+                svg_renderer
+                    .render_single_frame(&bytes, 1.0)
+                    .map_err(Into::into)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touched_this_epoch_is_never_stale() {
+        assert!(!entry_is_stale(
+            7,
+            7,
+            GRACE_PERIOD + Duration::from_secs(5),
+            GRACE_PERIOD
+        ));
+    }
+
+    #[test]
+    fn untouched_within_grace_window_is_kept() {
+        assert!(!entry_is_stale(6, 7, GRACE_PERIOD / 2, GRACE_PERIOD));
+    }
+
+    #[test]
+    fn untouched_past_grace_window_is_evicted() {
+        assert!(entry_is_stale(
+            6,
+            7,
+            GRACE_PERIOD + Duration::from_millis(1),
+            GRACE_PERIOD
+        ));
+    }
+
+    #[test]
+    fn downscale_keeps_images_within_cap_unchanged() {
+        assert_eq!(downscale_dimensions(300, 200, 400), (300, 200));
+        assert_eq!(downscale_dimensions(400, 400, 400), (400, 400));
+    }
+
+    #[test]
+    fn downscale_shrinks_oversized_preserving_aspect() {
+        assert_eq!(downscale_dimensions(800, 400, 400), (400, 200));
+        assert_eq!(downscale_dimensions(498, 498, 400), (400, 400));
+    }
+
+    #[test]
+    fn downscale_handles_zero_dimension() {
+        assert_eq!(downscale_dimensions(0, 0, 400), (1, 1));
     }
 }

@@ -3,10 +3,14 @@
 //! (which mirrors `channel.slice`) so message logic does not leak into the
 //! channel module.
 
+use std::sync::Arc;
+
 use gpui::SharedString;
 use mezon_client::transport::{ApiMessageContent, ApiMessageReaction, ContentToken};
 
+use crate::album_layout::AlbumLayout;
 use crate::ids::{MessageId, UserId};
+use crate::message_time::local_day_key;
 
 #[derive(Debug, Clone, Default)]
 pub struct MessageAttachment {
@@ -15,9 +19,13 @@ pub struct MessageAttachment {
     pub filetype: String,
     pub width: u32,
     pub height: u32,
+    pub thumbnail: String,
+    pub duration: i32,
     pub proxied_src: SharedString,
+    pub thumbnail_proxied: SharedString,
     pub display_width: f32,
     pub display_height: f32,
+    pub tenor_mp4: Option<SharedString>,
 }
 
 impl MessageAttachment {
@@ -33,6 +41,41 @@ impl MessageAttachment {
                 Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif")
             )
     }
+
+    pub fn is_video(&self) -> bool {
+        ((self.filetype.contains("video/mp4") || self.filetype.contains("video/quicktime"))
+            && !self.url.contains("tenor.com"))
+            || (self.filetype.starts_with("video") && !self.filetype.ends_with("vnd.dlna.mpeg-tts"))
+    }
+
+    pub fn is_unsupported_media(&self) -> bool {
+        matches!(
+            self.filetype.as_str(),
+            "video/x-ms-wmv"
+                | "video/wmv"
+                | "video/avi"
+                | "video/flv"
+                | "video/mkv"
+                | "video/rmvb"
+                | "audio/wma"
+                | "audio/ra"
+                | "audio/atrac"
+                | "image/tiff"
+                | "image/bmp"
+                | "image/psd"
+        )
+    }
+}
+
+pub fn tenor_mp4_url(gif_url: &str) -> Option<String> {
+    let rest = gif_url.strip_prefix("https://media.tenor.com/")?;
+    let (media_id, name) = rest.split_once('/')?;
+    let name = name.strip_suffix(".gif")?;
+    if media_id.len() != 16 || !media_id.is_ascii() || name.is_empty() {
+        return None;
+    }
+    let content_id = &media_id[..11];
+    Some(format!("https://media.tenor.com/{content_id}AAAPo/{name}.mp4"))
 }
 
 /// Message type/category, mirroring React `TypeMessage`. Drives how a row is
@@ -98,6 +141,19 @@ impl MessageCode {
                 | MessageCode::AuditLog
         )
     }
+
+    /// Rows rendered by React `MessageWithUser` (eligible for `isCombine`).
+    pub fn is_user_timeline(self) -> bool {
+        !matches!(
+            self,
+            MessageCode::Indicator
+                | MessageCode::Typing
+                | MessageCode::ChatUpdate
+                | MessageCode::ChatRemove
+                | MessageCode::UpdateEphemeralMsg
+                | MessageCode::DeleteEphemeralMsg
+        ) && !self.is_system()
+    }
 }
 
 /// A reply/reference shown above a message ("replying to …").
@@ -154,6 +210,8 @@ pub enum MessageSpan {
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
+    /// Stable GPUI row key — kept at the optimistic temp id through ack reconcile.
+    pub row_anchor_id: MessageId,
     pub content: String,
     pub sender_id: String,
     pub sender_user_id: Option<UserId>,
@@ -162,7 +220,6 @@ pub struct Message {
     pub avatar_proxied: SharedString,
     pub create_time: i64,
     pub update_time: i64,
-    pub timestamp_label: String,
     pub day_label: String,
     pub code: MessageCode,
     pub is_edited: bool,
@@ -172,23 +229,67 @@ pub struct Message {
     pub references: Vec<MessageReference>,
     pub reactions: Vec<Reaction>,
     pub attachments: Vec<MessageAttachment>,
+    pub album_layout: Option<AlbumLayout>,
+    pub viewer_media: Arc<[ViewerMedia]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewerMedia {
+    pub url: SharedString,
+    pub filename: SharedString,
+    pub viewer_src: SharedString,
 }
 
 pub const COMBINE_TIME_WINDOW: i64 = 600;
 
+/// Whether two rows are from the same author (React `message.user.id` parity).
+/// Treats ack rows with `sender_id == "0"` as matching when the resolved user id agrees.
+pub fn same_message_sender(a: &Message, b: &Message) -> bool {
+    if let (Some(au), Some(bu)) = (resolved_sender_user_id(a), resolved_sender_user_id(b)) {
+        if au == bu {
+            return true;
+        }
+    }
+    let a_id = a.sender_id.as_str();
+    let b_id = b.sender_id.as_str();
+    !a_id.is_empty() && a_id != "0" && !b_id.is_empty() && b_id != "0" && a_id == b_id
+}
+
+fn resolved_sender_user_id(m: &Message) -> Option<UserId> {
+    if let Some(uid) = m.sender_user_id.filter(|u| u.0 != 0) {
+        return Some(uid);
+    }
+    if m.sender_id.is_empty() || m.sender_id == "0" {
+        return None;
+    }
+    m.sender_id
+        .parse::<i64>()
+        .ok()
+        .filter(|&id| id != 0)
+        .map(UserId)
+}
+
+/// Mirrors React `ChannelMessage.tsx` `isCombine` against the immediate previous row.
 pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool {
-    if msg.code != MessageCode::Chat || !msg.references.is_empty() {
+    if !msg.code.is_user_timeline() {
         return false;
     }
-    match prev {
-        Some(prev) => {
-            prev.code == MessageCode::Chat
-                && prev.sender_id == msg.sender_id
-                && prev.day_label == msg.day_label
-                && (msg.create_time - prev.create_time).abs() < COMBINE_TIME_WINDOW
-        }
-        None => false,
+    let Some(prev) = prev else {
+        return false;
+    };
+    if !prev.code.is_user_timeline() {
+        return false;
     }
+    if msg.create_time == 0 {
+        return false;
+    }
+    let delta = msg.create_time - prev.create_time;
+    same_message_sender(prev, msg) && delta < COMBINE_TIME_WINDOW
+}
+
+/// Mirrors React `MessageWithUser` `showMessageHead`.
+pub fn should_show_message_head(msg: &Message, is_combine: bool) -> bool {
+    !msg.references.is_empty() || !is_combine
 }
 
 /// Aggregate raw per-user reaction entries into per-emoji totals (cf. React
@@ -447,6 +548,7 @@ impl Message {
         let sender_user_id = sender_id.parse::<i64>().ok().map(UserId);
         Self {
             id,
+            row_anchor_id: id,
             content,
             sender_id,
             sender_user_id,
@@ -455,8 +557,7 @@ impl Message {
             avatar_proxied: SharedString::default(),
             create_time,
             update_time: 0,
-            timestamp_label: format_clock(create_time),
-            day_label: format_day(create_time),
+            day_label: local_day_key(create_time),
             code: MessageCode::Chat,
             is_edited: false,
             is_forwarded: false,
@@ -465,11 +566,23 @@ impl Message {
             references: Vec::new(),
             reactions: Vec::new(),
             attachments: Vec::new(),
+            album_layout: None,
+            viewer_media: Vec::new().into(),
         }
     }
 
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
+        self
+    }
+
+    pub fn with_media_presentation(
+        mut self,
+        album_layout: Option<AlbumLayout>,
+        viewer_media: Arc<[ViewerMedia]>,
+    ) -> Self {
+        self.album_layout = album_layout;
+        self.viewer_media = viewer_media;
         self
     }
 
@@ -513,27 +626,6 @@ impl Message {
         self.avatar_proxied = proxied.into();
         self
     }
-}
-
-fn format_clock(ts: i64) -> String {
-    let seconds_since_midnight = ts.rem_euclid(86_400);
-    let hours = seconds_since_midnight / 3600;
-    let minutes = (seconds_since_midnight % 3600) / 60;
-    let period = if hours >= 12 { "PM" } else { "AM" };
-    let display_hour = if hours == 0 {
-        12
-    } else if hours > 12 {
-        hours - 12
-    } else {
-        hours
-    };
-    format!("{display_hour}:{minutes:02} {period}")
-}
-
-fn format_day(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.format("%B %d, %Y").to_string())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -661,16 +753,127 @@ mod tests {
     }
 
     #[test]
-    fn message_precomputes_clock_and_day_labels() {
-        let msg = Message::new(MessageId(1), "hi", "u", "User", 1_609_459_200 + 48_300);
-        assert_eq!(msg.timestamp_label, "1:25 PM");
-        assert_eq!(msg.day_label, "January 01, 2021");
+    fn same_sender_matches_via_sender_user_id_when_ack_sender_id_is_zero() {
+        let mut ack = Message::new(MessageId(1), "a", "0", "U1", 100);
+        ack.sender_user_id = Some(UserId(42));
+        let mut next = Message::new(MessageId(2), "b", "42", "U1", 105);
+        next.sender_user_id = Some(UserId(42));
+        assert!(same_message_sender(&ack, &next));
+        assert!(message_combined_with_prev(Some(&ack), &next));
     }
 
     #[test]
-    fn message_clock_label_handles_midnight() {
-        let msg = Message::new(MessageId(1), "hi", "u", "User", 1_609_459_200);
-        assert_eq!(msg.timestamp_label, "12:00 AM");
+    fn reply_message_still_shows_head_when_combined() {
+        let prev = Message::new(MessageId(1), "a", "u1", "U1", 100);
+        let mut reply = Message::new(MessageId(2), "b", "u1", "U1", 110);
+        reply.references.push(MessageReference::default());
+        assert!(message_combined_with_prev(Some(&prev), &reply));
+        assert!(should_show_message_head(&reply, true));
+    }
+
+    #[test]
+    fn topic_message_can_combine_with_chat() {
+        let prev = Message::new(MessageId(1), "a", "u1", "U1", 100);
+        let mut topic = Message::new(MessageId(2), "b", "u1", "U1", 110);
+        topic.code = MessageCode::Topic;
+        assert!(message_combined_with_prev(Some(&prev), &topic));
+    }
+
+    #[test]
+    fn ack_server_time_ahead_of_next_optimistic_still_combines() {
+        let ack = Message::new(MessageId(1), "a", "42", "U1", 105);
+        let optimistic = Message::new(MessageId::next_optimistic(), "b", "42", "U1", 101);
+        assert!(message_combined_with_prev(Some(&ack), &optimistic));
+    }
+
+    #[test]
+    fn sparse_sender_id_zero_does_not_match_real_user() {
+        let sparse = Message::new(MessageId(1), "a", "0", "U1", 100);
+        let mine = Message::new(MessageId(2), "b", "42", "U1", 110);
+        assert!(!same_message_sender(&sparse, &mine));
+    }
+
+    fn attachment(filetype: &str, url: &str) -> MessageAttachment {
+        MessageAttachment {
+            filetype: filetype.into(),
+            url: url.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn is_video_detects_mp4_and_quicktime() {
+        assert!(attachment("video/mp4", "https://cdn.mezon.ai/clip.mp4").is_video());
+        assert!(attachment("video/quicktime", "https://cdn.mezon.ai/clip.mov").is_video());
+    }
+
+    #[test]
+    fn is_video_matches_video_prefix() {
+        assert!(attachment("video/webm", "https://cdn.mezon.ai/clip.webm").is_video());
+    }
+
+    #[test]
+    fn is_video_excludes_mpeg_ts_stream() {
+        assert!(!attachment("video/vnd.dlna.mpeg-tts", "https://cdn.mezon.ai/x.ts").is_video());
+    }
+
+    #[test]
+    fn is_video_false_for_image_and_bare_url() {
+        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_video());
+        assert!(!attachment("", "https://cdn.mezon.ai/x.mp4").is_video());
+    }
+
+    #[test]
+    fn tenor_gif_url_derives_mp4_variant() {
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/may-day-flowers-happy-may-day.gif")
+                .as_deref(),
+            Some("https://media.tenor.com/rmtqGXO15tYAAAPo/may-day-flowers-happy-may-day.mp4")
+        );
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/lfDATg4Bhc0AAAAM/happy-cat.gif").as_deref(),
+            Some("https://media.tenor.com/lfDATg4Bhc0AAAPo/happy-cat.mp4")
+        );
+    }
+
+    #[test]
+    fn tenor_mp4_url_rejects_non_tenor_and_malformed() {
+        assert_eq!(tenor_mp4_url("https://cdn.mezon.ai/uploaded.gif"), None);
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/clip.mp4"),
+            None
+        );
+        assert_eq!(tenor_mp4_url("https://media.tenor.com/short/clip.gif"), None);
+        assert_eq!(tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/.gif"), None);
+    }
+
+    #[test]
+    fn unsupported_media_takes_precedence_over_video_and_image() {
+        let avi = attachment("video/avi", "https://cdn.mezon.ai/x.avi");
+        assert!(avi.is_unsupported_media());
+        assert!(avi.is_video());
+
+        let bmp = attachment("image/bmp", "https://cdn.mezon.ai/x.bmp");
+        assert!(bmp.is_unsupported_media());
+        assert!(bmp.is_image());
+    }
+
+    #[test]
+    fn supported_video_and_image_are_not_unsupported() {
+        let mp4 = attachment("video/mp4", "https://cdn.mezon.ai/x.mp4");
+        assert!(!mp4.is_unsupported_media());
+        assert!(mp4.is_video());
+
+        let png = attachment("image/png", "https://cdn.mezon.ai/x.png");
+        assert!(!png.is_unsupported_media());
+        assert!(png.is_image());
+    }
+
+    #[test]
+    fn message_precomputes_local_day_key() {
+        let ts = 1_609_459_200 + 48_300;
+        let msg = Message::new(MessageId(1), "hi", "u", "User", ts);
+        assert_eq!(msg.day_label, crate::message_time::local_day_key(ts));
     }
 
     #[test]

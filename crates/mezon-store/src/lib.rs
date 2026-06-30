@@ -1,4 +1,5 @@
 pub mod account;
+pub mod album_layout;
 pub mod audio;
 pub mod badge;
 pub mod cache;
@@ -15,7 +16,9 @@ pub mod group_members;
 pub mod ids;
 pub mod login;
 pub mod message;
+pub mod message_time;
 pub mod messages;
+pub mod pinned;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
@@ -36,6 +39,7 @@ use std::time::Duration;
 use tokio::fs;
 
 pub use account::*;
+pub use album_layout::{AlbumLayout, AlbumTile, calculate_album_layout};
 pub use audio::{AudioDeviceInfo, AudioStore, MicCaptureFactory, MicCaptureHandle};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
@@ -58,9 +62,11 @@ pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
+    same_message_sender, should_show_message_head,
     recompute_message_grouping,
 };
 pub use messages::*;
+pub use pinned::{PinnedMessage, PinnedMessagesStore};
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};

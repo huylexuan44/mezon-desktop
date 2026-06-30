@@ -69,6 +69,8 @@ pub enum RealtimeEvent {
     /// Server-pushed session refresh over the socket (`refresh_session_event`, field 96).
     /// The native equivalent of mezon-js `client.onrefreshsession`.
     SessionRefreshed(api::Session),
+    LastPinMessage(realtime::LastPinMessageEvent),
+    UnpinMessage(realtime::UnpinMessageEvent),
     Unhandled(realtime::envelope::Message),
 }
 
@@ -112,6 +114,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
+            realtime::envelope::Message::LastPinMessageEvent(m) => Ok(Self::LastPinMessage(m)),
+            realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
             other => Ok(Self::Unhandled(other)),
         }
     }
@@ -208,16 +212,13 @@ impl MezonTransport {
     pub async fn connect(
         &self,
         host: &str,
-        port: Option<u16>,
+        port: u16,
         token: &str,
         on_event: impl Fn(RealtimeEvent) + Send + Sync + 'static,
         on_disconnected: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<()> {
         tracing::debug!("MezonTransport::connect() starting");
-        tracing::debug!(
-            "  Target: {}",
-            crate::socket_connect_label(host, port)
-        );
+        tracing::debug!("  Target: {host}:{port}");
 
         // Set up message handler
         tracing::debug!("Setting up message handler...");
@@ -280,12 +281,7 @@ impl MezonTransport {
         self.adapter
             .connect(host, port, token)
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to connect adapter to {}",
-                    crate::socket_connect_label(host, port)
-                )
-            })?;
+            .with_context(|| format!("Failed to connect adapter to {host}:{port}"))?;
 
         tracing::debug!("MezonTransport::connect() completed successfully");
         Ok(())
@@ -475,6 +471,8 @@ pub struct ApiAttachment {
     pub filetype: String,
     pub width: i32,
     pub height: i32,
+    pub thumbnail: String,
+    pub duration: i32,
 }
 
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
@@ -492,6 +490,8 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
                 filetype: a.filetype,
                 width: a.width,
                 height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
             })
             .collect(),
         Err(e) => {
@@ -1005,6 +1005,13 @@ fn build_message_content_json(
     serde_json::Value::Object(obj).to_string()
 }
 
+/// One page from `ListChannelMessages`, including read-position metadata.
+#[derive(Debug, Clone)]
+pub struct ListChannelMessagesResult {
+    pub messages: Vec<ApiMessage>,
+    pub last_seen_message_id: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiMessage {
     pub message_id: i64,
@@ -1047,6 +1054,17 @@ pub struct ApiThreadDesc {
 pub const THREAD_LIST_LIMIT: i32 = 50;
 
 pub const CHECK_NAME_TYPE_THREAD: i32 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiPinMessage {
+    pub id: String,
+    pub message_id: String,
+    pub content: String,
+    pub sender_id: String,
+    pub sender_name: String,
+    pub avatar: String,
+    pub create_time: i64,
+}
 
 impl MezonTransport {
     /// Build a protobuf-encoded API request envelope.
@@ -1249,6 +1267,23 @@ impl MezonTransport {
             last_message_sender_name: String::new(),
             last_message_sender_avatar: String::new(),
             last_sent_timestamp,
+        }
+    }
+
+    fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
+        let content = serde_json::from_str::<serde_json::Value>(&pin.content)
+            .ok()
+            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+            .unwrap_or_else(|| pin.content.clone());
+
+        ApiPinMessage {
+            id: pin.id.to_string(),
+            message_id: pin.message_id.to_string(),
+            content,
+            sender_id: pin.sender_id.to_string(),
+            sender_name: pin.username,
+            avatar: pin.avatar,
+            create_time: i64::from(pin.create_time_seconds),
         }
     }
 
@@ -1696,7 +1731,7 @@ impl MezonTransport {
         message_id: i64,
         direction: i32,
         limit: u32,
-    ) -> Result<Vec<ApiMessage>> {
+    ) -> Result<ListChannelMessagesResult> {
         let cid = self.generate_cid();
 
         let api_name = "ListChannelMessages";
@@ -1716,8 +1751,9 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
 
-        let messages = api::ChannelMessageList::decode(response.as_slice())?;
-        let parsed: Vec<ApiMessage> = messages
+        let page = api::ChannelMessageList::decode(response.as_slice())?;
+        let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
+        let parsed: Vec<ApiMessage> = page
             .messages
             .into_iter()
             // Skip pure store-mutation / transient codes that are not renderable
@@ -1732,7 +1768,10 @@ impl MezonTransport {
             parsed.len(),
             response.len(),
         );
-        Ok(parsed)
+        Ok(ListChannelMessagesResult {
+            messages: parsed,
+            last_seen_message_id,
+        })
     }
 
     /// Send a message to a channel.
@@ -1759,6 +1798,42 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
         if code != 0 {
             anyhow::bail!("join_chat error: code={code}");
+        }
+        Ok(())
+    }
+
+    /// Report the user's read position (cf. React `writeLastSeenMessage`).
+    pub async fn write_last_seen_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        mode: i32,
+        timestamp_seconds: u32,
+        badge_count: i32,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=LastSeenMessageEvent cid={} clan_id={clan_id} channel_id={channel_id} message_id={message_id}",
+            i32::from(cid)
+        );
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::LastSeenMessageEvent(
+                realtime::LastSeenMessageEvent {
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    mode,
+                    timestamp_seconds,
+                    badge_count,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        if code != 0 {
+            anyhow::bail!("write_last_seen_message error: code={code}");
         }
         Ok(())
     }
@@ -2302,9 +2377,15 @@ impl MezonTransport {
     /// Get pin messages list.
     pub async fn get_pin_messages_list(
         &self,
-        channel_id: i64,
-        clan_id: i64,
-    ) -> Result<api::PinMessagesList> {
+        channel_id: &str,
+        clan_id: &str,
+    ) -> Result<Vec<ApiPinMessage>> {
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id {channel_id:?}: {e}"))?;
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let cid = self.generate_cid();
         let body = api::PinMessageRequest {
             channel_id,
@@ -2318,7 +2399,12 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::PinMessagesList::decode(response.as_slice())?)
+        let list = api::PinMessagesList::decode(response.as_slice())?;
+        Ok(list
+            .pin_messages_list
+            .into_iter()
+            .map(Self::pin_message_from_proto)
+            .collect())
     }
 
     /// List channel timeline.
@@ -4392,11 +4478,23 @@ impl MezonTransport {
     /// Delete pin message.
     pub async fn delete_pin_message(
         &self,
-        id: i64,
-        message_id: i64,
-        channel_id: i64,
-        clan_id: i64,
+        id: &str,
+        message_id: &str,
+        channel_id: &str,
+        clan_id: &str,
     ) -> Result<()> {
+        let id = id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid pin id {id:?}: {e}"))?;
+        let message_id = message_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid message_id {message_id:?}: {e}"))?;
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id {channel_id:?}: {e}"))?;
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id {clan_id:?}: {e}"))?;
         let cid = self.generate_cid();
         let body = api::DeletePinMessage {
             id,
@@ -6101,7 +6199,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TransportAdapter for MockAdapter {
-        async fn connect(&self, _host: &str, _port: Option<u16>, _token: &str) -> Result<()> {
+        async fn connect(&self, _host: &str, _port: u16, _token: &str) -> Result<()> {
             Ok(())
         }
         async fn send(&self, _message: Vec<u8>) -> Result<()> {

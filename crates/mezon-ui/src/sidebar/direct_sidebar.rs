@@ -16,6 +16,8 @@ struct DmItem {
     id: SharedString,
     label: SharedString,
     kind: DirectKind,
+    unread: bool,
+    unread_count: u32,
     online: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -28,7 +30,7 @@ pub struct DirectSidebar {
 }
 
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
-    let raw: Vec<(ChannelId, String, DirectKind, bool, String)> = store
+    let raw: Vec<(ChannelId, String, DirectKind, bool, u32, bool, String)> = store
         .channels()
         .iter()
         .map(|ch| {
@@ -36,6 +38,8 @@ fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
                 ch.id,
                 ch.label.clone(),
                 ch.kind,
+                ch.is_unread(),
+                ch.unread_count,
                 ch.online,
                 ch.avatar.clone(),
             )
@@ -43,15 +47,19 @@ fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
         .collect();
     Rc::new(
         raw.into_iter()
-            .map(|(channel_id, label, kind, online, avatar)| DmItem {
-                channel_id,
-                id: SharedString::from(channel_id.to_string()),
-                label: SharedString::from(label),
-                kind,
-                online,
-                avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar)),
-                avatar_raw: SharedString::from(avatar),
-            })
+            .map(
+                |(channel_id, label, kind, unread, unread_count, online, avatar)| DmItem {
+                    channel_id,
+                    id: SharedString::from(channel_id.to_string()),
+                    label: SharedString::from(label),
+                    kind,
+                    unread,
+                    unread_count,
+                    online,
+                    avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar)),
+                    avatar_raw: SharedString::from(avatar),
+                },
+            )
             .collect(),
     )
 }
@@ -194,6 +202,8 @@ impl Render for DirectSidebar {
                         let selected = active_id == Some(item.channel_id);
                         DmRow::new(item.id.clone(), item.label.clone(), item.kind)
                             .selected(selected)
+                            .unread(item.unread)
+                            .unread_count(item.unread_count)
                             .online(item.online)
                             .avatar_src(item.avatar_src.clone())
                             .avatar_raw(item.avatar_raw.clone())

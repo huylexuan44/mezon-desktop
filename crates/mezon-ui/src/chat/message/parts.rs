@@ -1,7 +1,15 @@
-use gpui::{AnyElement, App, FontWeight, SharedString, div, img, prelude::*, px};
-use mezon_store::{Message, MessageId, MessageReference, MessagesStore, Reaction, ReplyDraft, resolve_user_profile};
+use std::sync::Arc;
+
+use gpui::{AnyElement, App, Entity, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px};
+use mezon_store::{
+    AlbumLayout, Message, MessageAttachment, MessageId, MessageReference, MessagesStore, Reaction,
+    ReplyDraft, ViewerMedia, resolve_user_profile,
+};
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
+use super::gif_video::GifVideoView;
+use super::time::format_message_time;
+use super::video_player::VideoActivation;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 
@@ -51,7 +59,9 @@ fn resolve_message_avatar_urls(
 }
 
 /// Username + timestamp header (React `MessageHead`).
-pub fn render_head(msg: &Message, theme: &Theme, name_color: u32) -> AnyElement {
+pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
+    let theme = ctx.theme;
+    let time_label = format_message_time(msg.create_time, ctx.locale);
     div()
         .flex()
         .flex_row()
@@ -68,7 +78,7 @@ pub fn render_head(msg: &Message, theme: &Theme, name_color: u32) -> AnyElement 
             div()
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
-                .child(msg.timestamp_label.clone()),
+                .child(time_label),
         )
         .into_any_element()
 }
@@ -145,56 +155,341 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
 
 /// Render image/file attachments below the message body (React
 /// `MessageAttachment`, simplified to image + generic file for P0).
-pub fn render_attachments(msg: &Message, theme: &Theme) -> Option<AnyElement> {
+pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     if msg.attachments.is_empty() {
         return None;
     }
-    let mut col = div().flex().flex_col().gap_2().mt_1().w_full();
-    for (i, att) in msg.attachments.iter().enumerate() {
-        if att.is_image() {
-            let src = att.proxied_src.clone();
-            if src.is_empty() {
-                col = col.child(attachment_box(att.filename.clone(), theme));
-            } else {
-                col = col.child(
-                    img(src)
-                        .id(SharedString::from(format!("msg-img-{}-{}", msg.id.0, i)))
-                        .w(px(att.display_width))
-                        .h(px(att.display_height))
-                        .max_w(px(400.))
-                        .rounded_md(),
-                );
-            }
+    let theme = ctx.theme;
+    let mut videos = Vec::new();
+    let mut images: Vec<(usize, &MessageAttachment)> = Vec::new();
+    let mut documents = Vec::new();
+    for (idx, att) in msg.attachments.iter().enumerate() {
+        if att.is_unsupported_media() {
+            documents.push(att);
+        } else if att.is_video() {
+            videos.push(att);
+        } else if att.is_image() {
+            images.push((idx, att));
         } else {
-            let label = if att.filename.is_empty() {
-                "Attachment".to_string()
-            } else {
-                att.filename.clone()
-            };
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(theme.bg_tertiary)
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child(
-                        Icon::new(IconName::FileIcon)
-                            .size_4()
-                            .text_color(theme.text_secondary),
-                    )
-                    .child(label),
-            );
+            documents.push(att);
         }
     }
+
+    let uploader = Uploader {
+        name: SharedString::from(msg.sender_name.clone()),
+        avatar: if msg.avatar_proxied.is_empty() {
+            SharedString::from(msg.avatar_url.clone())
+        } else {
+            msg.avatar_proxied.clone()
+        },
+    };
+
+    let mut col = div().flex().flex_col().gap_2().mt_1().w_full();
+    for (i, att) in videos.iter().enumerate() {
+        col = col.child(render_video(msg.id, i, att, ctx));
+    }
+    if images.len() >= 2
+        && let Some(layout) = msg.album_layout.as_ref()
+    {
+        col = col.child(render_album(
+            msg.id,
+            &images,
+            layout,
+            &msg.viewer_media,
+            theme,
+            &uploader,
+        ));
+    } else if let Some(&(att_index, att)) = images.first() {
+        let gif_player = att
+            .tenor_mp4
+            .as_ref()
+            .and_then(|_| ctx.gif_videos.get(&(msg.id, att_index)).cloned());
+        col = col.child(render_photo(
+            msg.id,
+            0,
+            att,
+            theme,
+            &msg.viewer_media,
+            &uploader,
+            gif_player,
+        ));
+    }
+    for att in &documents {
+        col = col.child(render_file_box(att, theme));
+    }
     Some(col.into_any_element())
+}
+
+// image-viewer: fields read only by the disabled viewer; reimplement later
+#[allow(dead_code)]
+struct Uploader {
+    name: SharedString,
+    avatar: SharedString,
+}
+
+fn render_album(
+    msg_id: MessageId,
+    images: &[(usize, &MessageAttachment)],
+    layout: &AlbumLayout,
+    _gallery: &Arc<[ViewerMedia]>,
+    theme: &Theme,
+    _uploader: &Uploader,
+) -> AnyElement {
+    let mut container = div()
+        .relative()
+        .w(px(layout.container_width))
+        .h(px(layout.container_height))
+        .max_w(px(464.))
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(theme.bg_tertiary);
+    for (index, (tile, image)) in layout.tiles.iter().zip(images.iter()).enumerate() {
+        let att = image.1;
+        let src = att.proxied_src.clone();
+        // image-viewer: disabled, reimplement later
+        // let gallery = gallery.clone();
+        // let uploader_name = uploader.name.clone();
+        // let uploader_avatar = uploader.avatar.clone();
+        let tile_element = div()
+            .id(SharedString::from(format!(
+                "msg-album-{}-{}",
+                msg_id.0, index
+            )))
+            .absolute()
+            .left(px(tile.x))
+            .top(px(tile.y))
+            .w(px(tile.width))
+            .h(px(tile.height))
+            .bg(theme.bg_tertiary)
+            // image-viewer: click-to-open disabled, reimplement later
+            // .cursor_pointer()
+            .when(!src.is_empty(), |d| {
+                d.child(img(src).size_full().object_fit(ObjectFit::Cover))
+            });
+        // image-viewer: disabled, reimplement later
+        // .on_click(move |_, window, cx| {
+        //     ImageViewer::open(
+        //         gallery.clone(),
+        //         index,
+        //         uploader_name.clone(),
+        //         uploader_avatar.clone(),
+        //         window,
+        //         cx,
+        //     );
+        // });
+        container = container.child(tile_element);
+    }
+    container.into_any_element()
+}
+
+fn render_photo(
+    msg_id: MessageId,
+    index: usize,
+    att: &MessageAttachment,
+    theme: &Theme,
+    _gallery: &Arc<[ViewerMedia]>,
+    _uploader: &Uploader,
+    gif_player: Option<Entity<GifVideoView>>,
+) -> AnyElement {
+    let src = att.proxied_src.clone();
+    if src.is_empty() {
+        return attachment_box(att.filename.clone(), theme);
+    }
+    if let Some(player) = gif_player {
+        return div()
+            .id(SharedString::from(format!("msg-gif-{}-{}", msg_id.0, index)))
+            .w(px(att.display_width))
+            .h(px(att.display_height))
+            .max_w_full()
+            .child(player)
+            .into_any_element();
+    }
+    let object_fit = if is_gif(&att.url) {
+        ObjectFit::Contain
+    } else {
+        ObjectFit::Cover
+    };
+    let fallback_bg = theme.bg_tertiary;
+    let fallback_fg = theme.text_muted;
+    // image-viewer: disabled, reimplement later
+    // let is_sticker = att.filetype == "sticker";
+    // let gallery = gallery.clone();
+    // let uploader_name = uploader.name.clone();
+    // let uploader_avatar = uploader.avatar.clone();
+    div()
+        .id(SharedString::from(format!(
+            "msg-img-{}-{}",
+            msg_id.0, index
+        )))
+        .w(px(att.display_width))
+        .h(px(att.display_height))
+        .rounded_md()
+        .overflow_hidden()
+        .bg(theme.bg_tertiary)
+        // image-viewer: click-to-open disabled, reimplement later
+        // .when(!is_sticker, |d| {
+        //     d.cursor_pointer().on_click(move |_, window, cx| {
+        //         ImageViewer::open(
+        //             gallery.clone(),
+        //             index,
+        //             uploader_name.clone(),
+        //             uploader_avatar.clone(),
+        //             window,
+        //             cx,
+        //         );
+        //     })
+        // })
+        .child(
+            img(src)
+                .size_full()
+                .object_fit(object_fit)
+                .with_fallback(move || {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(fallback_bg)
+                        .child(
+                            Icon::new(IconName::ImageThumbnail)
+                                .size(px(32.))
+                                .text_color(fallback_fg),
+                        )
+                        .into_any_element()
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_video(
+    msg_id: MessageId,
+    index: usize,
+    att: &MessageAttachment,
+    ctx: &RowCtx,
+) -> AnyElement {
+    if let Some(view) = ctx.active_videos.get(&(msg_id, index)) {
+        return div()
+            .w(px(att.display_width))
+            .h(px(att.display_height))
+            .max_w_full()
+            .child(view.clone())
+            .into_any_element();
+    }
+    render_video_poster(msg_id, index, att, ctx)
+}
+
+fn render_video_poster(
+    msg_id: MessageId,
+    index: usize,
+    att: &MessageAttachment,
+    ctx: &RowCtx,
+) -> AnyElement {
+    let theme = ctx.theme;
+    let url = SharedString::from(att.url.clone());
+    let thumbnail = att.thumbnail_proxied.clone();
+    let width = att.display_width;
+    let height = att.display_height;
+    let host = ctx.video_host.clone();
+    let overlay = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::Rgba {
+            r: 0.,
+            g: 0.,
+            b: 0.,
+            a: 0.3,
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(48.))
+                .h(px(48.))
+                .rounded_full()
+                .bg(gpui::Rgba {
+                    r: 0.,
+                    g: 0.,
+                    b: 0.,
+                    a: 0.5,
+                })
+                .child(
+                    Icon::new(IconName::PlayButton)
+                        .size(px(20.))
+                        .text_color(gpui::white()),
+                ),
+        );
+    div()
+        .id(SharedString::from(format!(
+            "msg-video-{}-{}",
+            msg_id.0, index
+        )))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(att.display_width))
+        .h(px(att.display_height))
+        .max_w_full()
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(theme.bg_tertiary)
+        .cursor_pointer()
+        .when(!thumbnail.is_empty(), |d| {
+            d.child(
+                img(thumbnail.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        })
+        .child(overlay)
+        .on_click(move |_, window, cx| {
+            let activation = VideoActivation {
+                url: url.clone(),
+                poster: thumbnail.clone(),
+                width,
+                height,
+            };
+            let _ = host.update(cx, |host, cx| {
+                host.activate_video((msg_id, index), activation, window, cx);
+            });
+        })
+        .into_any_element()
+}
+
+fn render_file_box(att: &MessageAttachment, theme: &Theme) -> AnyElement {
+    let label = if att.filename.is_empty() {
+        "Attachment".to_string()
+    } else {
+        att.filename.clone()
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(theme.bg_tertiary)
+        .border_1()
+        .border_color(theme.border)
+        .text_xs()
+        .text_color(theme.text_secondary)
+        .child(
+            Icon::new(IconName::FileIcon)
+                .size_4()
+                .text_color(theme.text_secondary),
+        )
+        .child(label)
+        .into_any_element()
+}
+
+fn is_gif(url: &str) -> bool {
+    url.contains(".gif")
 }
 
 fn attachment_box(label: String, theme: &Theme) -> AnyElement {

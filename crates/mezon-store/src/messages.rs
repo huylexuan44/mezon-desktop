@@ -4,12 +4,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{
+    App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
+};
 use mezon_client::transport::{
     ApiMessage, ApiMessageContent, OutgoingEmoji as TransportEmoji,
     OutgoingHashtag as TransportHashtag, OutgoingMention as TransportMention, OutgoingReply,
     detect_markdown, emoji_content_tokens, hashtag_content_tokens, markdown_content_tokens,
-    mention_content_tokens, prioritize_avatar,
+    mention_content_tokens,
 };
 use mezon_client::{
     AppApi, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile, UrlAttachment,
@@ -18,9 +20,12 @@ use mezon_client::{
 use crate::AppConfig;
 use crate::KeyedCache;
 use crate::account::AccountStore;
+use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::channel::{ChannelEvent, ChannelList};
+use crate::clan_members::ClanMembersStore;
+use crate::direct::DirectMessageStore;
 use crate::message::{
-    Message, MessageAttachment, MessageCode, MessageReference, aggregate_reactions,
+    Message, MessageAttachment, MessageCode, MessageReference, ViewerMedia, aggregate_reactions,
     apply_reaction_event, message_combined_with_prev, message_sort_key, parse_spans,
     recompute_message_grouping, sort_messages,
 };
@@ -36,6 +41,17 @@ const CHANNEL_TYPE_CHANNEL: i32 = 1;
 const STICKER_FILETYPE: &str = "sticker";
 const MAX_MESSAGES_PER_CHANNEL: usize = 100;
 const MAX_CACHED_CHANNELS: usize = 30;
+const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
+
+#[derive(Clone, Debug)]
+struct PendingLastSeen {
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    create_time: i64,
+    mode: i32,
+    badge_count: u32,
+}
 
 #[derive(Debug, Clone)]
 pub enum MessagesEvent {
@@ -205,6 +221,11 @@ impl MessageList {
         self.index.get(&id).copied()
     }
 
+    fn get_by_id(&self, id: MessageId) -> Option<&Message> {
+        let idx = *self.index.get(&id)?;
+        self.items.get(idx)
+    }
+
     fn get_mut_by_id(&mut self, id: MessageId) -> Option<&mut Message> {
         let idx = *self.index.get(&id)?;
         self.items.get_mut(idx)
@@ -214,7 +235,13 @@ impl MessageList {
         self.temp_ids.iter().find_map(|temp_id| {
             let idx = *self.index.get(temp_id)?;
             let candidate = &self.items[idx];
-            (candidate.sender_id == sender_id && candidate.content == content).then_some(idx)
+            if candidate.content != content {
+                return None;
+            }
+            let sender_match = candidate.sender_id == sender_id
+                || sender_id.is_empty()
+                || sender_id == "0";
+            sender_match.then_some(idx)
         })
     }
 
@@ -269,17 +296,8 @@ impl MessageList {
             }
             self.temp_ids.retain(|t| !evicted_temp_ids.contains(t));
         }
-        let last = self.items.len() - 1;
-        let combined = {
-            let prev = last.checked_sub(1).map(|i| &self.items[i]);
-            message_combined_with_prev(prev, &self.items[last])
-        };
-        self.items[last].combined_with_prev = combined;
-        let id = self.items[last].id;
-        if id.is_optimistic() {
-            self.temp_ids.push(id);
-        }
-        self.index.insert(id, last);
+        recompute_message_grouping(&mut self.items);
+        self.reindex();
     }
 
     fn replace_at(&mut self, idx: usize, msg: Message) {
@@ -297,6 +315,11 @@ impl MessageList {
         if new_id.is_optimistic() {
             self.temp_ids.push(new_id);
         }
+    }
+
+    fn replace_at_and_regroup(&mut self, idx: usize, msg: Message) {
+        self.replace_at(idx, msg);
+        recompute_message_grouping(&mut self.items);
     }
 
     fn replace_resort(&mut self, idx: usize, msg: Message) {
@@ -341,18 +364,19 @@ struct ChannelMessages {
     messages: MessageList,
     /// More history exists above (older). Mirrors React `hasMoreTop`.
     has_more: bool,
-    /// More messages exist below (newer) that are not loaded — only true after
-    /// a jump-to-message loads a window that does not reach the newest message.
-    /// Mirrors React `selectHasMoreBottomByChannelId`; `false` in normal flow
-    /// (the newest message is always loaded), so the bottom network-load path
-    /// stays inert until jump-to-message is wired.
-    has_more_bottom: bool,
 }
 
 const STREAM_MODE_CHANNEL: i32 = 2;
 
 pub struct MessagesStore {
     cache: KeyedCache<ChannelId, ChannelMessages>,
+    /// Channel tail message id (React `lastMessageByChannel`), keyed by parent channel.
+    last_message_by_channel: HashMap<ChannelId, MessageId>,
+    /// Last read message id per channel (React `unreadMessagesEntries`). The "New
+    /// messages" break renders after this id.
+    last_read_message_by_channel: HashMap<ChannelId, MessageId>,
+    /// User scrolled away from the bottom (React `isViewingOlderMessagesByChannelId`).
+    viewing_older_by_channel: HashMap<ChannelId, bool>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
     is_public: bool,
@@ -372,6 +396,10 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
+    pending_last_seen: Option<PendingLastSeen>,
+    _last_seen_timer: Option<Task<()>>,
+    last_seen_fingerprint: HashMap<ChannelId, String>,
+    queued_last_seen: Vec<PendingLastSeen>,
 }
 
 struct GlobalMessagesStore(Entity<MessagesStore>);
@@ -407,6 +435,9 @@ impl MessagesStore {
 
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
+            last_message_by_channel: HashMap::new(),
+            last_read_message_by_channel: HashMap::new(),
+            viewing_older_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
             is_public: true,
@@ -422,6 +453,10 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
+            pending_last_seen: None,
+            _last_seen_timer: None,
+            last_seen_fingerprint: HashMap::new(),
+            queued_last_seen: Vec::new(),
         }
     }
 
@@ -450,7 +485,13 @@ impl MessagesStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, cx| this.resync(cx)).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.resync(cx);
+                            this.flush_queued_last_seen(cx);
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 } else if !connected {
@@ -515,15 +556,259 @@ impl MessagesStore {
         self.load_more(cx);
     }
 
-    /// True when newer messages exist on the server that are not yet loaded
-    /// (only after a jump-to-message lands on an older window). Mirrors React
-    /// `selectHasMoreBottomByChannelId`. `false` in normal flow.
-    pub fn has_more_bottom(&self) -> bool {
-        self.active_channel_id
-            .as_ref()
-            .and_then(|id| self.cache.get(id))
-            .map(|c| c.has_more_bottom)
+    /// Batch-update channel tail ids from channel list fetch (React
+    /// `setManyLastMessages`).
+    pub fn set_many_last_messages(
+        &mut self,
+        entries: impl IntoIterator<Item = (ChannelId, MessageId)>,
+    ) {
+        for (channel_id, message_id) in entries {
+            self.set_last_message(channel_id, message_id);
+        }
+    }
+
+    fn set_last_message(&mut self, channel_id: ChannelId, message_id: MessageId) {
+        if message_id.is_zero() || message_id.is_optimistic() {
+            return;
+        }
+        self.last_message_by_channel.insert(channel_id, message_id);
+    }
+
+    /// Mirrors React `setViewingOlder` — when true, live WS messages only update
+    /// `lastMessageByChannel`, not the loaded buffer.
+    pub fn set_viewing_older(&mut self, channel_id: ChannelId, viewing: bool) {
+        if viewing {
+            self.viewing_older_by_channel.insert(channel_id, true);
+        } else {
+            self.viewing_older_by_channel.remove(&channel_id);
+        }
+    }
+
+    fn is_viewing_older(&self, storage_id: ChannelId) -> bool {
+        self.viewing_older_by_channel
+            .get(&storage_id)
+            .copied()
             .unwrap_or(false)
+    }
+
+    /// Latest known channel tail id (from channel list / WS / send). Used by the
+    /// scroll-down FAB unread badge (cf. React `selectLatestMessageId`).
+    pub fn channel_tail_message_id(&self) -> Option<MessageId> {
+        let channel_id = self.active_channel_id?;
+        self.last_message_by_channel.get(&channel_id).copied()
+    }
+
+    /// Last read message for the active channel (React `selectUnreadMessageIdByChannelId`).
+    pub fn last_read_message_id(&self) -> Option<MessageId> {
+        let channel_id = self.active_channel_id?;
+        self.last_read_message_by_channel.get(&channel_id).copied()
+    }
+
+    pub fn set_last_read_message(&mut self, channel_id: ChannelId, message_id: MessageId) {
+        if message_id.is_zero() || message_id.is_optimistic() {
+            self.last_read_message_by_channel.remove(&channel_id);
+            return;
+        }
+        self.last_read_message_by_channel.insert(channel_id, message_id);
+    }
+
+    pub fn clear_last_read_message(&mut self, channel_id: ChannelId) {
+        self.last_read_message_by_channel.remove(&channel_id);
+    }
+
+    /// Schedule a last-seen write when the viewport tail is visible (cf. React
+    /// `useChannelSeen` + `updateLastSeenMessage`).
+    pub fn note_viewport_seen(
+        &mut self,
+        message: &Message,
+        app_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !app_focused || message.id.is_optimistic() {
+            return;
+        }
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let Some(clan_id) = self.active_clan_id else {
+            return;
+        };
+        if !should_write_last_seen(
+            self.known_last_seen_id(channel_id, cx),
+            self.last_message_by_channel.get(&channel_id).copied(),
+            message.id,
+        ) {
+            return;
+        }
+        let badge_count = self.channel_badge_count(channel_id, clan_id, cx);
+        self.pending_last_seen = Some(PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id: message.id,
+            create_time: message.create_time,
+            mode: self.mode,
+            badge_count,
+        });
+        self.arm_last_seen_debounce(cx);
+    }
+
+    fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
+        self.last_read_message_by_channel
+            .get(&channel_id)
+            .copied()
+            .or_else(|| {
+                ChannelList::global(cx)
+                    .read(cx)
+                    .find_channel(channel_id)
+                    .map(|ch| ch.last_seen_message_id)
+            })
+            .filter(|id| !id.is_zero())
+    }
+
+    fn channel_badge_count(&self, channel_id: ChannelId, _clan_id: ClanId, cx: &App) -> u32 {
+        if self.is_dm {
+            DirectMessageStore::global(cx)
+                .read(cx)
+                .find(channel_id)
+                .map(|c| c.unread_count)
+                .unwrap_or(0)
+        } else {
+            ChannelList::global(cx)
+                .read(cx)
+                .find_channel(channel_id)
+                .map(|c| c.badge_count)
+                .unwrap_or(0)
+        }
+    }
+
+    fn arm_last_seen_debounce(&mut self, cx: &mut Context<Self>) {
+        if self.pending_last_seen.is_none() {
+            return;
+        }
+        self._last_seen_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LAST_SEEN_DEBOUNCE).await;
+            this.update(cx, |this, cx| this.flush_pending_last_seen(cx))
+                .ok();
+        }));
+    }
+
+    fn flush_pending_last_seen(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_last_seen.take() else {
+            return;
+        };
+        self._last_seen_timer = None;
+        self.send_last_seen(pending, cx);
+    }
+
+    fn flush_queued_last_seen(&mut self, cx: &mut Context<Self>) {
+        if self.api.connection_status() != ConnectionStatus::Connected {
+            return;
+        }
+        let queue = std::mem::take(&mut self.queued_last_seen);
+        for pending in queue {
+            self.send_last_seen(pending, cx);
+        }
+    }
+
+    fn send_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        let fingerprint = format!(
+            "{}|{}|{}|{}|{}",
+            pending.clan_id.get(),
+            pending.mode,
+            pending.badge_count,
+            pending.create_time,
+            pending.message_id.get()
+        );
+        if self.last_seen_fingerprint.get(&pending.channel_id) == Some(&fingerprint) {
+            return;
+        }
+
+        if self.api.connection_status() != ConnectionStatus::Connected {
+            self.queued_last_seen.push(pending);
+            return;
+        }
+
+        self.apply_local_last_seen(&pending, cx);
+        self.last_seen_fingerprint
+            .insert(pending.channel_id, fingerprint);
+
+        let api = self.api.clone();
+        let clan_id = pending.clan_id.get();
+        let channel_id = pending.channel_id.get();
+        let message_id = pending.message_id.get();
+        let mode = pending.mode;
+        let ts = pending.create_time.max(0);
+        let timestamp_seconds = u32::try_from(ts).unwrap_or(u32::MAX);
+        let badge_count = i32::try_from(pending.badge_count).unwrap_or(i32::MAX);
+
+        cx.spawn(async move |this, cx| {
+            let result = api
+                .write_last_seen_message(
+                    clan_id,
+                    channel_id,
+                    message_id,
+                    mode,
+                    timestamp_seconds,
+                    badge_count,
+                )
+                .await;
+            if let Err(e) = result {
+                tracing::warn!(
+                    channel_id,
+                    message_id,
+                    "write_last_seen_message failed: {e}"
+                );
+                this.update(cx, |this, _| {
+                    this.queued_last_seen.push(PendingLastSeen {
+                        clan_id: ClanId(clan_id),
+                        channel_id: ChannelId(channel_id),
+                        message_id: MessageId(message_id),
+                        create_time: ts,
+                        mode,
+                        badge_count: badge_count.max(0) as u32,
+                    });
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn apply_local_last_seen(&mut self, pending: &PendingLastSeen, cx: &mut Context<Self>) {
+        self.set_last_read_message(pending.channel_id, pending.message_id);
+        let ts = pending.create_time.max(0);
+        if self.is_dm {
+            DirectMessageStore::global(cx).update(cx, |dm, cx| {
+                let _ = dm.note_read(pending.channel_id, cx);
+            });
+        } else if !pending.clan_id.is_zero() {
+            ChannelList::global(cx).update(cx, |cl, cx| {
+                cl.note_channel_message(
+                    pending.clan_id,
+                    pending.channel_id,
+                    false,
+                    true,
+                    ts,
+                    pending.message_id,
+                    cx,
+                );
+            });
+        }
+    }
+
+    /// True when the channel tail is not in the loaded buffer (jump-to-message
+    /// or cap trimmed the newest rows). Scroll UX uses `at_bottom` in the UI.
+    pub fn has_more_bottom(&self) -> bool {
+        let Some(channel_id) = self.active_channel_id else {
+            return false;
+        };
+        let Some(channel) = self.cache.get(&channel_id) else {
+            return false;
+        };
+        has_more_bottom_for(
+            self.last_message_by_channel.get(&channel_id).copied(),
+            &channel.messages,
+        )
     }
 
     /// Called by the timeline when the user scrolls to the bottom: fetch the
@@ -647,7 +932,7 @@ impl MessagesStore {
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
                 let msgs = match result {
-                    Ok(msgs) => msgs,
+                    Ok(page) => page.messages,
                     Err(e) => {
                         tracing::error!("Failed to load more messages for {channel_id}: {e}");
                         cx.notify();
@@ -679,9 +964,6 @@ impl MessagesStore {
                     }
                     let prepended = older.len();
                     let dropped_bottom = channel.messages.prepend_older(older);
-                    if dropped_bottom > 0 {
-                        channel.has_more_bottom = true;
-                    }
                     // Reached the channel start once the oldest row is the
                     // FIRST_MESSAGE sentinel (cf. React `hasMore` check).
                     channel.has_more = has_more_from_oldest(channel.messages.as_slice());
@@ -707,8 +989,8 @@ impl MessagesStore {
     }
 
     /// Fetch the next newer page from the server and append it (the bottom
-    /// counterpart of [`Self::load_more`]). Only active after a jump-to-message,
-    /// where `has_more_bottom` is set because the newest message is not loaded.
+    /// counterpart of [`Self::load_more`]). Active when the channel tail is not
+    /// yet in the loaded buffer (React `loadMoreMessage` AFTER_TIMESTAMP).
     pub fn load_more_bottom(&mut self, cx: &mut Context<Self>) {
         if self.loading_more || self.loading {
             tracing::debug!(
@@ -727,16 +1009,21 @@ impl MessagesStore {
         let Some(channel) = self.cache.get(&channel_id) else {
             return;
         };
-        if !channel.has_more_bottom {
-            tracing::debug!("load_more_bottom skipped: has_more_bottom=false");
-            return;
-        }
-        let Some(newest_id) = channel
+        let last_channel_id = self.last_message_by_channel.get(&channel_id).copied();
+        let newest_loaded = channel
             .messages
             .last()
             .map(|m| m.id)
-            .filter(|id| !id.is_optimistic())
-        else {
+            .filter(|id| !id.is_optimistic());
+        let can_load = match (last_channel_id, newest_loaded) {
+            (Some(last), Some(newest)) => last != newest,
+            _ => false,
+        };
+        if !can_load || !has_more_bottom_for(last_channel_id, &channel.messages) {
+            tracing::debug!("load_more_bottom skipped: at channel tail");
+            return;
+        }
+        let Some(newest_id) = newest_loaded else {
             tracing::debug!("load_more_bottom skipped: no non-optimistic newest id");
             return;
         };
@@ -764,7 +1051,7 @@ impl MessagesStore {
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
                 let msgs = match result {
-                    Ok(msgs) => msgs,
+                    Ok(page) => page.messages,
                     Err(e) => {
                         tracing::error!("Failed to load newer messages for {channel_id}: {e}");
                         cx.notify();
@@ -786,14 +1073,11 @@ impl MessagesStore {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let fetched = msgs.len();
                     let newer: Vec<Message> = msgs
                         .into_iter()
                         .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
                         .map(|m| message_from_api(m, cfg))
                         .collect();
-                    // A short page means we've reached the newest message.
-                    channel.has_more_bottom = fetched >= MESSAGE_PAGE_LIMIT as usize;
                     if newer.is_empty() {
                         cx.emit(MessagesEvent::Updated);
                         cx.notify();
@@ -882,7 +1166,7 @@ impl MessagesStore {
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
                 let msgs = match result {
-                    Ok(msgs) => msgs,
+                    Ok(page) => page.messages,
                     Err(e) => {
                         tracing::error!(
                             "jump_to_message AROUND fetch failed for {channel_id}: {e}"
@@ -919,10 +1203,6 @@ impl MessagesStore {
                 if let Some(channel) = this.cache.get_mut(&channel_id) {
                     channel.messages.replace(window);
                     channel.has_more = has_more;
-                    // We landed on an older window, so newer messages exist that
-                    // are not loaded yet (scroll down pages them in). This
-                    // self-corrects to false once the newest page is reached.
-                    channel.has_more_bottom = true;
                 }
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
@@ -973,15 +1253,13 @@ impl MessagesStore {
         let has_attachments = !attachments.is_empty();
         let reply = self.reply_target.take();
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or_default();
-        let temp_id = MessageId::next_optimistic();
-
+        self.clear_last_read_message(channel_id);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
+        let create_time = optimistic_create_time(&channel.messages, &sender_id);
+        let temp_id = MessageId::next_optimistic();
+
         let OutgoingContent {
             mentions,
             hashtags,
@@ -1000,12 +1278,12 @@ impl MessagesStore {
             .map(OutgoingEmoji::into_transport)
             .collect();
         let markdowns = detect_markdown(&content);
+        let (display_name, avatar_url, avatar_proxied) =
+            outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
         let mut optimistic =
-            enrich_outgoing_sender(
-                Message::new(temp_id, content.clone(), sender_id, sender_name, now),
-                cx,
-                self.active_clan_id,
-            );
+            Message::new(temp_id, content.clone(), sender_id, display_name, create_time)
+                .with_avatar(avatar_url)
+                .with_avatar_proxied(avatar_proxied);
         if !transport_mentions.is_empty()
             || !transport_hashtags.is_empty()
             || !transport_emojis.is_empty()
@@ -1142,10 +1420,11 @@ impl MessagesStore {
         };
         let is_public = self.is_public;
         let mode = self.mode;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or_default();
+        self.clear_last_read_message(channel_id);
+        let Some(channel) = self.cache.get_mut(&channel_id) else {
+            return;
+        };
+        let create_time = optimistic_create_time(&channel.messages, &sender_id);
         let temp_id = MessageId::next_optimistic();
 
         let optimistic_attachment = MessageAttachment::from_api(
@@ -1155,19 +1434,18 @@ impl MessagesStore {
                 filetype: STICKER_FILETYPE.to_string(),
                 width: 0,
                 height: 0,
+                thumbnail: String::new(),
+                duration: 0,
             },
             AppConfig::try_global(cx),
         );
 
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
-            return;
-        };
-        let optimistic = enrich_outgoing_sender(
-            Message::new(temp_id, String::new(), sender_id, sender_name, now)
-                .with_attachments(vec![optimistic_attachment]),
-            cx,
-            self.active_clan_id,
-        );
+        let (display_name, avatar_url, avatar_proxied) =
+            outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
+        let optimistic = Message::new(temp_id, String::new(), sender_id, display_name, create_time)
+            .with_avatar(avatar_url)
+            .with_avatar_proxied(avatar_proxied)
+            .with_attachments(vec![optimistic_attachment]);
         let old_len = channel.messages.len();
         channel.messages.push_trim_regroup(optimistic);
         self.emit_appended(old_len, cx);
@@ -1298,6 +1576,7 @@ impl MessagesStore {
         self.is_public = is_public;
         self.is_dm = is_dm;
         self.mode = mode;
+        self.viewing_older_by_channel.insert(channel_id, false);
         self.loading_more = false;
         self.reply_target = None;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -1307,6 +1586,8 @@ impl MessagesStore {
             self.joined_channels.insert(channel_id);
             self.spawn_join(clan_id, channel_id, join_type, is_public, cx);
         }
+
+        self.seed_last_read_from_channel(channel_id, cx);
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.cache.touch(&channel_id);
@@ -1372,15 +1653,20 @@ impl MessagesStore {
         &mut self,
         channel_id: ChannelId,
         generation: u64,
-        result: Result<Vec<ApiMessage>, anyhow::Error>,
+        result: Result<mezon_client::transport::ListChannelMessagesResult, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
         let is_active = self.active_channel_id == Some(channel_id);
         let is_current = is_active && self.fetch_generation == generation;
 
         match result {
-            Ok(msgs) => {
-                let messages = prepare_messages(msgs, AppConfig::try_global(cx));
+            Ok(page) => {
+                if !self.last_read_message_by_channel.contains_key(&channel_id)
+                    && page.last_seen_message_id > 0
+                {
+                    self.set_last_read_message(channel_id, MessageId(page.last_seen_message_id));
+                }
+                let messages = prepare_messages(page.messages, AppConfig::try_global(cx));
                 self.set_channel(channel_id, messages);
                 if is_current {
                     self.loading = false;
@@ -1405,33 +1691,85 @@ impl MessagesStore {
         let RealtimeEvent::ChannelMessage(m) = event else {
             return;
         };
-        let channel_id = ChannelId(m.channel_id);
-        let is_active = self.active_channel_id == Some(channel_id);
+
+        let code = MessageCode::from_raw(m.code);
+        if matches!(code, MessageCode::Typing) {
+            return;
+        }
+        // React `handleBuzz` — buzz is not a timeline row.
+        if code == MessageCode::MessageBuzz {
+            return;
+        }
+
+        let storage_id = storage_channel_id(m);
+        let parent_id = parent_channel_id(m);
+        let message_id = MessageId(synthesize_ws_message_id(
+            self,
+            storage_id,
+            parent_id,
+            m.message_id,
+        ));
         let cfg = AppConfig::try_global(cx);
-        let Some(channel) = self.cache.get_mut(&channel_id) else {
+
+        match code {
+            MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
+                let incoming = message_from_channel_proto(m, message_id.get(), cfg);
+                self.apply_message_update(storage_id, message_id, incoming, cx);
+            }
+            MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
+                self.apply_message_remove(storage_id, parent_id, message_id, cx);
+            }
+            _ => {
+                if !self.cache.contains(&storage_id) {
+                    self.set_last_message(parent_id, message_id);
+                    return;
+                }
+                if self.is_viewing_older(storage_id) {
+                    self.set_last_message(parent_id, message_id);
+                    return;
+                }
+                let incoming = message_from_channel_proto(m, message_id.get(), cfg);
+                self.apply_incoming_message(storage_id, parent_id, incoming, cx);
+            }
+        }
+    }
+
+    fn apply_incoming_message(
+        &mut self,
+        storage_id: ChannelId,
+        parent_id: ChannelId,
+        msg: Message,
+        cx: &mut Context<Self>,
+    ) {
+        let is_active = self.active_channel_id == Some(storage_id);
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
+            self.set_last_message(parent_id, msg.id);
             return;
         };
-        let msg = message_from_api(MezonTransport::message_from_proto(m.clone()), cfg);
         if channel.messages.contains_id(msg.id) {
-            if let Some(idx) = channel.messages.position(msg.id) {
-                let existing = channel.messages.as_slice()[idx].clone();
-                if message_needs_enrichment(&existing) {
-                    channel.messages.replace_at(idx, msg);
-                    if is_active {
-                        cx.emit(MessagesEvent::Updated);
-                        cx.notify();
-                    }
+            let message_id = msg.id;
+            if let Some(existing) = channel.messages.get_by_id(message_id).cloned() {
+                let merged = merge_sparse_sender(&existing, msg);
+                if let Some(slot) = channel.messages.get_mut_by_id(message_id) {
+                    *slot = merged;
+                }
+                if is_active {
+                    cx.emit(MessagesEvent::Updated);
+                    cx.notify();
                 }
             }
             return;
         }
+        let tail_id = msg.id;
         let old_len = channel.messages.len();
         let appended = match channel
             .messages
             .temp_match_position(&msg.sender_id, &msg.content)
         {
             Some(idx) => {
-                channel.messages.replace_resort(idx, msg);
+                let prior = channel.messages.items[idx].clone();
+                let merged = merge_sparse_sender(&prior, msg);
+                channel.messages.replace_resort(idx, merged);
                 false
             }
             None => {
@@ -1439,6 +1777,12 @@ impl MessagesStore {
                 true
             }
         };
+        let last_id = channel
+            .messages
+            .last()
+            .map(|m| m.id)
+            .unwrap_or(tail_id);
+        self.set_last_message(parent_id, last_id);
         if is_active {
             if appended {
                 self.emit_appended(old_len, cx);
@@ -1446,6 +1790,86 @@ impl MessagesStore {
                 cx.emit(MessagesEvent::Updated);
                 cx.notify();
             }
+        }
+    }
+
+    fn apply_message_update(
+        &mut self,
+        storage_id: ChannelId,
+        message_id: MessageId,
+        incoming: Message,
+        cx: &mut Context<Self>,
+    ) {
+        let is_active = self.active_channel_id == Some(storage_id);
+        let preview = incoming.content.clone();
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
+            return;
+        };
+        let Some(existing) = channel.messages.get_mut_by_id(message_id) else {
+            return;
+        };
+        merge_message_update(existing, &incoming);
+        patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
+        if is_active {
+            cx.emit(MessagesEvent::Updated);
+            cx.notify();
+        }
+    }
+
+    fn apply_message_remove(
+        &mut self,
+        storage_id: ChannelId,
+        parent_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .reply_target
+            .as_ref()
+            .is_some_and(|draft| draft.message_ref_id == message_id)
+        {
+            self.reply_target = None;
+        }
+        self.retreat_last_message(parent_id, storage_id, message_id);
+
+        let is_active = self.active_channel_id == Some(storage_id);
+        let Some(channel) = self.cache.get_mut(&storage_id) else {
+            return;
+        };
+        patch_reply_previews_after_delete(&mut channel.messages, message_id);
+        let removed = channel.messages.remove_id(message_id);
+        if removed && is_active {
+            cx.emit(MessagesEvent::Shifted {
+                added_top: 0,
+                removed_top: 0,
+                added_bottom: 0,
+                removed_bottom: 1,
+            });
+            cx.notify();
+        }
+    }
+
+    fn retreat_last_message(
+        &mut self,
+        parent_id: ChannelId,
+        storage_id: ChannelId,
+        deleted_id: MessageId,
+    ) {
+        if self.last_message_by_channel.get(&parent_id) != Some(&deleted_id) {
+            return;
+        }
+        if self.is_viewing_older(storage_id) {
+            self.last_message_by_channel.remove(&parent_id);
+            return;
+        }
+        if let Some(prev) = self
+            .cache
+            .get(&storage_id)
+            .and_then(|c| c.messages.as_slice().iter().rev().find(|m| m.id != deleted_id))
+        {
+            self.set_last_message(parent_id, prev.id);
+        } else {
+            self.last_message_by_channel.remove(&parent_id);
         }
     }
 
@@ -1481,15 +1905,20 @@ impl MessagesStore {
         confirmed: Message,
         cx: &mut Context<Self>,
     ) {
+        let confirmed_id = confirmed.id;
         let (pushed, old_len) = {
             let Some(channel) = self.cache.get_mut(&channel_id) else {
                 return;
             };
             let old_len = channel.messages.len();
             if let Some(idx) = channel.messages.position(temp_id) {
-                let temp = channel.messages.as_slice()[idx].clone();
-                let merged = merge_confirmed_with_temp(&temp, confirmed);
-                channel.messages.replace_at(idx, merged);
+                let temp = channel
+                    .messages
+                    .get_by_id(temp_id)
+                    .expect("temp row must exist at position")
+                    .clone();
+                let confirmed = merge_sparse_sender(&temp, confirmed);
+                channel.messages.replace_at_and_regroup(idx, confirmed);
                 (false, old_len)
             } else if !channel.messages.contains_id(confirmed.id) {
                 channel.messages.push_sorted(confirmed);
@@ -1498,6 +1927,7 @@ impl MessagesStore {
                 (false, old_len)
             }
         };
+        self.set_last_message(channel_id, confirmed_id);
         if self.active_channel_id != Some(channel_id) {
             return;
         }
@@ -1539,6 +1969,16 @@ impl MessagesStore {
         self.refetch_current_messages(cx);
     }
 
+    /// Reload the latest message page from the server (cf. React
+    /// `fetchMessages({ toPresent: true, isClearMessage: true })`).
+    pub fn jump_to_present(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.set_viewing_older(channel_id, false);
+        self.refetch_current_messages(cx);
+    }
+
     fn refetch_current_messages(&mut self, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
@@ -1565,21 +2005,156 @@ impl MessagesStore {
         .detach();
     }
 
+    fn seed_last_read_from_channel(&mut self, channel_id: ChannelId, cx: &App) {
+        if self.last_read_message_by_channel.contains_key(&channel_id) {
+            return;
+        }
+        let Some(last_seen_id) = ChannelList::global(cx)
+            .read(cx)
+            .find_channel(channel_id)
+            .map(|ch| ch.last_seen_message_id)
+            .filter(|id| !id.is_zero())
+        else {
+            return;
+        };
+        self.last_read_message_by_channel
+            .insert(channel_id, last_seen_id);
+    }
+
     fn set_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>) {
         let active = self.active_channel_id;
         let has_more = has_more_from_oldest(&messages);
+        if let Some(newest) = messages.last() {
+            if !self.last_message_by_channel.contains_key(&channel_id) {
+                self.set_last_message(channel_id, newest.id);
+            }
+        }
         self.cache.insert(
             channel_id,
             ChannelMessages {
                 messages: MessageList::from_messages(messages),
                 has_more,
-                // Normal open loads the newest page, so nothing newer exists yet.
-                // Jump-to-message will set this when it loads an older window.
-                has_more_bottom: false,
             },
             active.as_ref(),
         );
     }
+}
+
+const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
+
+fn snowflake_seq(id: MessageId) -> i64 {
+    id.get() >> 22
+}
+
+fn should_write_last_seen(
+    last_seen_id: Option<MessageId>,
+    channel_tail: Option<MessageId>,
+    viewport_id: MessageId,
+) -> bool {
+    if let Some(seen) = last_seen_id {
+        if snowflake_seq(viewport_id) >= snowflake_seq(seen) {
+            return true;
+        }
+    }
+    channel_tail == Some(viewport_id)
+}
+
+fn storage_channel_id(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
+    if m.topic_id != 0 {
+        ChannelId(m.topic_id)
+    } else {
+        ChannelId(m.channel_id)
+    }
+}
+
+fn parent_channel_id(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
+    ChannelId(m.channel_id)
+}
+
+fn synthesize_ws_message_id(
+    store: &MessagesStore,
+    storage_id: ChannelId,
+    parent_id: ChannelId,
+    raw_id: i64,
+) -> i64 {
+    if raw_id > 0 {
+        return raw_id;
+    }
+    store
+        .cache
+        .get(&storage_id)
+        .and_then(|c| c.messages.last().map(|m| m.id.get()))
+        .or_else(|| {
+            store
+                .last_message_by_channel
+                .get(&parent_id)
+                .map(|id| id.get())
+        })
+        .or_else(|| {
+            store
+                .last_message_by_channel
+                .get(&storage_id)
+                .map(|id| id.get())
+        })
+        .map(|id| id.saturating_add(1))
+        .filter(|id| *id > 0)
+        .unwrap_or(1)
+}
+
+fn message_from_channel_proto(
+    m: &mezon_proto::api::ChannelMessage,
+    message_id: i64,
+    cfg: Option<&AppConfig>,
+) -> Message {
+    let mut wire = m.clone();
+    wire.message_id = message_id;
+    message_from_api(MezonTransport::message_from_proto(wire), cfg)
+}
+
+fn merge_message_update(existing: &mut Message, incoming: &Message) {
+    existing.content = incoming.content.clone();
+    existing.spans = incoming.spans.clone();
+    existing.attachments = incoming.attachments.clone();
+    existing.references = incoming.references.clone();
+    existing.update_time = incoming.update_time;
+    existing.is_edited = incoming.is_edited;
+    existing.code = MessageCode::Chat;
+}
+
+fn patch_reply_previews_after_update(
+    messages: &mut MessageList,
+    updated_id: MessageId,
+    new_content: &str,
+) {
+    for msg in messages.items.iter_mut() {
+        for reference in msg.references.iter_mut() {
+            if reference.message_ref_id == updated_id {
+                reference.content = new_content.to_string();
+            }
+        }
+    }
+}
+
+fn patch_reply_previews_after_delete(messages: &mut MessageList, deleted_id: MessageId) {
+    for msg in messages.items.iter_mut() {
+        for reference in msg.references.iter_mut() {
+            if reference.message_ref_id == deleted_id {
+                reference.content = DELETED_REPLY_PREVIEW.to_string();
+                reference.message_ref_id = MessageId(0);
+            }
+        }
+    }
+}
+
+/// Whether newer messages exist on the server that are not in the loaded buffer.
+fn has_more_bottom_for(last_message_id: Option<MessageId>, messages: &MessageList) -> bool {
+    let Some(last_id) = last_message_id.filter(|id| !id.is_zero() && !id.is_optimistic()) else {
+        return false;
+    };
+    if messages.is_empty() {
+        return false;
+    }
+    !messages.contains_id(last_id)
 }
 
 /// Whether there is more history above the loaded buffer, mirroring React
@@ -1594,94 +2169,21 @@ fn has_more_from_oldest(messages: &[Message]) -> bool {
         .is_some_and(|m| m.code != MessageCode::Indicator)
 }
 
-fn outgoing_sender_profile(cx: &App, clan_id: Option<ClanId>, fallback_name: &str) -> (String, String) {
-    let store = AccountStore::global(cx).read(cx);
-    let account = store.account.as_ref();
-    let clan = store
-        .clan_profile
-        .as_ref()
-        .filter(|profile| clan_id.is_none_or(|id| profile.clan_id == id));
-
-    let name = clan
-        .and_then(|profile| {
-            (!profile.nick_name.is_empty()).then(|| profile.nick_name.clone())
-        })
-        .or_else(|| {
-            account.map(|acct| {
-                if !acct.display_name.is_empty() {
-                    acct.display_name.clone()
-                } else if !acct.username.is_empty() {
-                    acct.username.clone()
-                } else {
-                    fallback_name.to_string()
-                }
-            })
-        })
-        .unwrap_or_else(|| fallback_name.to_string());
-
-    let avatar = prioritize_avatar(
-        clan
-            .and_then(|profile| profile.avatar_url.as_deref())
-            .unwrap_or(""),
-        account
-            .and_then(|acct| acct.avatar_url.as_deref())
-            .unwrap_or(""),
-    );
-
-    (name, avatar)
-}
-
-fn enrich_outgoing_sender(
-    mut msg: Message,
-    cx: &App,
-    clan_id: Option<ClanId>,
-) -> Message {
-    let (name, avatar) = outgoing_sender_profile(cx, clan_id, &msg.sender_name);
-    if !name.is_empty() {
-        msg.sender_name = name;
-    }
-    if !avatar.is_empty() {
-        let proxied = AppConfig::try_global(cx)
-            .map(|cfg| cfg.avatar_proxy(&avatar))
-            .unwrap_or_else(|| avatar.clone());
-        msg = msg.with_avatar(avatar).with_avatar_proxied(proxied);
-    }
-    msg
-}
-
-fn message_needs_enrichment(msg: &Message) -> bool {
-    msg.sender_name.is_empty()
-        || (msg.avatar_url.is_empty() && msg.avatar_proxied.is_empty())
-        || msg.sender_id.is_empty()
-        || msg.sender_id == "0"
-        || msg.create_time == 0
-}
-
-fn merge_confirmed_with_temp(temp: &Message, mut confirmed: Message) -> Message {
-    if confirmed.sender_name.is_empty() {
-        confirmed.sender_name = temp.sender_name.clone();
-    }
-    if confirmed.sender_id.is_empty() || confirmed.sender_id == "0" {
-        confirmed.sender_id = temp.sender_id.clone();
-        confirmed.sender_user_id = temp.sender_user_id;
-    }
-    if confirmed.avatar_url.is_empty() && !temp.avatar_url.is_empty() {
-        confirmed.avatar_url = temp.avatar_url.clone();
-        confirmed.avatar_proxied = temp.avatar_proxied.clone();
-    }
-    if confirmed.create_time == 0 && temp.create_time != 0 {
-        confirmed.create_time = temp.create_time;
-        confirmed.timestamp_label = temp.timestamp_label.clone();
-        confirmed.day_label = temp.day_label.clone();
-    }
-    if confirmed.spans.is_empty() && !temp.spans.is_empty() {
-        confirmed.spans = temp.spans.clone();
-    }
-    confirmed
-}
-
 fn prepare_messages(msgs: Vec<ApiMessage>, cfg: Option<&AppConfig>) -> Vec<Message> {
-    let mut messages: Vec<Message> = msgs.into_iter().map(|m| message_from_api(m, cfg)).collect();
+    let mut messages: Vec<Message> = msgs
+        .into_iter()
+        .filter(|m| {
+            !matches!(
+                MessageCode::from_raw(m.code),
+                MessageCode::ChatUpdate
+                    | MessageCode::ChatRemove
+                    | MessageCode::Typing
+                    | MessageCode::UpdateEphemeralMsg
+                    | MessageCode::DeleteEphemeralMsg
+            )
+        })
+        .map(|m| message_from_api(m, cfg))
+        .collect();
     sort_messages(&mut messages);
     trim_messages(&mut messages);
     recompute_message_grouping(&mut messages);
@@ -1713,6 +2215,118 @@ fn trim_messages_back(messages: &mut Vec<Message>) -> usize {
     drop
 }
 
+/// Display name + avatar for an outgoing optimistic row (React `fakeItUntilYouMakeIt`).
+fn outgoing_sender_profile(
+    sender_id: &str,
+    fallback_username: &str,
+    clan_id: ClanId,
+    cx: &App,
+) -> (String, String, SharedString) {
+    let user_id = sender_id.parse::<i64>().ok().map(UserId);
+
+    let display_name = user_id
+        .and_then(|uid| {
+            ClanMembersStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .member(clan_id, uid)
+                    .map(|member| member.name().to_string())
+            })
+        })
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            let account = AccountStore::global(cx).read(cx);
+            account
+                .clan_profile
+                .as_ref()
+                .filter(|profile| profile.clan_id == clan_id && !profile.nick_name.is_empty())
+                .map(|profile| profile.nick_name.clone())
+                .or_else(|| {
+                    account.account.as_ref().map(|acct| {
+                        if !acct.display_name.is_empty() {
+                            acct.display_name.clone()
+                        } else {
+                            acct.username.clone()
+                        }
+                    })
+                })
+        })
+        .unwrap_or_else(|| fallback_username.to_string());
+
+    let avatar_url = user_id
+        .and_then(|uid| {
+            ClanMembersStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .member(clan_id, uid)
+                    .map(|member| member.avatar().to_string())
+            })
+        })
+        .filter(|avatar| !avatar.is_empty())
+        .or_else(|| {
+            AccountStore::global(cx)
+                .read(cx)
+                .clan_profile
+                .as_ref()
+                .filter(|profile| profile.clan_id == clan_id)
+                .and_then(|profile| profile.avatar_url.clone())
+        })
+        .or_else(|| {
+            AccountStore::global(cx)
+                .read(cx)
+                .account
+                .as_ref()
+                .and_then(|acct| acct.avatar_url.clone())
+        })
+        .unwrap_or_default();
+
+    let avatar_proxied = AppConfig::try_global(cx)
+        .map(|cfg| cfg.avatar_proxy(&avatar_url))
+        .unwrap_or_else(|| avatar_url.clone());
+
+    (display_name, avatar_url, avatar_proxied.into())
+}
+
+/// Preserve optimistic/current-user metadata when send acks omit avatar/sender fields.
+fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
+    if incoming.sender_id.is_empty() || incoming.sender_id == "0" {
+        incoming.sender_id = prior.sender_id.clone();
+        incoming.sender_user_id = prior.sender_user_id;
+    }
+    if incoming.sender_name.is_empty() {
+        incoming.sender_name = prior.sender_name.clone();
+    }
+    if incoming.avatar_url.is_empty() {
+        incoming.avatar_url = prior.avatar_url.clone();
+        incoming.avatar_proxied = prior.avatar_proxied.clone();
+    }
+    if prior.id.is_optimistic() {
+        incoming.create_time = prior.create_time;
+        incoming.day_label = prior.day_label.clone();
+        incoming.row_anchor_id = prior.row_anchor_id;
+    }
+    incoming
+}
+
+/// Client send timestamp for an optimistic row (React `client_send_time / 1000`).
+/// Keeps times strictly increasing within a same-sender burst so combine matches
+/// before and after ack.
+fn optimistic_create_time(messages: &MessageList, sender_id: &str) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let Some(last) = messages.last() else {
+        return now;
+    };
+    let probe = Message::new(MessageId(0), "", sender_id, "", now);
+    if message_combined_with_prev(Some(last), &probe) {
+        last.create_time.max(now) + 1
+    } else {
+        now
+    }
+}
+
 fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
@@ -1724,6 +2338,12 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .map(|r| message_reference_from_api(r, cfg))
         .collect();
     let reactions = aggregate_reactions(&m.reactions);
+    let attachments: Vec<MessageAttachment> = m
+        .attachments
+        .into_iter()
+        .map(|a| MessageAttachment::from_api(a, cfg))
+        .collect();
+    let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     Message::new(
         MessageId(m.message_id),
         m.content,
@@ -1738,12 +2358,41 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
     .with_edited(m.update_time, m.hide_editted)
     .with_avatar(m.avatar)
     .with_avatar_proxied(avatar_proxied)
-    .with_attachments(
-        m.attachments
-            .into_iter()
-            .map(|a| MessageAttachment::from_api(a, cfg))
-            .collect(),
-    )
+    .with_attachments(attachments)
+    .with_media_presentation(album_layout, viewer_media)
+}
+
+fn build_media_presentation(
+    attachments: &[MessageAttachment],
+    cfg: Option<&AppConfig>,
+) -> (Option<AlbumLayout>, Arc<[ViewerMedia]>) {
+    let images: Vec<&MessageAttachment> = attachments
+        .iter()
+        .filter(|a| !a.is_unsupported_media() && !a.is_video() && a.is_image())
+        .collect();
+    if images.is_empty() {
+        return (None, Vec::new().into());
+    }
+    let viewer_media: Arc<[ViewerMedia]> = images
+        .iter()
+        .map(|a| {
+            let viewer_src = cfg
+                .map(|c| c.imgproxy_url(&a.url, 0, 0, "force"))
+                .unwrap_or_else(|| a.url.clone());
+            ViewerMedia {
+                url: a.url.clone().into(),
+                filename: a.filename.clone().into(),
+                viewer_src: viewer_src.into(),
+            }
+        })
+        .collect();
+    let album_layout = if images.len() >= 2 {
+        let dims: Vec<(u32, u32)> = images.iter().map(|a| (a.width, a.height)).collect();
+        Some(calculate_album_layout(&dims))
+    } else {
+        None
+    };
+    (album_layout, viewer_media)
 }
 
 fn message_reference_from_api(
@@ -1787,15 +2436,34 @@ impl MessageAttachment {
                 let (w, h) = crate::config::attachment_display_dimensions(width, height);
                 (a.url.clone(), w, h)
             });
+        let thumbnail_proxied: SharedString = if a.thumbnail.is_empty() {
+            SharedString::default()
+        } else {
+            cfg.map(|c| {
+                c.imgproxy_url(
+                    &a.thumbnail,
+                    display_width.ceil() as u32,
+                    display_height.ceil() as u32,
+                    "fit",
+                )
+            })
+            .unwrap_or_else(|| a.thumbnail.clone())
+            .into()
+        };
+        let tenor_mp4 = crate::message::tenor_mp4_url(&a.url).map(SharedString::from);
         Self {
             url: a.url,
             filename: a.filename,
             filetype: a.filetype,
             width,
             height,
+            thumbnail: a.thumbnail,
+            duration: a.duration,
             proxied_src: proxied_src.into(),
+            thumbnail_proxied,
             display_width,
             display_height,
+            tenor_mp4,
         }
     }
 }
@@ -1831,6 +2499,8 @@ mod tests {
                 filetype: STICKER_FILETYPE.into(),
                 width: 0,
                 height: 0,
+                thumbnail: String::new(),
+                duration: 0,
             },
             None,
         );
@@ -1839,8 +2509,29 @@ mod tests {
         assert!(attachment.is_image());
         assert_eq!(
             (attachment.display_width, attachment.display_height),
-            (280.0, 150.0)
+            (100.0, 100.0)
         );
+    }
+
+    #[test]
+    fn video_attachment_maps_thumbnail_and_duration() {
+        let attachment = MessageAttachment::from_api(
+            mezon_client::transport::ApiAttachment {
+                url: "https://cdn/clip.mp4".into(),
+                filename: "clip.mp4".into(),
+                filetype: "video/mp4".into(),
+                width: 1280,
+                height: 720,
+                thumbnail: "https://cdn/clip-thumb.jpg".into(),
+                duration: 42,
+            },
+            None,
+        );
+        assert!(attachment.is_video());
+        assert!(!attachment.is_image());
+        assert_eq!(attachment.duration, 42);
+        assert_eq!(attachment.thumbnail, "https://cdn/clip-thumb.jpg");
+        assert_eq!(attachment.thumbnail_proxied, "https://cdn/clip-thumb.jpg");
     }
 
     #[test]
@@ -1905,6 +2596,94 @@ mod tests {
         assert_eq!(m.sender_name, "Alice");
         assert_eq!(m.avatar_url, "av.png");
         assert_eq!(m.avatar_proxied, "av.png");
+    }
+
+    #[test]
+    fn message_from_api_precomputes_album_and_viewer_media() {
+        let image = |url: &str| mezon_client::transport::ApiAttachment {
+            url: url.into(),
+            filename: "a.png".into(),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            thumbnail: String::new(),
+            duration: 0,
+        };
+        let m = message_from_api(
+            ApiMessage {
+                message_id: 5,
+                content: String::new(),
+                content_tokens: mezon_client::transport::ApiMessageContent::default(),
+                code: 0,
+                sender_id: 1,
+                sender_name: "Alice".into(),
+                avatar: String::new(),
+                create_time: 0,
+                update_time: 0,
+                hide_editted: false,
+                attachments: vec![image("https://cdn/1.png"), image("https://cdn/2.png")],
+                references: vec![],
+                reactions: vec![],
+            },
+            None,
+        );
+        assert!(m.album_layout.is_some());
+        assert_eq!(m.viewer_media.len(), 2);
+        assert_eq!(m.viewer_media[0].url, "https://cdn/1.png");
+        assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_optimistic_avatar_and_name() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "2", "42", "huy.lexuan", 100)
+            .with_avatar("avatar.png");
+        let ack = Message::new(MessageId(99), "2", "0", String::new(), 500);
+        let merged = merge_sparse_sender(&optimistic, ack);
+        assert_eq!(merged.sender_id, "42");
+        assert_eq!(merged.sender_name, "huy.lexuan");
+        assert_eq!(merged.avatar_url, "avatar.png");
+        assert_eq!(merged.create_time, 100);
+        assert_eq!(merged.row_anchor_id, optimistic.row_anchor_id);
+    }
+
+    #[test]
+    fn optimistic_create_time_increments_within_same_sender_burst() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut list = MessageList::from_messages(vec![Message::new(
+            MessageId(1),
+            "a",
+            "42",
+            "Me",
+            now - 5,
+        )]);
+        assert_eq!(optimistic_create_time(&list, "42"), now + 1);
+        list.push_trim_regroup(Message::new(
+            MessageId::next_optimistic(),
+            "b",
+            "42",
+            "Me",
+            now + 1,
+        ));
+        assert_eq!(optimistic_create_time(&list, "42"), now + 2);
+    }
+
+    #[test]
+    fn optimistic_create_time_resets_after_combine_window() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let list = MessageList::from_messages(vec![Message::new(
+            MessageId(1),
+            "a",
+            "42",
+            "Me",
+            now - 700,
+        )]);
+        assert_eq!(optimistic_create_time(&list, "42"), now);
     }
 
     fn assert_list_consistent(list: &MessageList) {
@@ -1976,7 +2755,6 @@ mod tests {
         ChannelMessages {
             messages: MessageList::from_messages(msgs),
             has_more: false,
-            has_more_bottom: false,
         }
     }
 
@@ -1987,8 +2765,8 @@ mod tests {
     fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: MessageId, confirmed: Message) {
         if let Some(idx) = ch.messages.position(temp_id) {
             let temp = ch.messages.as_slice()[idx].clone();
-            let merged = merge_confirmed_with_temp(&temp, confirmed);
-            ch.messages.replace_at(idx, merged);
+            let merged = merge_sparse_sender(&temp, confirmed);
+            ch.messages.replace_at_and_regroup(idx, merged);
         } else if !ch.messages.contains_id(confirmed.id) {
             ch.messages.push_sorted(confirmed);
         }
@@ -2183,5 +2961,79 @@ mod tests {
         assert_eq!(list.as_slice()[0].id, MessageId(1));
         assert_eq!(list.as_slice().last().unwrap().id, temp_new);
         assert_list_consistent(&list);
+    }
+
+    #[test]
+    fn has_more_bottom_false_when_tail_in_buffer() {
+        let list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U", 100),
+            Message::new(MessageId(99), "z", "u1", "U", 200),
+        ]);
+        assert!(!has_more_bottom_for(Some(MessageId(99)), &list));
+    }
+
+    #[test]
+    fn has_more_bottom_true_when_tail_not_in_buffer() {
+        let list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "a", "u1", "U", 100),
+            Message::new(MessageId(50), "m", "u1", "U", 150),
+        ]);
+        assert!(has_more_bottom_for(Some(MessageId(99)), &list));
+    }
+
+    #[test]
+    fn has_more_bottom_false_without_tail_or_empty_buffer() {
+        let list = MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        assert!(!has_more_bottom_for(None, &list));
+        assert!(!has_more_bottom_for(Some(MessageId(1)), &MessageList::default()));
+    }
+
+    #[test]
+    fn storage_channel_id_uses_topic_bucket() {
+        let mut m = mezon_proto::api::ChannelMessage::default();
+        m.channel_id = 10;
+        m.topic_id = 99;
+        assert_eq!(storage_channel_id(&m), ChannelId(99));
+        m.topic_id = 0;
+        assert_eq!(storage_channel_id(&m), ChannelId(10));
+    }
+
+    #[test]
+    fn patch_reply_previews_after_delete_marks_reference() {
+        let mut list = MessageList::from_messages(vec![Message::new(
+            MessageId(1),
+            "reply",
+            "u1",
+            "U",
+            100,
+        )
+        .with_references(vec![MessageReference {
+            message_ref_id: MessageId(42),
+            sender_id: UserId(1),
+            sender_name: "x".into(),
+            sender_avatar: String::new(),
+            content: "orig".into(),
+            has_attachment: false,
+        }])]);
+        patch_reply_previews_after_delete(&mut list, MessageId(42));
+        assert_eq!(
+            list.as_slice()[0].references[0].content,
+            DELETED_REPLY_PREVIEW
+        );
+        assert!(list.as_slice()[0].references[0].message_ref_id.is_zero());
+    }
+
+    #[test]
+    fn should_write_last_seen_matches_react_rules() {
+        let seen = MessageId(10_i64 << 22);
+        let newer = MessageId(12_i64 << 22);
+        let tail = MessageId(15_i64 << 22);
+        assert!(should_write_last_seen(Some(seen), Some(tail), newer));
+        assert!(should_write_last_seen(Some(seen), Some(tail), tail));
+        assert!(!should_write_last_seen(
+            Some(newer),
+            Some(tail),
+            seen
+        ));
     }
 }

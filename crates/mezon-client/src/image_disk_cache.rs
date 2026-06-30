@@ -1,7 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use foyer::{
+    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
+    PsyncIoEngineConfig,
+};
 use futures::AsyncReadExt as _;
 use futures::future::BoxFuture;
 use http_client::{AsyncBody, HttpClient, Method, Request, Response, Url, http};
@@ -9,121 +14,153 @@ use reqwest_client::ReqwestClient;
 
 use crate::transport_runtime::handle;
 
-const DEFAULT_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
-const EVICT_LOW_WATER_NUM: u64 = 9;
-const EVICT_LOW_WATER_DEN: u64 = 10;
+const MEMORY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const DISK_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
+const STATS_LOG_INTERVAL: u64 = 256;
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+type ImageHybridCache = HybridCache<u64, Vec<u8>>;
 
 pub struct DiskImageCacheClient {
     inner: ReqwestClient,
     dir: Option<PathBuf>,
-    budget_bytes: u64,
-    evicting: Arc<AtomicBool>,
+    cache: Arc<tokio::sync::OnceCell<Option<ImageHybridCache>>>,
+    hits: Arc<AtomicU64>,
+    misses: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DiskImageCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_bytes: u64,
 }
 
 impl DiskImageCacheClient {
     pub fn new(inner: ReqwestClient) -> Self {
-        let dir = dirs::cache_dir().map(|base| base.join("mezon").join("avatars"));
-        if let Some(dir) = dir.as_ref() {
-            let _ = std::fs::create_dir_all(dir);
-        }
+        let dir = dirs::cache_dir().map(|base| base.join("mezon").join("images"));
         Self {
             inner,
             dir,
-            budget_bytes: DEFAULT_BUDGET_BYTES,
-            evicting: Arc::new(AtomicBool::new(false)),
+            cache: Arc::new(tokio::sync::OnceCell::new()),
+            hits: Arc::new(AtomicU64::new(0)),
+            misses: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn stats(&self) -> DiskImageCacheStats {
+        let (disk_write_bytes, disk_read_bytes) = self
+            .cache
+            .get()
+            .and_then(|cache| cache.as_ref())
+            .map(|cache| {
+                let stats = cache.statistics();
+                (
+                    stats.disk_write_bytes() as u64,
+                    stats.disk_read_bytes() as u64,
+                )
+            })
+            .unwrap_or((0, 0));
+        DiskImageCacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            disk_write_bytes,
+            disk_read_bytes,
         }
     }
 }
 
-fn is_avatar_imgproxy_url(uri: &str) -> bool {
-    uri.contains("rs:fill:100:100:") || uri.contains("rs:fit:300:300:")
+fn image_path(url: &str) -> &str {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    &url[..end]
 }
 
-fn cache_key(url: &str) -> String {
+fn has_image_extension(path: &str) -> bool {
+    const EXTS: [&[u8]; 7] = [
+        b".png", b".jpg", b".jpeg", b".webp", b".gif", b".bmp", b".avif",
+    ];
+    let bytes = path.as_bytes();
+    EXTS.iter().any(|ext| {
+        bytes.len() >= ext.len() && bytes[bytes.len() - ext.len()..].eq_ignore_ascii_case(ext)
+    })
+}
+
+fn is_cacheable_image_url(url: &str) -> bool {
+    let path = image_path(url);
+    if (path.contains("/rs:fill:") || path.contains("/rs:fit:")) && path.ends_with("@webp") {
+        return true;
+    }
+    (url.starts_with("https://cdn.mezon.") || url.starts_with("https://profile.mezon."))
+        && has_image_extension(path)
+}
+
+fn stable_key(url: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in url.as_bytes() {
+    for byte in image_path(url).as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{hash:016x}.webp")
+    hash
+}
+
+fn is_cache_hit(fetched_ok: bool, fetcher_ran: bool) -> bool {
+    fetched_ok && !fetcher_ran
 }
 
 fn ok_response(bytes: Vec<u8>) -> Response<AsyncBody> {
     Response::new(AsyncBody::from(bytes))
 }
 
-async fn read_cache(path: PathBuf) -> Option<Vec<u8>> {
-    let bytes = handle()
-        .spawn(async move { tokio::fs::read(&path).await.ok() })
-        .await
-        .ok()
-        .flatten()?;
-    (!bytes.is_empty()).then_some(bytes)
-}
-
-fn store_cache(
-    dir: PathBuf,
-    path: PathBuf,
-    bytes: Vec<u8>,
-    budget: u64,
-    evicting: Arc<AtomicBool>,
-) {
-    handle().spawn(async move {
-        if write_atomic(&path, &bytes).await.is_err() {
-            return;
+async fn build_cache(dir: PathBuf) -> Option<ImageHybridCache> {
+    if let Err(err) = tokio::fs::create_dir_all(&dir).await {
+        tracing::error!("image disk cache: create dir failed: {err}");
+        return None;
+    }
+    let device = match FsDeviceBuilder::new(&dir)
+        .with_capacity(DISK_BUDGET_BYTES)
+        .build()
+    {
+        Ok(device) => device,
+        Err(err) => {
+            tracing::error!("image disk cache: device build failed: {err}");
+            return None;
         }
-        if evicting.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        enforce_budget(&dir, budget).await;
-        evicting.store(false, Ordering::SeqCst);
-    });
-}
-
-async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let token = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("{token}.tmp"));
-    tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, path).await
-}
-
-async fn enforce_budget(dir: &Path, budget: u64) {
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-        return;
     };
-    let mut files: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
-    let mut total: u64 = 0;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("webp") {
-            continue;
+    match HybridCacheBuilder::new()
+        .with_name("mezon-image-disk")
+        .memory(MEMORY_BUDGET_BYTES)
+        .with_weighter(|_key: &u64, value: &Vec<u8>| value.len())
+        .storage()
+        .with_io_engine_config(PsyncIoEngineConfig::new())
+        .with_engine_config(BlockEngineConfig::new(device))
+        .build()
+        .await
+    {
+        Ok(cache) => {
+            tracing::info!("image disk cache ready at {}", dir.display());
+            Some(cache)
         }
-        let Ok(meta) = entry.metadata().await else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        total = total.saturating_add(meta.len());
-        files.push((path, modified, meta.len()));
-    }
-    if total <= budget {
-        return;
-    }
-    files.sort_by_key(|(_, modified, _)| *modified);
-    let low_water = budget / EVICT_LOW_WATER_DEN * EVICT_LOW_WATER_NUM;
-    for (path, _, len) in files {
-        if total <= low_water {
-            break;
-        }
-        if tokio::fs::remove_file(&path).await.is_ok() {
-            total = total.saturating_sub(len);
+        Err(err) => {
+            tracing::error!("image disk cache: build failed: {err}");
+            None
         }
     }
+}
+
+enum FetchResult {
+    Bytes(Vec<u8>),
+    Passthrough(Response<AsyncBody>),
+}
+
+async fn buffered_response(
+    network: BoxFuture<'static, anyhow::Result<Response<AsyncBody>>>,
+) -> anyhow::Result<Response<AsyncBody>> {
+    let mut response = network.await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+    let (parts, _) = response.into_parts();
+    Ok(Response::from_parts(parts, AsyncBody::from(body)))
 }
 
 impl HttpClient for DiskImageCacheClient {
@@ -139,32 +176,99 @@ impl HttpClient for DiskImageCacheClient {
         &self,
         req: Request<AsyncBody>,
     ) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
-        let Some(dir) = self.dir.clone() else {
-            return self.inner.send(req);
-        };
         let uri = req.uri().to_string();
-        if *req.method() != Method::GET || !is_avatar_imgproxy_url(&uri) {
+        if *req.method() != Method::GET || !is_cacheable_image_url(&uri) {
             return self.inner.send(req);
         }
-        let path = dir.join(cache_key(&uri));
-        let budget = self.budget_bytes;
-        let evicting = self.evicting.clone();
+        let key = stable_key(&uri);
         let network = self.inner.send(req);
+        let dir = self.dir.clone();
+        let cache_cell = self.cache.clone();
+        let hits = self.hits.clone();
+        let misses = self.misses.clone();
         Box::pin(async move {
-            if let Some(bytes) = read_cache(path.clone()).await {
-                return Ok(ok_response(bytes));
+            let Some(dir) = dir else {
+                return network.await;
+            };
+            let result = handle()
+                .spawn(async move {
+                    let cache = match cache_cell.get().cloned() {
+                        Some(Some(cache)) => cache,
+                        Some(None) => {
+                            return buffered_response(network)
+                                .await
+                                .map(FetchResult::Passthrough);
+                        }
+                        None => {
+                            let cache_cell = cache_cell.clone();
+                            tokio::spawn(async move {
+                                let _ = cache_cell.get_or_init(|| build_cache(dir)).await;
+                            });
+                            return buffered_response(network)
+                                .await
+                                .map(FetchResult::Passthrough);
+                        }
+                    };
+                    let passthrough: Arc<Mutex<Option<Response<AsyncBody>>>> =
+                        Arc::new(Mutex::new(None));
+                    let slot = passthrough.clone();
+                    let fetcher_ran = Arc::new(AtomicBool::new(false));
+                    let ran_flag = fetcher_ran.clone();
+                    let fetched = cache
+                        .get_or_fetch(&key, move || async move {
+                            ran_flag.store(true, Ordering::Relaxed);
+                            let mut response = network.await?;
+                            if !response.status().is_success() {
+                                let mut body = Vec::new();
+                                response.body_mut().read_to_end(&mut body).await?;
+                                let (parts, _) = response.into_parts();
+                                if let Ok(mut held) = slot.lock() {
+                                    *held =
+                                        Some(Response::from_parts(parts, AsyncBody::from(body)));
+                                }
+                                anyhow::bail!("image fetch returned non-success status");
+                            }
+                            let mut body = Vec::new();
+                            response.body_mut().read_to_end(&mut body).await?;
+                            if body.is_empty() || body.len() > MAX_ENTRY_BYTES {
+                                if let Ok(mut held) = slot.lock() {
+                                    *held = Some(ok_response(body));
+                                }
+                                anyhow::bail!("image body not admissible to disk cache");
+                            }
+                            Ok::<Vec<u8>, anyhow::Error>(body)
+                        })
+                        .await;
+                    let downloaded = passthrough.lock().ok().and_then(|mut held| held.take());
+                    let hit = is_cache_hit(fetched.is_ok(), fetcher_ran.load(Ordering::Relaxed));
+                    let counted = if hit {
+                        hits.fetch_add(1, Ordering::Relaxed);
+                        hits.load(Ordering::Relaxed) + misses.load(Ordering::Relaxed)
+                    } else {
+                        misses.fetch_add(1, Ordering::Relaxed);
+                        hits.load(Ordering::Relaxed) + misses.load(Ordering::Relaxed)
+                    };
+                    if counted.is_multiple_of(STATS_LOG_INTERVAL) {
+                        tracing::debug!(
+                            hits = hits.load(Ordering::Relaxed),
+                            misses = misses.load(Ordering::Relaxed),
+                            "image disk cache"
+                        );
+                    }
+                    match fetched {
+                        Ok(entry) => Ok(FetchResult::Bytes(entry.value().clone())),
+                        Err(err) => match downloaded {
+                            Some(response) => Ok(FetchResult::Passthrough(response)),
+                            None => Err(anyhow::anyhow!("image disk cache fetch failed: {err}")),
+                        },
+                    }
+                })
+                .await
+                .map_err(|err| anyhow::anyhow!("image cache task failed: {err}"))?;
+            match result? {
+                FetchResult::Bytes(bytes) => Ok(ok_response(bytes)),
+                FetchResult::Passthrough(response) => Ok(response),
             }
-            let mut response = network.await?;
-            if !response.status().is_success() {
-                return Ok(response);
-            }
-            let mut body = Vec::new();
-            response.body_mut().read_to_end(&mut body).await?;
-            if !body.is_empty() && body.len() as u64 <= MAX_ENTRY_BYTES {
-                store_cache(dir, path, body.clone(), budget, evicting);
-            }
-            let (parts, _) = response.into_parts();
-            Ok(Response::from_parts(parts, AsyncBody::from(body)))
         })
     }
 }
@@ -173,54 +277,126 @@ impl HttpClient for DiskImageCacheClient {
 mod tests {
     use super::*;
 
-    const AVATAR_URL: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
-    const PROFILE_URL: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
+    const AVATAR: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fill:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
+    const PROFILE: &str = "https://dev-imgproxy.nccsoft.vn/k/rs:fit:300:300:1/mb:2097152/plain/https://cdn.mezon.ai/a.png@webp";
+    const MESSAGE_RENDITION: &str = "https://imgproxy.mezon.ai/k/rs:fill:800:600:1/mb:2097152/plain/https://cdn.mezon.ai/x.jpg@webp";
+    const RAW_CDN: &str = "https://cdn.mezon.ai/1700000000_0photo.png";
+    const RAW_PROFILE: &str = "https://profile.mezon.ai/1700000000_0avatar.jpg";
+    const VIDEO: &str = "https://cdn.mezon.ai/1700000000_0clip.mp4";
+    const PDF: &str = "https://cdn.mezon.ai/1700000000_0doc.pdf";
+    const API: &str = "https://api.mezon.ai/v2/account";
+    const TENOR: &str = "https://media.tenor.com/abc.gif";
 
     #[test]
-    fn cache_key_is_deterministic_and_distinct() {
-        let other = AVATAR_URL.replace("/a.png@", "/b.png@");
-        assert_eq!(cache_key(AVATAR_URL), cache_key(AVATAR_URL));
-        assert_ne!(cache_key(AVATAR_URL), cache_key(&other));
-        assert!(cache_key(AVATAR_URL).ends_with(".webp"));
+    fn predicate_matches_renditions_avatars_profile_and_raw_cdn_images() {
+        assert!(is_cacheable_image_url(AVATAR));
+        assert!(is_cacheable_image_url(PROFILE));
+        assert!(is_cacheable_image_url(MESSAGE_RENDITION));
+        assert!(is_cacheable_image_url(RAW_CDN));
+        assert!(is_cacheable_image_url(RAW_PROFILE));
     }
 
     #[test]
-    fn only_avatar_and_profile_imgproxy_urls_are_cached() {
-        assert!(is_avatar_imgproxy_url(AVATAR_URL));
-        assert!(is_avatar_imgproxy_url(PROFILE_URL));
-        assert!(!is_avatar_imgproxy_url(
-            &AVATAR_URL.replace("rs:fill:100:100:", "rs:fill:800:600:")
+    fn predicate_excludes_video_pdf_api_and_third_party() {
+        assert!(!is_cacheable_image_url(VIDEO));
+        assert!(!is_cacheable_image_url(PDF));
+        assert!(!is_cacheable_image_url(API));
+        assert!(!is_cacheable_image_url(TENOR));
+    }
+
+    #[test]
+    fn predicate_excludes_lookalike_hosts() {
+        assert!(!is_cacheable_image_url("https://cdn.mezon-evil.com/x.png"));
+        assert!(!is_cacheable_image_url(
+            "https://profile.mezon-evil.com/x.jpg"
         ));
-        assert!(!is_avatar_imgproxy_url("https://api.mezon.ai/v2/account"));
+        assert!(!is_cacheable_image_url("https://cdn.mezonai.example/x.png"));
     }
 
-    #[tokio::test]
-    async fn enforce_budget_keeps_cache_under_budget() {
+    #[test]
+    fn stable_key_ignores_query_and_fragment() {
+        assert_eq!(stable_key(RAW_CDN), stable_key(RAW_CDN));
+        let presigned = format!("{RAW_CDN}?X-Amz-Expires=3600&X-Amz-Signature=deadbeef");
+        assert_eq!(stable_key(RAW_CDN), stable_key(&presigned));
+        let fragment = format!("{RAW_CDN}#anchor");
+        assert_eq!(stable_key(RAW_CDN), stable_key(&fragment));
+    }
+
+    #[test]
+    fn stable_key_distinguishes_distinct_sources_and_renditions() {
+        assert_ne!(stable_key(RAW_CDN), stable_key(RAW_PROFILE));
+        let bigger = MESSAGE_RENDITION.replace("800:600", "1600:1200");
+        assert_ne!(stable_key(MESSAGE_RENDITION), stable_key(&bigger));
+    }
+
+    #[test]
+    fn fresh_download_is_classified_as_miss() {
+        assert!(!is_cache_hit(true, true));
+        assert!(!is_cache_hit(false, true));
+        assert!(!is_cache_hit(false, false));
+    }
+
+    #[test]
+    fn served_without_running_fetcher_is_classified_as_hit() {
+        assert!(is_cache_hit(true, false));
+    }
+
+    static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    async fn test_cache(dir: &std::path::Path) -> ImageHybridCache {
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let device = FsDeviceBuilder::new(dir)
+            .with_capacity(4 * 1024 * 1024)
+            .build()
+            .unwrap();
+        HybridCacheBuilder::new()
+            .memory(1024 * 1024)
+            .with_weighter(|_key: &u64, value: &Vec<u8>| value.len())
+            .storage()
+            .with_io_engine_config(PsyncIoEngineConfig::new())
+            .with_engine_config(BlockEngineConfig::new(device).with_block_size(16 * 1024))
+            .build()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_fetch_counts_as_miss_then_identical_request_as_hit() {
         let dir = std::env::temp_dir().join(format!(
-            "mezon-img-cache-{}-{}",
+            "mezon-img-cache-test-{}-{}",
             std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        for i in 0..5u8 {
-            let path = dir.join(format!("{i:016x}.webp"));
-            tokio::fs::write(&path, vec![i; 100]).await.unwrap();
-        }
+        let cache = test_cache(&dir).await;
+        let key = stable_key(RAW_CDN);
 
-        enforce_budget(&dir, 250).await;
+        let first_ran = Arc::new(AtomicBool::new(false));
+        let flag = first_ran.clone();
+        let first = cache
+            .get_or_fetch(&key, move || async move {
+                flag.store(true, Ordering::Relaxed);
+                Ok::<Vec<u8>, anyhow::Error>(vec![1, 2, 3, 4])
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.value(), &vec![1, 2, 3, 4]);
+        assert!(first_ran.load(Ordering::Relaxed));
+        assert!(!is_cache_hit(true, first_ran.load(Ordering::Relaxed)));
 
-        let mut remaining: u64 = 0;
-        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            if entry.path().extension().and_then(|ext| ext.to_str()) == Some("webp") {
-                remaining += entry.metadata().await.unwrap().len();
-            }
-        }
-        assert!(
-            remaining <= 250,
-            "cache not under budget: {remaining} bytes"
-        );
+        let second_ran = Arc::new(AtomicBool::new(false));
+        let flag = second_ran.clone();
+        let second = cache
+            .get_or_fetch(&key, move || async move {
+                flag.store(true, Ordering::Relaxed);
+                Ok::<Vec<u8>, anyhow::Error>(vec![9, 9, 9, 9])
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.value(), &vec![1, 2, 3, 4]);
+        assert!(!second_ran.load(Ordering::Relaxed));
+        assert!(is_cache_hit(true, second_ran.load(Ordering::Relaxed)));
+
+        cache.close().await.ok();
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

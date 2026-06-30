@@ -1,13 +1,15 @@
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind,
-    DirectMessageStore, GroupMembersStore, MessagesStore, Settings, ThreadsEvent, ThreadsStore,
+    DirectMessageStore, GroupMembersStore, MessagesStore, PinnedMessagesStore, Settings,
+    ThreadsEvent, ThreadsStore,
     VoiceStore,
 };
 use ui::PopoverMenuHandle;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
 use crate::components::primitives::{InputEvent, InputState};
@@ -34,6 +36,7 @@ pub struct ChatLayout {
     pub(crate) thread_search_input: Option<Entity<InputState>>,
     thread_name_input: Option<Entity<InputState>>,
     create_thread_message_input: Option<Entity<InputState>>,
+    pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
 }
 
 impl ChatLayout {
@@ -82,11 +85,15 @@ impl ChatLayout {
         })
         .detach();
 
+        let pinned_store = PinnedMessagesStore::global(cx);
+        cx.observe(&pinned_store, |_, _, cx| cx.notify()).detach();
+
         let chat_area = ChatArea::new(settings.clone(), cx);
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
             this.dismiss_threads_popover(cx);
+            this.pin_popover_handle.hide(cx);
             cx.notify();
         })
         .detach();
@@ -96,6 +103,7 @@ impl ChatLayout {
                 Route::Direct | Route::Friends | Route::DirectMessage { .. }
             ) {
                 this.dismiss_threads_popover(cx);
+                this.pin_popover_handle.hide(cx);
             }
             this.sync_active_from_route(cx);
             cx.notify();
@@ -120,6 +128,7 @@ impl ChatLayout {
             thread_search_input: None,
             thread_name_input: None,
             create_thread_message_input: None,
+            pin_popover_handle: PopoverMenuHandle::default(),
         };
         this.sync_active_from_route(cx);
         this
@@ -303,15 +312,6 @@ impl Render for ChatLayout {
         crate::trace_render!("ChatLayout");
         self.chat_area.ensure_input(window, cx);
         self.maybe_prefetch_voice_token(cx);
-
-        if let Some(ch) = self.channel_list.read(cx).active_channel()
-            && ch.channel_type == ChannelType::Voice
-        {
-            let channel_id = ch.id;
-            self.voice_store.update(cx, |store, cx| {
-                store.prefetch_meet_token(channel_id.to_string(), cx);
-            });
-        }
 
         let nav_body = self.render_nav_body(cx);
         let locale = self.settings.read(cx).language.clone();
@@ -659,6 +659,7 @@ impl ChatLayout {
                         Some(dm.id),
                         is_group,
                         is_group && self.show_member_list,
+                        None,
                         cx,
                     )
                     .into_any_element();
@@ -669,7 +670,7 @@ impl ChatLayout {
             ) {
                 return self
                     .chat_area
-                    .render(&locale, None, true, None, false, false, cx)
+                    .render(&locale, None, true, None, false, false, None, cx)
                     .into_any_element();
             }
             return div()
@@ -729,6 +730,7 @@ impl ChatLayout {
                     Some(channel_id),
                     true,
                     self.show_member_list,
+                    Some(self.pin_popover_handle.clone()),
                     cx,
                 )
                 .into_any_element();
@@ -743,7 +745,16 @@ impl ChatLayout {
         {
             return self
                 .chat_area
-                .render(&locale, None, false, None, true, self.show_member_list, cx)
+                .render(
+                    &locale,
+                    None,
+                    false,
+                    None,
+                    true,
+                    self.show_member_list,
+                    None,
+                    cx,
+                )
                 .into_any_element();
         }
 

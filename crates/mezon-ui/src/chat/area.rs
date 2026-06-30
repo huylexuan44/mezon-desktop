@@ -4,6 +4,7 @@ use gpui::{
     AnyView, App, Context, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px,
 };
 use mezon_store::{ChannelId, Settings};
+use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChatHeader;
@@ -11,6 +12,7 @@ use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::message::ChannelMessages;
+use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::primitives::{InputEvent, InputState};
 use crate::theme::ActiveTheme;
 
@@ -103,6 +105,7 @@ impl ChatArea {
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
+        pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
         let input_state = match self.input_state.clone() {
@@ -123,6 +126,7 @@ impl ChatArea {
                 is_dm,
                 show_members_button,
                 show_member_panel,
+                pin_handle,
                 cx,
             );
         });
