@@ -79,8 +79,6 @@ impl ChatLayout {
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
-            this.dismiss_inbox_popover(cx);
-            this.pin_popover_handle.hide(cx);
             cx.notify();
         })
         .detach();
@@ -99,13 +97,11 @@ impl ChatLayout {
         .detach();
         cx.observe(&clan_list, |this, _, cx| {
             this.sync_inbox_context(cx);
-            this.dismiss_inbox_popover(cx);
             cx.notify();
         })
         .detach();
         cx.observe(&channel_list, |this, _, cx| {
             this.sync_inbox_context(cx);
-            this.dismiss_inbox_popover(cx);
         })
         .detach();
         let mut this = Self {

@@ -92,9 +92,6 @@ impl InboxPopoverPanel {
         let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
             if matches!(event, InboxEvent::Updated) {
                 this.sync_from_store(cx);
-                if this.tab == InboxTab::Mentions {
-                    this.prefetch_mention_channels(cx);
-                }
                 cx.notify();
             }
         });
@@ -143,7 +140,6 @@ impl InboxPopoverPanel {
             _users_sub,
         };
         this.sync_from_store(cx);
-        this.prefetch_mention_channels(cx);
         this
     }
 
@@ -192,36 +188,11 @@ impl InboxPopoverPanel {
                 store.fetch_if_empty(&self.clan_id, category, cx);
             });
         }
-        if self.tab == InboxTab::Mentions {
-            self.prefetch_mention_channels(cx);
-        }
     }
 
     fn sync_from_store(&mut self, cx: &App) {
         self.cached_items = Self::build_items(self.tab, &self.clan_id, cx);
         self.sync_list_state(false);
-    }
-
-    fn prefetch_mention_channels(&self, cx: &mut Context<Self>) {
-        use std::collections::HashSet;
-        let mut clan_ids = HashSet::new();
-        if let Ok(clan) = self.clan_id.parse::<ClanId>() {
-            clan_ids.insert(clan);
-        }
-        for row in self.cached_items.iter() {
-            if let ListRow::Notification(notification) = row
-                && let Some(clan_id) = notification
-                    .effective_clan_id()
-                    .and_then(|id| id.parse::<ClanId>().ok())
-            {
-                clan_ids.insert(clan_id);
-            }
-        }
-        ChannelList::global(cx).update(cx, |list, cx| {
-            for clan_id in clan_ids {
-                list.load_for_clan(clan_id, cx);
-            }
-        });
     }
 
     fn build_items(tab: InboxTab, clan_id: &str, cx: &App) -> Rc<Vec<ListRow>> {

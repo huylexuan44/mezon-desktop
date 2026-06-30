@@ -1,5 +1,5 @@
 use chrono::{Local, TimeZone};
-use gpui::{App, FontWeight, Rgba, SharedString, div, img, prelude::*, px, rgb};
+use gpui::{App, FontWeight, SharedString, div, img, prelude::*, px, rgb};
 use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, InboxCategory,
     InboxMentionSpan, InboxNotification, ProfileContext, TopicDiscussion, UserId,
@@ -32,7 +32,6 @@ struct ForYouLine {
 struct NotificationRowView {
     sender_name: SharedString,
     avatar_url: Option<SharedString>,
-    sender_has_roles: bool,
     time_label: SharedString,
     mention_breadcrumb: Option<MentionBreadcrumb>,
     show_direct_message: bool,
@@ -292,7 +291,7 @@ fn resolve_notification_row(
         .map(sender_display_name)
         .unwrap_or_default();
 
-    let (mut sender_name, mut avatar_url, sender_has_roles) = clan_id
+    let (mut sender_name, mut avatar_url, _) = clan_id
         .map(|clan| resolve_sender(clan, sender_id, fallback_avatar, &fallback_name, cx))
         .unwrap_or((
             fallback_name.clone().into(),
@@ -363,7 +362,6 @@ fn resolve_notification_row(
     NotificationRowView {
         sender_name,
         avatar_url,
-        sender_has_roles,
         time_label,
         mention_breadcrumb,
         show_direct_message,
@@ -456,14 +454,6 @@ fn render_mention_breadcrumb(theme: &Theme, breadcrumb: &MentionBreadcrumb) -> i
         })
 }
 
-fn sender_name_color(theme: &Theme, has_roles: bool) -> Rgba {
-    if has_roles {
-        theme.tokens.mention_primary
-    } else {
-        rgb(DISPLAY_NAME_COLOR)
-    }
-}
-
 fn render_message_content(
     theme: &Theme,
     text: &SharedString,
@@ -475,7 +465,7 @@ fn render_message_content(
     if spans.is_empty() {
         return div()
             .text_sm()
-            .text_color(theme.text_secondary)
+            .text_color(theme.tokens.text_theme_message)
             .overflow_hidden()
             .child(text.clone())
             .into_any_element();
@@ -492,7 +482,7 @@ fn render_message_content(
             children.push(
                 div()
                     .text_sm()
-                    .text_color(theme.text_secondary)
+                    .text_color(theme.tokens.text_theme_message)
                     .child(SharedString::from(text_str[cursor..start].to_string()))
                     .into_any_element(),
             );
@@ -531,7 +521,7 @@ fn render_message_content(
         children.push(
             div()
                 .text_sm()
-                .text_color(theme.text_secondary)
+                .text_color(theme.tokens.text_theme_message)
                 .child(SharedString::from(text_str[cursor..].to_string()))
                 .into_any_element(),
         );
@@ -602,7 +592,6 @@ fn render_message_head(
     theme: &Theme,
     sender_name: &SharedString,
     time_label: &SharedString,
-    has_roles: bool,
 ) -> impl IntoElement {
     h_flex()
         .items_baseline()
@@ -611,14 +600,15 @@ fn render_message_head(
             div()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(sender_name_color(theme, has_roles))
+                .text_color(rgb(DISPLAY_NAME_COLOR))
                 .child(sender_name.clone()),
         )
         .when(!time_label.is_empty(), |row| {
             row.child(
                 div()
                     .text_xs()
-                    .text_color(theme.text_muted)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.tokens.text_secondary)
                     .child(time_label.clone()),
             )
         })
@@ -702,7 +692,6 @@ pub fn render_notification_body(
                         theme,
                         &view.sender_name,
                         &view.time_label,
-                        view.sender_has_roles,
                     ))
                     .when(view.body_is_attachment, |c| {
                         c.child(
