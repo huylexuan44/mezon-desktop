@@ -18,6 +18,7 @@ pub mod message;
 pub mod message_time;
 pub mod messages;
 pub mod pinned;
+pub mod permissions;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
@@ -62,6 +63,10 @@ pub use message::{
 };
 pub use messages::*;
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
+pub use permissions::{
+    ClanSettingsPermissions, PermissionEvent, PermissionStore, PERMISSION_ADMINISTRATOR,
+    PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN,
+};
 pub use platform::{OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};

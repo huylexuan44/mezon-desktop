@@ -462,6 +462,10 @@ pub struct ApiClanDesc {
     pub logo: String,
     pub banner: String,
     pub welcome_channel_id: i64,
+    pub status: i32,
+    pub is_onboarding: bool,
+    pub is_community: bool,
+    pub prevent_anonymous: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1163,6 +1167,10 @@ impl MezonTransport {
             logo: clan.logo,
             banner: clan.banner,
             welcome_channel_id: clan.welcome_channel_id,
+            status: clan.status,
+            is_onboarding: clan.is_onboarding,
+            is_community: clan.is_community,
+            prevent_anonymous: clan.prevent_anonymous,
         }
     }
 
@@ -3484,15 +3492,10 @@ impl MezonTransport {
         Ok(Self::clan_desc_from_proto(clan))
     }
 
-    /// Update clan.
-    pub async fn update_clan_desc(&self, clan_id: i64, clan_name: &str) -> Result<()> {
+    /// Update clan description and settings.
+    pub async fn update_clan_desc(&self, request: api::UpdateClanDescRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateClanDescRequest {
-            clan_id,
-            clan_name: clan_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanDesc", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4964,13 +4967,9 @@ impl MezonTransport {
     }
 
     /// Update system message.
-    pub async fn update_system_message(&self, clan_id: i64) -> Result<()> {
+    pub async fn update_system_message(&self, request: api::SystemMessageRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::SystemMessageRequest {
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "UpdateSystemMessage", body)
             .await?;

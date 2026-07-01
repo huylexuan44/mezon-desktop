@@ -242,6 +242,7 @@ pub struct ChannelList {
     pub active_channel_id: Option<ChannelId>,
     api: Arc<AppApi>,
     collapsed: HashSet<(String, String)>,
+    show_empty_categories: HashSet<ClanId>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
@@ -301,6 +302,7 @@ impl ChannelList {
             active_channel_id: None,
             api,
             collapsed: HashSet::new(),
+            show_empty_categories: HashSet::new(),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
@@ -550,6 +552,48 @@ impl ChannelList {
         if became_read {
             self.notify_if_active(clan_id, cx);
         }
+    }
+
+    pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for ch in categories.iter_mut().flat_map(|c| &mut c.channels) {
+                if ch.badge_count > 0 || ch.is_unread() {
+                    changed = true;
+                }
+                ch.badge_count = 0;
+                ch.last_seen_timestamp = ch.last_sent_timestamp;
+            }
+        }
+        if changed {
+            self.notify_if_active(clan_id, cx);
+        }
+    }
+
+    pub fn mark_clan_as_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.apply_clan_read(clan_id, cx);
+        ClanList::global(cx).update(cx, |cl, cx| cl.apply_badge_read(clan_id, cx));
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = api.mark_as_read(0, 0, id).await {
+                tracing::error!("mark clan as read failed for clan {id}: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn is_show_empty_category(&self, clan_id: ClanId) -> bool {
+        self.show_empty_categories.contains(&clan_id)
+    }
+
+    pub fn set_show_empty_category(&mut self, clan_id: ClanId, show: bool, cx: &mut Context<Self>) {
+        if show {
+            self.show_empty_categories.insert(clan_id);
+        } else {
+            self.show_empty_categories.remove(&clan_id);
+        }
+        cx.notify();
     }
 
     pub fn apply_last_seen(

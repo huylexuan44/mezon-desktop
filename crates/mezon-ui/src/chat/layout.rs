@@ -610,6 +610,7 @@ impl ChatLayout {
             | Route::SettingsLanguage
             | Route::SettingsVoice
             | Route::SettingsAdvanced
+            | Route::ClanSettings { .. }
             | Route::NotFound { .. } => div().into_any_element(),
         };
 
