@@ -12,10 +12,15 @@ pub type MicCaptureHandle = Box<dyn Send>;
 pub type MicCaptureFactory =
     Arc<dyn Fn(&str, flume::Sender<f32>) -> Result<MicCaptureHandle, String> + Send + Sync>;
 
+pub type DeviceEnumerator =
+    Arc<dyn Fn() -> (Vec<AudioDeviceInfo>, Vec<AudioDeviceInfo>) + Send + Sync>;
+
 pub struct AudioStore {
     pub input_devices: Vec<AudioDeviceInfo>,
     pub output_devices: Vec<AudioDeviceInfo>,
     pub mic_capture_factory: Option<MicCaptureFactory>,
+    device_enumerator: Option<DeviceEnumerator>,
+    devices_requested: bool,
 }
 
 impl AudioStore {
@@ -24,6 +29,8 @@ impl AudioStore {
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             mic_capture_factory: None,
+            device_enumerator: None,
+            devices_requested: false,
         });
         cx.set_global(GlobalAudioStore(entity.clone()));
         entity
@@ -59,6 +66,42 @@ impl AudioStore {
             store.mic_capture_factory = Some(factory);
             cx.notify();
         });
+    }
+
+    pub fn set_device_enumerator(
+        entity: &Entity<Self>,
+        enumerator: DeviceEnumerator,
+        cx: &mut App,
+    ) {
+        entity.update(cx, |store, _| {
+            store.device_enumerator = Some(enumerator);
+        });
+    }
+
+    pub fn ensure_devices(entity: &Entity<Self>, cx: &mut App) {
+        let store = entity.read(cx);
+        if store.devices_requested {
+            return;
+        }
+        let Some(enumerator) = store.device_enumerator.clone() else {
+            return;
+        };
+        entity.update(cx, |store, _| {
+            store.devices_requested = true;
+        });
+        let weak = entity.downgrade();
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            let (inputs, outputs) = cx
+                .background_executor()
+                .spawn(async move { enumerator() })
+                .await;
+            cx.update(|cx| {
+                if let Some(store) = weak.upgrade() {
+                    AudioStore::set_devices(&store, inputs, outputs, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn start_mic_capture(

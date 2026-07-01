@@ -1,18 +1,18 @@
 use gpui::{
     Anchor, AnyElement, App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    Point, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, rgb,
     uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId, ClanList, ClanMember,
-    ClanMembersEvent, ClanMembersStore, DirectKind, DirectMessageStore, GroupMember,
-    GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore, ProfileContext, Settings,
-    UserId, split_members_by_status,
+    ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
+    ClanList, ClanMember, ClanMembersEvent, ClanMembersStore, DirectKind, DirectMessageStore,
+    GroupMember, GroupMembersEvent, GroupMembersStore, PresenceEvent, PresenceStore,
+    ProfileContext, Settings, UserId, split_members_by_status,
 };
 
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
-use crate::components::primitives::{Avatar, ContextMenu, context_menu_at};
+use crate::components::primitives::{Avatar, ContextMenu, Icon, IconName, context_menu_at};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
@@ -46,6 +46,7 @@ struct MemberRow {
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    is_owner: bool,
     rcm_id: SharedString,
     popover_id: SharedString,
     trigger_id: SharedString,
@@ -107,8 +108,12 @@ impl MemberListPanel {
                     }
                 })
                 .detach();
-                cx.observe(&ChannelList::global(cx), |this, _, cx| this.rebuild(cx))
-                    .detach();
+                cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
+                    if let ChannelEvent::ActiveChannelChanged(_) = event {
+                        this.rebuild(cx);
+                    }
+                })
+                .detach();
             }
             MemberSource::Group => {
                 cx.subscribe(&GroupMembersStore::global(cx), |this, _, event, cx| {
@@ -181,30 +186,50 @@ fn compute_rows(source: MemberSource, cx: &mut Context<MemberListPanel>) -> Vec<
             if members.is_empty() {
                 return Vec::new();
             }
+            let owner_id = DirectMessageStore::global(cx)
+                .read(cx)
+                .find(direct_id)
+                .and_then(|dm| dm.creator_id);
             let mut rows = Vec::with_capacity(members.len() + 1);
             rows.push(Row::Header {
                 kind: HeaderKind::Members,
                 count: members.len(),
             });
-            rows.extend(members.into_iter().map(|raw| make_member_row(cx, raw)));
+            rows.extend(
+                members
+                    .into_iter()
+                    .map(|raw| make_member_row(cx, raw, owner_id)),
+            );
             rows
         }
         MemberSource::Channel => {
             let Some(ctx) = active_channel_context(cx) else {
                 return Vec::new();
             };
+            let owner_id = ClanList::global(cx)
+                .read(cx)
+                .clan(ctx.clan_id)
+                .map(|clan| clan.creator_id);
             let (online_raw, offline_raw) = channel_raw_members(cx, ctx);
             let mut rows = Vec::with_capacity(online_raw.len() + offline_raw.len() + 2);
             rows.push(Row::Header {
                 kind: HeaderKind::Online,
                 count: online_raw.len(),
             });
-            rows.extend(online_raw.into_iter().map(|raw| make_member_row(cx, raw)));
+            rows.extend(
+                online_raw
+                    .into_iter()
+                    .map(|raw| make_member_row(cx, raw, owner_id)),
+            );
             rows.push(Row::Header {
                 kind: HeaderKind::Offline,
                 count: offline_raw.len(),
             });
-            rows.extend(offline_raw.into_iter().map(|raw| make_member_row(cx, raw)));
+            rows.extend(
+                offline_raw
+                    .into_iter()
+                    .map(|raw| make_member_row(cx, raw, owner_id)),
+            );
             rows
         }
     }
@@ -321,6 +346,17 @@ pub(crate) struct MentionMemberRaw {
     pub display: String,
     pub username: String,
     pub avatar_raw: String,
+    pub display_lc: String,
+    pub username_lc: String,
+    pub avatar_src: SharedString,
+}
+
+fn mention_avatar_src(cx: &App, avatar: &str) -> SharedString {
+    if avatar.is_empty() {
+        SharedString::default()
+    } else {
+        SharedString::from(crate::util::imgproxy::avatar_url(cx, avatar))
+    }
 }
 
 pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
@@ -335,6 +371,9 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
                 display: m.name().to_string(),
                 username: m.user.username.clone(),
                 avatar_raw: m.avatar().to_string(),
+                display_lc: m.name().to_lowercase(),
+                username_lc: m.user.username.to_lowercase(),
+                avatar_src: mention_avatar_src(cx, m.avatar()),
             })
             .collect();
     }
@@ -356,11 +395,14 @@ pub(crate) fn mention_member_pool(cx: &App) -> Vec<MentionMemberRaw> {
             display: m.name().to_string(),
             username: m.user.username.clone(),
             avatar_raw: m.avatar().to_string(),
+            display_lc: m.name().to_lowercase(),
+            username_lc: m.user.username.to_lowercase(),
+            avatar_src: mention_avatar_src(cx, m.avatar()),
         })
         .collect()
 }
 
-fn make_member_row(cx: &App, raw: RawMember) -> Row {
+fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
     let avatar_src = if raw.avatar_raw.is_empty() {
         SharedString::default()
     } else {
@@ -376,6 +418,7 @@ fn make_member_row(cx: &App, raw: RawMember) -> Row {
         avatar_src,
         avatar_raw: raw.avatar_raw.into(),
         online: raw.online,
+        is_owner: owner_id == Some(raw.user_id),
     })
 }
 
@@ -453,10 +496,24 @@ fn render_member(
         )
         .child(
             div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text_primary)
-                .child(member.name.clone()),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_primary)
+                        .child(member.name.clone()),
+                )
+                .when(member.is_owner, |this| {
+                    this.child(
+                        Icon::new(IconName::OwnerIcon)
+                            .size(px(14.))
+                            .text_color(rgb(0xF0B132)),
+                    )
+                }),
         );
 
     let user_id = member.user_id;

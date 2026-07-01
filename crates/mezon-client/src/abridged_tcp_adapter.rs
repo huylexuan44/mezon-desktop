@@ -99,6 +99,7 @@ const PREFIX_EXTENDED: u8 = 0x7f;
 const RAW_HEADER_LENGTH: usize = 11;
 const MAX_REALTIME_FRAME_LEN: usize = 1 << 20;
 const RESPONSE_CODE_TOO_LARGE: u32 = u16::MAX as u32;
+const ENVELOPE_CID_TAG: u8 = 0x08;
 
 fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
@@ -114,6 +115,16 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
         shift += 7;
     }
     None
+}
+
+fn scan_realtime_cid(payload: &[u8]) -> Option<i32> {
+    match payload.first() {
+        Some(&ENVELOPE_CID_TAG) => {
+            let (value, _) = read_varint(&payload[1..])?;
+            Some(value as i32)
+        }
+        _ => Some(0),
+    }
 }
 
 fn protobuf_message_len(buf: &[u8]) -> Option<usize> {
@@ -223,6 +234,19 @@ fn envelope_detail(envelope: &mezon_proto::realtime::Envelope) -> String {
         Some(M::ApiRequestEvent(e)) => format!("ApiRequest({})", e.api_name),
         Some(M::Error(e)) => format!("Error code={} {}", e.code, e.message),
         _ => envelope_kind(envelope).to_string(),
+    }
+}
+
+fn log_realtime_envelope(payload: &[u8]) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    if let Ok(envelope) = mezon_proto::realtime::Envelope::decode(payload) {
+        tracing::trace!(
+            "realtime -> Envelope cid={} {}",
+            envelope.cid,
+            envelope_detail(&envelope)
+        );
     }
 }
 
@@ -385,25 +409,30 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
 }
 
 impl IoLoopState {
-    async fn handle_data(&self, incoming: Vec<u8>) -> Result<()> {
+    async fn handle_data(&self, incoming: &[u8]) -> Result<()> {
         if incoming.is_empty() {
             return Ok(());
         }
-        self.read_buffer.lock().await.extend(incoming);
+        self.read_buffer.lock().await.extend_from_slice(incoming);
         self.process_raw_buffer().await
     }
 
     async fn process_raw_buffer(&self) -> Result<()> {
         let handlers = self.handlers.lock().await.clone();
+        let mut start = 0usize;
 
         loop {
             let frame = {
                 let mut buf = self.read_buffer.lock().await;
-                if buf.is_empty() {
+                if start >= buf.len() {
+                    buf.drain(..start);
                     return Ok(());
                 }
-                match decode_frame(&buf) {
-                    FrameStep::NeedMore => return Ok(()),
+                match decode_frame(&buf[start..]) {
+                    FrameStep::NeedMore => {
+                        buf.drain(..start);
+                        return Ok(());
+                    }
                     FrameStep::Reset(reason) => {
                         tracing::warn!("frame desync ({reason}), resetting read buffer");
                         buf.clear();
@@ -411,7 +440,7 @@ impl IoLoopState {
                         return Ok(());
                     }
                     FrameStep::Frame { consumed, frame } => {
-                        buf.drain(..consumed);
+                        start += consumed;
                         frame
                     }
                 }
@@ -461,22 +490,22 @@ impl IoLoopState {
                     }
                 }
                 Frame::Realtime(payload) => {
-                    match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
-                        Ok(envelope) => {
-                            tracing::trace!(
-                                "realtime -> Envelope cid={} {}",
-                                envelope.cid,
-                                envelope_detail(&envelope)
-                            );
-                            match u16::try_from(envelope.cid) {
-                                Ok(cid) => handlers.trigger_message(cid, 0, payload),
-                                Err(_) => tracing::warn!(
-                                    "envelope cid {} out of u16 range, dropping",
-                                    envelope.cid
-                                ),
+                    let cid = match scan_realtime_cid(&payload) {
+                        Some(cid) => cid,
+                        None => match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
+                            Ok(envelope) => envelope.cid,
+                            Err(e) => {
+                                tracing::warn!("realtime frame decode failed: {e}");
+                                continue;
                             }
+                        },
+                    };
+                    log_realtime_envelope(&payload);
+                    match u16::try_from(cid) {
+                        Ok(cid) => handlers.trigger_message(cid, 0, payload),
+                        Err(_) => {
+                            tracing::warn!("envelope cid {cid} out of u16 range, dropping")
                         }
-                        Err(e) => tracing::warn!("realtime frame decode failed: {e}"),
                     }
                 }
             }
@@ -521,12 +550,12 @@ impl AbridgedTcpAdapter {
                                 &read_buf[..n.min(16)]
                             );
 
-                            let data = read_buf[..n].to_vec();
-                            if data.starts_with(b"HTTP/")
-                                || data.starts_with(b"GET ")
-                                || data.starts_with(b"POST ")
+                            let chunk = &read_buf[..n];
+                            if chunk.starts_with(b"HTTP/")
+                                || chunk.starts_with(b"GET ")
+                                || chunk.starts_with(b"POST ")
                             {
-                                let preview = String::from_utf8_lossy(&data[..n.min(120)]);
+                                let preview = String::from_utf8_lossy(&chunk[..n.min(120)]);
                                 tracing::error!(
                                     "Server returned HTTP on abridged TCP port (expected binary framing, not nginx/WSS). Response: {}",
                                     preview.lines().next().unwrap_or("?")
@@ -538,7 +567,7 @@ impl AbridgedTcpAdapter {
                                 break;
                             }
 
-                            if let Err(e) = state.handle_data(data).await {
+                            if let Err(e) = state.handle_data(&read_buf[..n]).await {
                                 tracing::error!("handle_data error: {}", e);
                             }
                         }
@@ -907,11 +936,11 @@ mod tests {
         let (state, received) = captured_state();
 
         state
-            .handle_data(raw_frame(6, false, &body[..chunk]))
+            .handle_data(&raw_frame(6, false, &body[..chunk]))
             .await
             .unwrap();
         state
-            .handle_data(raw_frame(6, true, &body[chunk..]))
+            .handle_data(&raw_frame(6, true, &body[chunk..]))
             .await
             .unwrap();
 
@@ -929,7 +958,7 @@ mod tests {
 
         let (state, received) = captured_state();
 
-        state.handle_data(raw_frame(7, true, &body)).await.unwrap();
+        state.handle_data(&raw_frame(7, true, &body)).await.unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -944,9 +973,9 @@ mod tests {
 
         let (state, received) = captured_state();
 
-        state.handle_data(frame[..5].to_vec()).await.unwrap();
+        state.handle_data(&frame[..5]).await.unwrap();
         assert!(received.lock().unwrap().is_empty());
-        state.handle_data(frame[5..].to_vec()).await.unwrap();
+        state.handle_data(&frame[5..]).await.unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -977,7 +1006,7 @@ mod tests {
     async fn empty_response_delivered_immediately() {
         let (state, received) = captured_state();
 
-        state.handle_data(raw_frame(9, true, &[])).await.unwrap();
+        state.handle_data(&raw_frame(9, true, &[])).await.unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -994,7 +1023,7 @@ mod tests {
         let mut burst = raw_frame(20, true, &a);
         burst.extend_from_slice(&raw_frame(21, true, &[]));
         burst.extend_from_slice(&raw_frame(22, true, &b));
-        state.handle_data(burst).await.unwrap();
+        state.handle_data(&burst).await.unwrap();
 
         let received = received.lock().unwrap();
         let by: std::collections::HashMap<u16, Vec<u8>> =

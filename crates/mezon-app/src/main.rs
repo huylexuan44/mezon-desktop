@@ -458,35 +458,27 @@ fn open_main_window(
     );
 
     let audio_store = mezon_store::AudioStore::init(cx);
-    let audio_store_weak = audio_store.downgrade();
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        let (inputs, outputs) = cx
-            .background_executor()
-            .spawn(async move {
-                let inputs = mezon_native::audio::enumerate_input_devices()
-                    .into_iter()
-                    .map(|d| mezon_store::AudioDeviceInfo {
-                        id: d.id,
-                        name: d.name,
-                    })
-                    .collect::<Vec<_>>();
-                let outputs = mezon_native::audio::enumerate_output_devices()
-                    .into_iter()
-                    .map(|d| mezon_store::AudioDeviceInfo {
-                        id: d.id,
-                        name: d.name,
-                    })
-                    .collect::<Vec<_>>();
-                (inputs, outputs)
-            })
-            .await;
-        cx.update(|cx| {
-            if let Some(store) = audio_store_weak.upgrade() {
-                mezon_store::AudioStore::set_devices(&store, inputs, outputs, cx);
-            }
-        });
-    })
-    .detach();
+    mezon_store::AudioStore::set_device_enumerator(
+        &audio_store,
+        std::sync::Arc::new(|| {
+            let inputs = mezon_native::audio::enumerate_input_devices()
+                .into_iter()
+                .map(|d| mezon_store::AudioDeviceInfo {
+                    id: d.id,
+                    name: d.name,
+                })
+                .collect::<Vec<_>>();
+            let outputs = mezon_native::audio::enumerate_output_devices()
+                .into_iter()
+                .map(|d| mezon_store::AudioDeviceInfo {
+                    id: d.id,
+                    name: d.name,
+                })
+                .collect::<Vec<_>>();
+            (inputs, outputs)
+        }),
+        cx,
+    );
     mezon_store::AudioStore::set_mic_capture_factory(
         &audio_store,
         std::sync::Arc::new(|device_id: &str, sender: flume::Sender<f32>| {

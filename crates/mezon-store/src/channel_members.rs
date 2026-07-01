@@ -169,7 +169,7 @@ impl ChannelMembersStore {
     fn clan_and_type_for_channel(channel_id: ChannelId, cx: &App) -> Option<(ClanId, i32)> {
         let found = ChannelList::global(cx)
             .read(cx)
-            .find_channel(channel_id)
+            .find_channel_in_active_clan(channel_id)
             .map(|c| (c.clan_id, c.channel_type.as_raw() as i32));
         match found {
             Some((clan_id, channel_type)) if !clan_id.is_zero() => Some((clan_id, channel_type)),

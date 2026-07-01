@@ -8,7 +8,7 @@ use gpui::{
     Context, Entity, FontWeight, PathPromptOptions, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
-use mezon_store::{AccountEvent, AccountStore, ClanList, Settings};
+use mezon_store::{AccountEvent, AccountStore, ClanList, Settings, UserAccount};
 
 use super::clan_profile_section::ClanProfileSection;
 use crate::theme::{ActiveTheme, Theme};
@@ -29,6 +29,25 @@ struct ProfileState {
     original_avatar_url: Option<SharedString>,
     loading: bool,
     saving: bool,
+}
+
+impl ProfileState {
+    fn from_account(account: &UserAccount) -> Self {
+        let display_name: SharedString = account.display_name.clone().into();
+        let about_me: SharedString = account.about_me.clone().unwrap_or_default().into();
+        let avatar_url: Option<SharedString> = account.avatar_url.clone().map(Into::into);
+        Self {
+            username: account.username.clone().into(),
+            display_name: display_name.clone(),
+            about_me: about_me.clone(),
+            avatar_url: avatar_url.clone(),
+            original_display_name: display_name,
+            original_about_me: about_me,
+            original_avatar_url: avatar_url,
+            loading: false,
+            saving: false,
+        }
+    }
 }
 
 pub struct ProfilePage {
@@ -53,6 +72,7 @@ impl ProfilePage {
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
+        tracing::warn!("DBG ProfilePage::new start");
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |this, store, cx| {
@@ -60,20 +80,7 @@ impl ProfilePage {
                 && let Some(account) = store.read(cx).account.as_ref()
             {
                 this.account_loaded = true;
-                let display = account.display_name.clone();
-                let about = account.about_me.clone().unwrap_or_default();
-                let avatar = account.avatar_url.clone();
-                this.profile = Some(ProfileState {
-                    username: account.username.clone().into(),
-                    display_name: display.clone().into(),
-                    about_me: about.clone().into(),
-                    avatar_url: avatar.clone().map(Into::into),
-                    original_display_name: display.into(),
-                    original_about_me: about.into(),
-                    original_avatar_url: avatar.map(Into::into),
-                    loading: false,
-                    saving: false,
-                });
+                this.profile = Some(ProfileState::from_account(account));
                 cx.notify();
             }
         })
@@ -116,16 +123,23 @@ impl ProfilePage {
 
         AccountStore::global(cx).update(cx, |store, cx| store.ensure_account(cx));
 
+        let account_store = AccountStore::global(cx);
+        let (profile, account_loaded) = match account_store.read(cx).account.as_ref() {
+            Some(account) => (Some(ProfileState::from_account(account)), true),
+            None => (None, false),
+        };
+        tracing::warn!("DBG ProfilePage::new done profile_some={account_loaded}");
+
         Self {
             settings,
             clan_list,
             active_tab: ProfileTab::User,
-            profile: None,
+            profile,
             display_name_input: None,
             about_me_input: None,
             _subscriptions: Vec::new(),
             fetch_error: false,
-            account_loaded: false,
+            account_loaded,
             clan_section: None,
             toast_message: None,
             show_delete_confirm: false,
@@ -373,6 +387,12 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        tracing::warn!(
+            "DBG ProfilePage::render profile_some={} fetch_error={} input_some={}",
+            self.profile.is_some(),
+            self.fetch_error,
+            self.display_name_input.is_some()
+        );
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
         }

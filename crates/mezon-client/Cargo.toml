@@ -26,6 +26,7 @@ url.workspace = true
 async-trait = "0.1"
 bytes.workspace = true
 foyer.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

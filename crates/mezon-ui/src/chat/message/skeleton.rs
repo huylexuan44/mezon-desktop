@@ -2,9 +2,6 @@ use gpui::{AnyElement, div, prelude::*, px, relative};
 
 use crate::theme::Theme;
 
-/// Per-row skeleton geometry, copied 1:1 from React `SKELETON_ITEMS`
-/// (`ChannelMessages.tsx`): two text lines of five word-bars (percentage
-/// widths) plus a media block width.
 const SKELETON_ITEMS: [([f32; 5], [f32; 5], f32); 5] = [
     ([75., 68., 82., 91., 77.], [88., 71., 94., 83., 69.], 180.),
     ([82., 95., 73., 87., 91.], [76., 89., 84., 78., 93.], 220.),
@@ -13,9 +10,6 @@ const SKELETON_ITEMS: [([f32; 5], [f32; 5], f32); 5] = [
     ([77., 89., 81., 93., 88.], [79., 92., 87., 74., 96.], 170.),
 ];
 
-/// Render the message loading skeleton (React `MessageSkeleton`): `rows`
-/// fake message rows, each with a 40px avatar, a username/timestamp header,
-/// two lines of word-bars and a media block. No animation, matching web.
 pub fn message_skeleton(theme: &Theme, rows: usize) -> AnyElement {
     let fill = theme.bg_hover;
     let rows = rows.min(SKELETON_ITEMS.len());
@@ -24,7 +18,6 @@ pub fn message_skeleton(theme: &Theme, rows: usize) -> AnyElement {
         div().h(px(height)).w(width).rounded(px(4.)).bg(fill)
     };
 
-    // Five word-bars whose widths are normalised so they fill the line.
     let word_line = move |widths: [f32; 5], top_pad: bool| {
         let sum: f32 = widths.iter().sum();
         let mut line = div().flex().flex_row().gap_2().w_full();

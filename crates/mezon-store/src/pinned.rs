@@ -117,7 +117,7 @@ impl PinnedMessagesStore {
             Some(id) => {
                 let clan_id = ChannelList::global(cx)
                     .read(cx)
-                    .find_channel(id)
+                    .find_channel_in_active_clan(id)
                     .map(|c| c.clan_id)
                     .filter(|clan_id| !clan_id.is_zero())
                     .unwrap_or(ClanId(0));

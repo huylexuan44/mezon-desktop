@@ -3,7 +3,7 @@ use crate::{PlayerError, VideoFrame};
 pub struct PlayerImpl;
 
 impl PlayerImpl {
-    pub fn open(_url: &str) -> Result<Self, PlayerError> {
+    pub fn open(_url: &str, _max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         Err(PlayerError::Unsupported)
     }
 

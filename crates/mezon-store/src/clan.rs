@@ -1,3 +1,4 @@
+use crate::channel::ChannelList;
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
 use std::path::Path;
@@ -53,8 +54,8 @@ impl ClanImageMimeType {
 #[derive(Debug, Clone)]
 pub struct Clan {
     pub id: ClanId,
-    pub name: String,
     pub creator_id: UserId,
+    pub name: String,
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
     pub badge_count: u32,
@@ -156,8 +157,8 @@ impl From<ApiClanDesc> for Clan {
             (c.welcome_channel_id != 0).then_some(ChannelId(c.welcome_channel_id));
         Self {
             id: ClanId(c.clan_id),
-            name: c.clan_name,
             creator_id: UserId(c.creator_id),
+            name: c.clan_name,
             avatar_url,
             banner_url,
             badge_count: 0,
@@ -382,22 +383,57 @@ impl ClanList {
         }
     }
 
-    pub fn note_channel_message(
-        &mut self,
-        clan_id: ClanId,
-        is_mention: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_has_unread_message(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
             && !clan.muted
         {
             let was_unread = clan.has_unread;
-            let was_badge_zero = clan.badge_count == 0;
             clan.has_unread = true;
-            if is_mention {
-                clan.badge_count = clan.badge_count.saturating_add(1);
+            if !was_unread {
+                cx.notify();
             }
-            if !was_unread || was_badge_zero != (clan.badge_count == 0) {
+        }
+    }
+
+    pub fn increment_clan_badge(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && !clan.muted
+        {
+            let was_badge = clan.badge_count;
+            clan.badge_count = clan.badge_count.saturating_add(1);
+            if was_badge != clan.badge_count {
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn set_has_unread(&mut self, clan_id: ClanId, has_unread: bool, cx: &mut Context<Self>) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && !clan.muted
+            && clan.has_unread != has_unread
+        {
+            clan.has_unread = has_unread;
+            cx.notify();
+        }
+    }
+
+    pub fn sync_has_unread_from_channels(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let channel_list = ChannelList::global(cx).read(cx);
+        if !channel_list.is_clan_cache_loaded(clan_id) {
+            return;
+        }
+        let has_unread = channel_list.clan_has_any_unread(clan_id);
+        self.set_has_unread(clan_id, has_unread, cx);
+    }
+
+    pub fn decrement_badge(&mut self, clan_id: ClanId, amount: u32, cx: &mut Context<Self>) {
+        if amount == 0 {
+            return;
+        }
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id) {
+            let was_badge = clan.badge_count;
+            clan.badge_count = clan.badge_count.saturating_sub(amount);
+            if was_badge != clan.badge_count {
                 cx.notify();
             }
         }
@@ -417,6 +453,10 @@ impl ClanList {
         self.active_clan_id
             .as_ref()
             .and_then(|id| self.clans.iter().find(|c| c.id == *id))
+    }
+
+    pub fn clan(&self, clan_id: ClanId) -> Option<&Clan> {
+        self.clans.iter().find(|c| c.id == clan_id)
     }
 
     pub fn active_clan_banner(&self) -> Option<&str> {
@@ -788,8 +828,8 @@ mod tests {
     fn make_clan(id: i64, name: &str, avatar_url: Option<&str>) -> Clan {
         Clan {
             id: ClanId(id),
-            name: name.into(),
             creator_id: UserId(0),
+            name: name.into(),
             avatar_url: avatar_url.map(|s| s.into()),
             banner_url: None,
             badge_count: 0,
@@ -912,6 +952,20 @@ mod tests {
     }
 
     #[test]
+    fn clan_from_api_desc_maps_creator_id() {
+        use mezon_client::transport::ApiClanDesc;
+        let desc = ApiClanDesc {
+            clan_id: 42,
+            clan_name: "Alpha".into(),
+            creator_id: 7,
+            logo: String::new(),
+            banner: String::new(),
+            welcome_channel_id: 0,
+        };
+        assert_eq!(Clan::from(desc).creator_id, UserId(7));
+    }
+
+    #[test]
     fn badge_map_applies_to_clans_on_reload() {
         let mut c = clans();
         let badge_map: std::collections::HashMap<String, (i32, bool)> = [
@@ -933,39 +987,35 @@ mod tests {
     }
 
     #[test]
-    fn channel_message_increments_badge_when_not_muted() {
-        use mezon_proto::api;
+    fn set_has_unread_message_sets_flag() {
         let mut c = clans();
-        let msg = api::ChannelMessage {
-            clan_id: 1,
-            ..Default::default()
-        };
-        let event = RealtimeEvent::ChannelMessage(msg);
-        if let RealtimeEvent::ChannelMessage(m) = &event {
-            let clan_id = ClanId(m.clan_id);
-            if let Some(clan) = c.iter_mut().find(|c| c.id == clan_id)
-                && !clan.muted
-            {
-                clan.badge_count = clan.badge_count.saturating_add(1);
-                clan.has_unread = true;
-            }
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+            clan.has_unread = false;
         }
-        assert_eq!(c[0].badge_count, 1);
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+            clan.has_unread = true;
+        }
         assert!(c[0].has_unread);
+        assert_eq!(c[0].badge_count, 0);
     }
 
     #[test]
-    fn channel_message_skipped_when_muted() {
+    fn increment_clan_badge_when_not_muted() {
+        let mut c = clans();
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+            clan.badge_count = clan.badge_count.saturating_add(1);
+        }
+        assert_eq!(c[0].badge_count, 1);
+    }
+
+    #[test]
+    fn increment_clan_badge_skipped_when_muted() {
         let mut c = clans();
         c[0].muted = true;
-        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1))
-            && !clan.muted
-        {
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1)) && !clan.muted {
             clan.badge_count = clan.badge_count.saturating_add(1);
-            clan.has_unread = true;
         }
         assert_eq!(c[0].badge_count, 0);
-        assert!(!c[0].has_unread);
     }
 
     #[test]

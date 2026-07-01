@@ -31,7 +31,7 @@ pub mod voice;
 use anyhow::{Context, Result};
 use dirs::config_dir;
 pub use mezon_client::Session;
-pub use mezon_client::transport::MENTION_HERE_ID;
+pub use mezon_client::transport::{MENTION_HERE_ID, MENTION_HERE_USER_ID, is_here_user_id};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -78,7 +78,6 @@ pub use voice::{
     PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
     VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant, VoiceStore,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
-    preload_screen_share_options,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

@@ -32,7 +32,6 @@ pub use screen_picker::PickedScreen;
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
     ScreenShareKind, ScreenShareOption, list_screen_share_options, peek_screen_share_options,
-    preload_screen_share_options,
 };
 pub use video::{VideoFrameData, VideoFrameStore};
 
@@ -213,31 +212,44 @@ async fn session_main(
 
     match audio {
         Ok(audio) => {
-            let source = NativeAudioSource::new(
-                AudioSourceOptions::default(),
-                audio.input_format.sample_rate,
-                audio.input_format.channels,
-                1000,
-            );
-            let mic_track = LocalAudioTrack::create_audio_track(
-                "microphone",
-                RtcAudioSource::Native(source.clone()),
-            );
-            room.local_participant()
-                .publish_track(
-                    LocalTrack::Audio(mic_track),
-                    TrackPublishOptions {
-                        source: TrackSource::Microphone,
-                        ..Default::default()
-                    },
-                )
-                .await?;
+            audio_mixer = Some(audio.mixer.clone());
+            out_fmt = Some(audio.output_format);
 
             let mic_enabled = mic_enabled.clone();
             let mic_rx = audio.mic_rx.clone();
-            let channels = audio.input_format.channels.max(1);
-            let sample_rate = audio.input_format.sample_rate;
+            let input_format_rx = audio.input_format_rx.clone();
+            let room_for_mic = room.clone();
             runtime::runtime().spawn(async move {
+                let Ok(in_fmt) = input_format_rx.recv_async().await else {
+                    return;
+                };
+                let source = NativeAudioSource::new(
+                    AudioSourceOptions::default(),
+                    in_fmt.sample_rate,
+                    in_fmt.channels,
+                    1000,
+                );
+                let mic_track = LocalAudioTrack::create_audio_track(
+                    "microphone",
+                    RtcAudioSource::Native(source.clone()),
+                );
+                if let Err(e) = room_for_mic
+                    .local_participant()
+                    .publish_track(
+                        LocalTrack::Audio(mic_track),
+                        TrackPublishOptions {
+                            source: TrackSource::Microphone,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!("failed to publish mic track: {e}");
+                    return;
+                }
+
+                let channels = in_fmt.channels.max(1);
+                let sample_rate = in_fmt.sample_rate;
                 while let Ok(samples) = mic_rx.recv_async().await {
                     if !mic_enabled.load(Ordering::Relaxed) {
                         continue;
@@ -256,8 +268,6 @@ async fn session_main(
                 }
             });
 
-            audio_mixer = Some(audio.mixer.clone());
-            out_fmt = Some(audio.output_format);
             audio_io = Some(audio);
         }
         Err(e) => {

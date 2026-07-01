@@ -3,6 +3,7 @@ use mezon_store::ChannelType;
 
 use crate::components::primitives::Icon;
 use crate::components::primitives::IconName;
+use crate::components::primitives::mention_count_badge_on_channel_row;
 use crate::theme::Theme;
 
 pub struct ChannelRow {
@@ -13,7 +14,6 @@ pub struct ChannelRow {
     private: bool,
     selected: bool,
     badge_count: u32,
-    badge_label: SharedString,
     muted: bool,
     is_thread: bool,
     suppress_hover: bool,
@@ -29,7 +29,6 @@ impl ChannelRow {
             private: false,
             selected: false,
             badge_count: 0,
-            badge_label: SharedString::from(""),
             muted: false,
             is_thread: false,
             suppress_hover: false,
@@ -68,11 +67,6 @@ impl ChannelRow {
 
     pub fn badge_count(mut self, count: u32) -> Self {
         self.badge_count = count;
-        self.badge_label = if count > 99 {
-            SharedString::from("99+")
-        } else {
-            SharedString::from(count.to_string())
-        };
         self
     }
 
@@ -93,8 +87,8 @@ impl ChannelRow {
         let selected_bg = theme.bg_primary;
         let hover_bg = theme.bg_hover;
         let secondary = theme.text_secondary;
-        let brand = theme.brand;
-        let text_primary = theme.text_primary;
+        let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0 && !self.muted;
+        let group_name = self.row_id.clone();
         let unread_nub = self.unread
             && !self.selected
             && !self.muted
@@ -102,69 +96,59 @@ impl ChannelRow {
         let nub_color = theme.tokens.text_secondary;
 
         let suppress_hover = self.suppress_hover;
-        div().w_full().relative().when(unread_nub, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(12.))
-                    .w(px(4.))
-                    .h(px(8.))
-                    .rounded_r(px(4.))
-                    .bg(nub_color),
-            )
-        }).px_2().child(
-            div()
-                .id(self.row_id.clone())
-                .flex()
-                .flex_row()
-                .items_center()
-                .w_full()
-                .px_2()
-                .py_1()
-                .rounded_lg()
-                .cursor_pointer()
-                .when(self.selected, move |el| el.bg(selected_bg))
-                .when(!self.selected && !suppress_hover, move |el| {
-                    el.hover(|s| s.bg(hover_bg))
-                })
-                .text_color(text_color)
-                .child(Icon::new(icon).size(px(16.0)).text_color(secondary))
-                .child(
+        div()
+            .w_full()
+            .relative()
+            .group(group_name.clone())
+            .when(unread_nub, |el| {
+                el.child(
                     div()
-                        .flex_1()
-                        .ml_2()
-                        .text_sm()
-                        .overflow_hidden()
-                        .when(self.unread && !self.muted, |el| {
-                            el.font_weight(FontWeight::BOLD)
-                        })
-                        .child(self.name),
+                        .absolute()
+                        .left_0()
+                        .top(px(12.))
+                        .w(px(4.))
+                        .h(px(8.))
+                        .rounded_r(px(4.))
+                        .bg(nub_color),
                 )
-                .when(
-                    crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0 && !self.muted,
-                    move |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .min_w(px(16.0))
-                                .h(px(16.0))
-                                .px_1()
-                                .rounded_full()
-                                .bg(brand)
-                                .text_color(text_primary)
-                                .text_xs()
-                                .child(self.badge_label.clone()),
-                        )
-                    },
-                )
-                .when(
-                    self.badge_count == 0 && self.unread && !self.muted,
-                    move |el| el.child(div().size_2().rounded_full().bg(brand)),
-                ),
-        )
+            })
+            .when(show_badge, |el| {
+                el.child(mention_count_badge_on_channel_row(
+                    self.badge_count,
+                    group_name.clone(),
+                ))
+            })
+            .px_2()
+            .child(
+                div()
+                    .id(self.row_id.clone())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .when(self.selected, move |el| el.bg(selected_bg))
+                    .when(!self.selected && !suppress_hover, move |el| {
+                        el.hover(|s| s.bg(hover_bg))
+                    })
+                    .text_color(text_color)
+                    .child(Icon::new(icon).size(px(16.0)).text_color(secondary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .ml_2()
+                            .mr_6()
+                            .text_sm()
+                            .overflow_hidden()
+                            .when(self.unread && !self.muted, |el| {
+                                el.font_weight(FontWeight::BOLD)
+                            })
+                            .child(self.name),
+                    ),
+            )
     }
 }
 

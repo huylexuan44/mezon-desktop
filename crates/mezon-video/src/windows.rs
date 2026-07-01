@@ -74,21 +74,22 @@ pub struct PlayerImpl {
     _notify: IMFMediaEngineNotify,
     textures: RefCell<Option<StagingTextures>>,
     last_pts: Cell<i64>,
+    max_size: Option<(u32, u32)>,
     failed: Arc<AtomicBool>,
 }
 
 impl PlayerImpl {
-    pub fn open(url: &str) -> Result<Self, PlayerError> {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        Self::build(url).map_err(|error| {
+        Self::build(url, max_size).map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
             PlayerError::Open
         })
     }
 
-    fn build(url: &str) -> windows::core::Result<Self> {
+    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
         ensure_media_foundation()?;
         unsafe {
             let mut device: Option<ID3D11Device> = None;
@@ -150,6 +151,7 @@ impl PlayerImpl {
                 _notify: notify,
                 textures: RefCell::new(None),
                 last_pts: Cell::new(0),
+                max_size,
                 failed,
             })
         }
@@ -178,15 +180,22 @@ impl PlayerImpl {
                 return None;
             }
 
-            self.ensure_textures(width, height).ok()?;
+            let (render_w, render_h) = match self.max_size {
+                Some((max_w, max_h)) if max_w > 0 && max_h > 0 => {
+                    (width.min(max_w), height.min(max_h))
+                }
+                _ => (width, height),
+            };
+
+            self.ensure_textures(render_w, render_h).ok()?;
             let textures = self.textures.borrow();
             let textures = textures.as_ref()?;
 
             let dst = RECT {
                 left: 0,
                 top: 0,
-                right: width as i32,
-                bottom: height as i32,
+                right: render_w as i32,
+                bottom: render_h as i32,
             };
             if self
                 .engine
@@ -212,15 +221,15 @@ impl PlayerImpl {
             let packed = if mapped.pData.is_null() {
                 None
             } else {
-                let region = pitch.saturating_mul(height as usize);
+                let region = pitch.saturating_mul(render_h as usize);
                 let data = std::slice::from_raw_parts(mapped.pData as *const u8, region);
-                crate::frame_util::pack_bgra_rows(data, pitch, width, height)
+                crate::frame_util::pack_bgra_rows(data, pitch, render_w, render_h)
             };
             self.context.Unmap(&textures.staging, 0);
 
             let out = packed?;
             self.last_pts.set(pts);
-            crate::render_frame::bgra_to_frame(width, height, out)
+            crate::render_frame::bgra_to_frame(render_w, render_h, out)
         }
     }
 

@@ -61,6 +61,8 @@ unexpected_cfgs = { level = "allow" }
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+too_many_arguments = "allow"
+type_complexity = "allow"
 
 [workspace.dependencies]
 accesskit          = "0.24.0"

@@ -1,8 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, MouseDownEvent, ScrollHandle, SharedString, Window, div, point, prelude::*, px,
+    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, MouseDownEvent, ScrollHandle, SharedString, Window, div, point, prelude::*,
+    px,
 };
 use mezon_store::{
     ClanMembersStore, MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, ProfileContext,
@@ -24,12 +25,39 @@ const HEADER_HEIGHT: f32 = 48.;
 const MIN_BODY_HEIGHT: f32 = 144.;
 const MAX_VH: f32 = 0.8;
 
+struct PinCardVm {
+    pin_id: SharedString,
+    message_id: SharedString,
+    sender_label: SharedString,
+    avatar_src: Option<SharedString>,
+    avatar_fallback: Option<SharedString>,
+    content: SharedString,
+    create_time: i64,
+}
+
+impl PinCardVm {
+    fn resolve(msg: &PinnedMessage, clan_id: Option<mezon_store::ClanId>, cx: &App) -> Self {
+        let (sender_label, avatar_raw) = resolve_pin_sender(msg, clan_id, cx);
+        let (avatar_src, avatar_fallback) = resolve_pin_avatar(msg, &avatar_raw, cx);
+        Self {
+            pin_id: msg.id.clone().into(),
+            message_id: msg.message_id.clone().into(),
+            sender_label: sender_label.into(),
+            avatar_src,
+            avatar_fallback,
+            content: msg.content.clone().into(),
+            create_time: msg.create_time,
+        }
+    }
+}
+
 pub struct PinnedPopoverPanel {
     settings: Entity<Settings>,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     scroll: ScrollHandle,
     focus_handle: FocusHandle,
     avatar_image_cache: Entity<LruImageCache>,
+    pin_cards: Vec<PinCardVm>,
 }
 
 impl PinnedPopoverPanel {
@@ -43,10 +71,16 @@ impl PinnedPopoverPanel {
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
             .detach();
 
-        cx.observe(&PinnedMessagesStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
-        cx.observe(&ClanMembersStore::global(cx), |_, _, cx| cx.notify())
-            .detach();
+        cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
+            this.pin_cards = Self::compute_pin_cards(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.pin_cards = Self::compute_pin_cards(cx);
+            cx.notify();
+        })
+        .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let avatar_image_cache = cx.new(|cx| {
@@ -59,13 +93,27 @@ impl PinnedPopoverPanel {
             )
         });
 
+        let pin_cards = Self::compute_pin_cards(cx);
+
         Self {
             settings,
             popover_handle,
             scroll: ScrollHandle::new(),
             focus_handle,
             avatar_image_cache,
+            pin_cards,
         }
+    }
+
+    fn compute_pin_cards(cx: &App) -> Vec<PinCardVm> {
+        let store = PinnedMessagesStore::global(cx);
+        let store = store.read(cx);
+        let clan_id = store.clan_id();
+        store
+            .pinned()
+            .iter()
+            .map(|msg| PinCardVm::resolve(msg, clan_id, cx))
+            .collect()
     }
 }
 
@@ -82,7 +130,6 @@ impl Render for PinnedPopoverPanel {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let store = PinnedMessagesStore::global(cx);
-        let pinned = store.read(cx).pinned().to_vec();
         let loading = store.read(cx).is_loading();
         let clan_id = store.read(cx).clan_id();
         let handle = self.popover_handle.clone();
@@ -114,9 +161,8 @@ impl Render for PinnedPopoverPanel {
             .text_color(tokens.text_theme_message)
             .child(render_header(&theme, &locale))
             .child(render_body(
-                &pinned,
+                &self.pin_cards,
                 loading,
-                clan_id,
                 &theme,
                 &locale,
                 handle,
@@ -158,9 +204,8 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
 
 #[allow(clippy::too_many_arguments)]
 fn render_body(
-    pinned: &[PinnedMessage],
+    cards: &[PinCardVm],
     loading: bool,
-    clan_id: Option<mezon_store::ClanId>,
     theme: &Theme,
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
@@ -171,7 +216,7 @@ fn render_body(
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
 
-    let content = if pinned.is_empty() {
+    let content = if cards.is_empty() {
         if loading {
             div()
                 .flex()
@@ -201,23 +246,16 @@ fn render_body(
             .w_full()
             .gap_2()
             .py(px(8.))
-            .children(
-                pinned
-                    .iter()
-                    .enumerate()
-                    .map(|(index, msg)| {
-                        pin_card(
-                            index,
-                            msg,
-                            clan_id,
-                            theme,
-                            locale,
-                            popover_handle.clone(),
-                            avatar_cache.clone(),
-                            cx,
-                        )
-                    }),
-            )
+            .children(cards.iter().enumerate().map(|(index, vm)| {
+                pin_card(
+                    index,
+                    vm,
+                    theme,
+                    locale,
+                    popover_handle.clone(),
+                    avatar_cache.clone(),
+                )
+            }))
             .into_any_element()
     };
 
@@ -308,10 +346,8 @@ fn resolve_pin_sender(
     clan_id: Option<mezon_store::ClanId>,
     cx: &App,
 ) -> (String, String) {
-    if let (Some(user_id), Some(clan_id)) = (
-        msg.sender_id.parse::<UserId>().ok(),
-        clan_id,
-    ) && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
+    if let (Some(user_id), Some(clan_id)) = (msg.sender_id.parse::<UserId>().ok(), clan_id)
+        && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
     {
         return (profile.display_name, profile.avatar_url);
     }
@@ -319,35 +355,45 @@ fn resolve_pin_sender(
     (msg.sender_name.clone(), msg.avatar_url.clone())
 }
 
+fn resolve_pin_avatar(
+    msg: &PinnedMessage,
+    avatar_raw: &str,
+    cx: &App,
+) -> (Option<SharedString>, Option<SharedString>) {
+    if !avatar_raw.is_empty() {
+        let proxied = crate::util::imgproxy::avatar_url(cx, avatar_raw);
+        (Some(proxied.into()), Some(avatar_raw.into()))
+    } else if !msg.avatar_proxied.is_empty() {
+        let fallback = (!msg.avatar_url.is_empty()
+            && msg.avatar_url != msg.avatar_proxied.as_ref())
+        .then(|| SharedString::from(msg.avatar_url.clone()));
+        (Some(msg.avatar_proxied.clone()), fallback)
+    } else {
+        (None, None)
+    }
+}
+
 fn pin_card(
     index: usize,
-    msg: &PinnedMessage,
-    clan_id: Option<mezon_store::ClanId>,
+    vm: &PinCardVm,
     theme: &Theme,
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     avatar_cache: Entity<LruImageCache>,
-    cx: &App,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
-    let (sender_label, avatar_raw) = resolve_pin_sender(msg, clan_id, cx);
     let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
 
     let mut avatar = Avatar::new()
-        .name(&sender_label)
+        .name(&vm.sender_label)
         .with_size(Size::Small)
         .image_cache(avatar_cache);
-    if !avatar_raw.is_empty() {
-        let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_raw);
-        avatar = avatar
-            .src(proxied)
-            .fallback_src(avatar_raw);
-    } else if !msg.avatar_proxied.is_empty() {
-        avatar = avatar.src(msg.avatar_proxied.clone());
-        if !msg.avatar_url.is_empty() && msg.avatar_url != msg.avatar_proxied.as_ref() {
-            avatar = avatar.fallback_src(msg.avatar_url.clone());
-        }
+    if let Some(src) = &vm.avatar_src {
+        avatar = avatar.src(src.clone());
+    }
+    if let Some(fallback) = &vm.avatar_fallback {
+        avatar = avatar.fallback_src(fallback.clone());
     }
 
     let name_row = h_flex()
@@ -361,7 +407,7 @@ fn pin_card(
                 .text_color(sender_color)
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(sender_label),
+                .child(vm.sender_label.clone()),
         )
         .child(
             div()
@@ -369,15 +415,15 @@ fn pin_card(
                 .text_xs()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(tokens.text_secondary)
-                .child(format_pin_time(msg.create_time, locale)),
+                .child(format_pin_time(vm.create_time, locale)),
         );
 
     let content = div()
         .text_sm()
         .text_color(tokens.text_theme_message)
-        .child(msg.content.clone());
+        .child(vm.content.clone());
 
-    let jump_message_id = msg.message_id.clone();
+    let jump_message_id = vm.message_id.clone();
     let jump_handle = popover_handle.clone();
     let jump = Button::new(("pin-jump", index))
         .label(mezon_i18n::t(locale, "channelTopbar.tooltips.jump"))
@@ -392,8 +438,8 @@ fn pin_card(
             jump_handle.hide(cx);
         });
 
-    let pin_id = msg.id.clone();
-    let message_id = msg.message_id.clone();
+    let pin_id = vm.pin_id.clone();
+    let message_id = vm.message_id.clone();
     let delete = Button::new(("pin-del", index))
         .label("✕")
         .ghost()

@@ -30,18 +30,6 @@ pub fn peek_screen_share_options() -> Option<Vec<ScreenShareOption>> {
     Some(options.clone())
 }
 
-pub fn preload_screen_share_options() {
-    if peek_screen_share_options().is_some() {
-        return;
-    }
-    std::thread::Builder::new()
-        .name("mezon-screen-targets".into())
-        .spawn(|| {
-            let _ = list_screen_share_options();
-        })
-        .ok();
-}
-
 pub fn list_screen_share_options() -> Result<Vec<ScreenShareOption>, String> {
     if let Some(options) = peek_screen_share_options() {
         return Ok(options);

@@ -112,6 +112,7 @@ impl VoicePage {
                     this.output_devices = outputs;
                     cx.notify();
                 }));
+                AudioStore::ensure_devices(&audio_store, cx);
                 let inputs = audio_store.read(cx).input_devices.clone();
                 let outputs = audio_store.read(cx).output_devices.clone();
                 let sel_in = if inputs

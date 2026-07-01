@@ -5,6 +5,7 @@
 pub use crate::transport_adapter::TransportAdapter;
 use anyhow::{Context, Result};
 use mezon_proto::{api, realtime};
+use parking_lot::Mutex;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
-use tokio::sync::{RwLock, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
@@ -44,6 +45,7 @@ pub enum RealtimeEvent {
     MessageReaction(api::MessageReaction),
     MarkAsRead(realtime::MarkAsRead),
     LastSeenUpdated(realtime::LastSeenMessageEvent),
+    Notifications(realtime::Notifications),
     ChannelCreated(realtime::ChannelCreatedEvent),
     ChannelUpdated(realtime::ChannelUpdatedEvent),
     ChannelDeleted(realtime::ChannelDeletedEvent),
@@ -87,6 +89,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::MessageReactionEvent(m) => Ok(Self::MessageReaction(m)),
             realtime::envelope::Message::MarkAsRead(m) => Ok(Self::MarkAsRead(m)),
             realtime::envelope::Message::LastSeenMessageEvent(m) => Ok(Self::LastSeenUpdated(m)),
+            realtime::envelope::Message::Notifications(m) => Ok(Self::Notifications(m)),
             realtime::envelope::Message::ChannelCreatedEvent(m) => Ok(Self::ChannelCreated(m)),
             realtime::envelope::Message::ChannelUpdatedEvent(m) => Ok(Self::ChannelUpdated(m)),
             realtime::envelope::Message::ChannelDeletedEvent(m) => Ok(Self::ChannelDeleted(m)),
@@ -147,7 +150,7 @@ fn dispatch_realtime_push(
 pub struct MezonTransport {
     adapter: Arc<dyn TransportAdapter>,
     cid_counter: Arc<AtomicU16>,
-    pending_requests: Arc<RwLock<HashMap<u16, PromiseExecutor>>>,
+    pending_requests: Arc<Mutex<HashMap<u16, PromiseExecutor>>>,
     send_timeout_ms: Duration,
     connect_gate: Duration,
     connected_tx: watch::Sender<bool>,
@@ -163,7 +166,7 @@ impl MezonTransport {
         Self {
             adapter: Arc::from(adapter),
             cid_counter: Arc::new(AtomicU16::new(1)),
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
             send_timeout_ms: Duration::from_millis(DEFAULT_SEND_TIMEOUT_MS),
             connect_gate: Duration::from_millis(DEFAULT_CONNECT_GATE_MS),
             connected_tx,
@@ -229,17 +232,13 @@ impl MezonTransport {
                 tracing::trace!("on_message: cid={cid} code={code} len={}", message.len());
 
                 if cid != 0 {
-                    let pending = pending_requests.clone();
-                    let on_event = on_event.clone();
-                    tokio::spawn(async move {
-                        let executor = pending.write().await.remove(&cid);
-                        match executor {
-                            Some(executor) => {
-                                let _ = executor.sender.send((code, message));
-                            }
-                            None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                    let executor = pending_requests.lock().remove(&cid);
+                    match executor {
+                        Some(executor) => {
+                            let _ = executor.sender.send((code, message));
                         }
-                    });
+                        None => dispatch_realtime_push(cid, &message, on_event.as_ref()),
+                    }
                 } else {
                     dispatch_realtime_push(cid, &message, on_event.as_ref());
                 }
@@ -261,10 +260,7 @@ impl MezonTransport {
         self.adapter
             .set_on_close(Arc::new(move |was_clean| {
                 let _ = connected_for_close.send(false);
-                let pending = pending_for_close.clone();
-                tokio::spawn(async move {
-                    pending.write().await.clear();
-                });
+                pending_for_close.lock().clear();
                 on_disconnected(was_clean);
             }))
             .await;
@@ -291,21 +287,17 @@ impl MezonTransport {
     pub async fn send(&self, cid: u16, message: Vec<u8>) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
         let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending_requests.write().await;
-            pending.insert(cid, PromiseExecutor { sender: tx });
-        }
+        self.pending_requests
+            .lock()
+            .insert(cid, PromiseExecutor { sender: tx });
         if let Err(e) = self.adapter.send(message).await {
-            self.pending_requests.write().await.remove(&cid);
+            self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
         let result = tokio::time::timeout(self.send_timeout_ms, rx)
             .await
             .map_err(|_| {
-                let pending = self.pending_requests.clone();
-                tokio::spawn(async move {
-                    pending.write().await.remove(&cid);
-                });
+                self.pending_requests.lock().remove(&cid);
                 anyhow::anyhow!("Request timed out")
             })?
             .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
@@ -320,7 +312,7 @@ impl MezonTransport {
     /// Close the connection.
     pub async fn close(&self) -> Result<()> {
         let _ = self.connected_tx.send(false);
-        self.pending_requests.write().await.clear();
+        self.pending_requests.lock().clear();
         self.adapter.close().await
     }
 
@@ -336,7 +328,7 @@ impl MezonTransport {
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending_requests.write().await;
+            let mut pending = self.pending_requests.lock();
             pending.insert(cid, PromiseExecutor { sender: tx });
             tracing::debug!(
                 "  Registered ping pending request. Total pending: {}",
@@ -346,7 +338,7 @@ impl MezonTransport {
 
         tracing::debug!("Sending ping cid={}", cid);
         if let Err(e) = self.adapter.send_ping(cid).await {
-            self.pending_requests.write().await.remove(&cid);
+            self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
 
@@ -354,10 +346,7 @@ impl MezonTransport {
             .await
             .map_err(|_| {
                 tracing::error!("Ping timed out after {} ms", DEFAULT_PING_TIMEOUT_MS);
-                let pending = self.pending_requests.clone();
-                tokio::spawn(async move {
-                    pending.write().await.remove(&cid);
-                });
+                self.pending_requests.lock().remove(&cid);
                 anyhow::anyhow!("Ping timed out")
             })?
             .map_err(|_| anyhow::anyhow!("Ping response channel closed"))?;
@@ -429,6 +418,8 @@ pub struct ApiDirectChannel {
     pub count_mess_unread: i32,
     pub last_sent_timestamp: i64,
     pub last_seen_timestamp: i64,
+    #[serde(default)]
+    pub creator_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -508,6 +499,84 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiEntityMention {
+    pub user_id: i64,
+    pub role_id: i64,
+    pub username: String,
+    pub s: i32,
+    pub e: i32,
+}
+
+pub fn parse_message_mentions(bytes: &[u8]) -> Vec<ApiEntityMention> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    match api::MessageMentionList::decode(bytes) {
+        Ok(list) => list
+            .mentions
+            .into_iter()
+            .map(|m| ApiEntityMention {
+                user_id: m.user_id,
+                role_id: m.role_id,
+                username: m.username,
+                s: m.s,
+                e: m.e,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to decode message mentions ({} bytes): {e}",
+                bytes.len()
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn entity_mention_targets_user(m: &ApiEntityMention, user_id: i64, role_ids: &[i64]) -> bool {
+    if m.user_id != 0 {
+        let uid = m.user_id.to_string();
+        if is_here_user_id(&uid) || m.user_id == user_id {
+            return true;
+        }
+    }
+    m.role_id != 0 && role_ids.contains(&m.role_id)
+}
+
+pub fn enrich_content_tokens(
+    tokens: &mut ApiMessageContent,
+    entity_mentions: &[ApiEntityMention],
+) {
+    for m in entity_mentions {
+        if m.e <= m.s {
+            continue;
+        }
+        let user_id = (m.user_id != 0).then(|| m.user_id.to_string());
+        let role_id = (m.role_id != 0).then(|| m.role_id.to_string());
+        let duplicate = tokens.mentions.iter().any(|tok| {
+            tok.s == Some(i64::from(m.s))
+                && tok.e == Some(i64::from(m.e))
+                && tok.user_id == user_id
+                && tok.role_id == role_id
+        });
+        if duplicate {
+            continue;
+        }
+        tokens.mentions.push(ContentToken {
+            s: Some(i64::from(m.s)),
+            e: Some(i64::from(m.e)),
+            user_id,
+            role_id,
+            username: (!m.username.is_empty()).then(|| m.username.clone()),
+            ..Default::default()
+        });
+    }
+    tokens
+        .mentions
+        .sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
+}
+
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     if bytes.is_empty() {
         return Vec::new();
@@ -537,12 +606,40 @@ fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     }
 }
 
+fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
+    match value.get(key) {
+        Some(serde_json::Value::String(raw)) => raw.parse::<i64>().unwrap_or(0),
+        Some(serde_json::Value::Number(num)) => num
+            .as_i64()
+            .or_else(|| num.as_f64().map(|seconds| seconds as i64))
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
+        return (0, 0);
+    };
+    (
+        json_field_i64(&value, "message_id"),
+        json_field_i64(&value, "create_time_seconds"),
+    )
+}
+
 pub fn is_mention_or_reply(
     content: &str,
     references: &[u8],
+    mention_bytes: &[u8],
     user_id: i64,
     role_ids: &[i64],
 ) -> bool {
+    if parse_message_mentions(mention_bytes)
+        .iter()
+        .any(|m| entity_mention_targets_user(m, user_id, role_ids))
+    {
+        return true;
+    }
     if let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(content)
         && parsed
             .mentions
@@ -558,7 +655,7 @@ pub fn is_mention_or_reply(
 
 fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) -> bool {
     if let Some(uid) = token.user_id.as_deref()
-        && (uid == MENTION_HERE_ID || uid.parse::<i64>().is_ok_and(|id| id == user_id))
+        && (is_here_user_id(uid) || uid.parse::<i64>().is_ok_and(|id| id == user_id))
     {
         return true;
     }
@@ -605,13 +702,13 @@ pub struct ContentToken {
     pub s: Option<i64>,
     #[serde(default)]
     pub e: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub user_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub role_id: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
-    #[serde(default, rename = "channelId")]
+    #[serde(default, rename = "channelId", deserialize_with = "string_or_number::deserialize")]
     pub channel_id: Option<String>,
     #[serde(default)]
     pub emojiid: Option<String>,
@@ -679,6 +776,57 @@ pub struct OutgoingReply {
 }
 
 pub const MENTION_HERE_ID: &str = "here";
+pub const MENTION_HERE_USER_ID: &str = "1775731111020111321";
+
+pub fn is_here_user_id(user_id: &str) -> bool {
+    user_id == MENTION_HERE_ID || user_id == MENTION_HERE_USER_ID
+}
+
+mod string_or_number {
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct OptVisitor;
+
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<String>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string, number, or null")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok((!v.is_empty()).then(|| v.to_string()))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok((!v.is_empty()).then_some(v))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok((v != 0).then(|| v.to_string()))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok((v != 0).then(|| v.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(OptVisitor)
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct OutgoingMention {
@@ -1019,6 +1167,7 @@ pub struct ApiMessage {
     pub attachments: Vec<ApiAttachment>,
     pub references: Vec<ApiMessageRef>,
     pub reactions: Vec<ApiMessageReaction>,
+    pub entity_mentions: Vec<ApiEntityMention>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1147,6 +1296,7 @@ impl MezonTransport {
             count_mess_unread: channel.count_mess_unread,
             last_sent_timestamp,
             last_seen_timestamp,
+            creator_id: channel.creator_id,
         }
     }
 
@@ -1183,6 +1333,9 @@ impl MezonTransport {
                 t: message.content.clone(),
                 ..Default::default()
             });
+        let entity_mentions = parse_message_mentions(&message.mentions);
+        let mut content_tokens = content_tokens;
+        enrich_content_tokens(&mut content_tokens, &entity_mentions);
         let content = content_tokens.t.clone();
 
         let sender_name = if !message.clan_nick.is_empty() {
@@ -1211,6 +1364,7 @@ impl MezonTransport {
             attachments,
             references,
             reactions,
+            entity_mentions,
         }
     }
 
@@ -1982,6 +2136,7 @@ impl MezonTransport {
             attachments: Vec::new(),
             references: Vec::new(),
             reactions: Vec::new(),
+            entity_mentions: Vec::new(),
         })
     }
 
@@ -6027,42 +6182,141 @@ mod tests {
     #[test]
     fn mention_or_reply_plain_message_is_false() {
         let content = build_message_content_json("hello world", &[], &[], &[], &[]);
-        assert!(!is_mention_or_reply(&content, &[], 42, &[]));
+        assert!(!is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_here() {
         let content = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], 42, &[]));
+        assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_current_user_only() {
         let content =
             build_message_content_json("@bob", &[user_mention("42", 0, 4)], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], 42, &[]));
-        assert!(!is_mention_or_reply(&content, &[], 7, &[]));
+        assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
+        assert!(!is_mention_or_reply(&content, &[], &[], 7, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_matching_role_only() {
         let content =
             build_message_content_json("@mods", &[role_mention("99", 0, 5)], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &[], 42, &[99]));
-        assert!(!is_mention_or_reply(&content, &[], 42, &[100]));
+        assert!(is_mention_or_reply(&content, &[], &[], 42, &[99]));
+        assert!(!is_mention_or_reply(&content, &[], &[], 42, &[100]));
     }
 
     #[test]
     fn mention_or_reply_detects_reply_to_user() {
         let refs = reply_reference_bytes(42);
         let content = build_message_content_json("re", &[], &[], &[], &[]);
-        assert!(is_mention_or_reply(&content, &refs, 42, &[]));
-        assert!(!is_mention_or_reply(&content, &refs, 7, &[]));
+        assert!(is_mention_or_reply(&content, &refs, &[], 42, &[]));
+        assert!(!is_mention_or_reply(&content, &refs, &[], 7, &[]));
     }
 
     #[test]
     fn mention_or_reply_malformed_content_is_false() {
-        assert!(!is_mention_or_reply("not json", &[], 42, &[]));
+        assert!(!is_mention_or_reply("not json", &[], &[], 42, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_proto_entity_mentions() {
+        let list = api::MessageMentionList {
+            mentions: vec![api::MessageMention {
+                user_id: 42,
+                username: "@bob".into(),
+                s: 0,
+                e: 4,
+                ..Default::default()
+            }],
+        };
+        let bytes = list.encode_to_vec();
+        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[]));
+        assert!(!is_mention_or_reply(&content, &[], &bytes, 7, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_proto_role_mention() {
+        let bytes = api::MessageMentionList {
+            mentions: vec![api::MessageMention {
+                role_id: 99,
+                rolename: "@mods".into(),
+                s: 0,
+                e: 5,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[99]));
+        assert!(!is_mention_or_reply(&content, &[], &bytes, 42, &[100]));
+    }
+
+    #[test]
+    fn mention_or_reply_detects_proto_here_mention() {
+        let here_user_id = MENTION_HERE_USER_ID.parse::<i64>().unwrap();
+        let bytes = api::MessageMentionList {
+            mentions: vec![api::MessageMention {
+                user_id: here_user_id,
+                username: "@here".into(),
+                s: 0,
+                e: 5,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let content = build_message_content_json("@here", &[], &[], &[], &[]);
+        assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
+    }
+
+    #[test]
+    fn mention_or_reply_malformed_proto_mentions_is_false() {
+        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        assert!(!is_mention_or_reply(
+            &content,
+            &[],
+            &[0xff, 0xff, 0xff, 0xff],
+            42,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn notification_content_extracts_message_id_and_time() {
+        let json = br#"{"message_id":"12345","create_time_seconds":1700000000}"#;
+        assert_eq!(parse_notification_content(json), (12345, 1700000000));
+    }
+
+    #[test]
+    fn notification_content_missing_fields_is_zero() {
+        let json = br#"{"t":"hi @bob"}"#;
+        assert_eq!(parse_notification_content(json), (0, 0));
+    }
+
+    #[test]
+    fn notification_content_malformed_is_zero() {
+        assert_eq!(parse_notification_content(&[0xff, 0x00, 0x12]), (0, 0));
+        assert_eq!(parse_notification_content(&[]), (0, 0));
+    }
+
+    #[test]
+    fn notification_content_accepts_numeric_message_id() {
+        let json = br#"{"message_id":12345,"create_time_seconds":1700000000}"#;
+        assert_eq!(parse_notification_content(json), (12345, 1700000000));
+    }
+
+    #[test]
+    fn notification_content_keeps_message_id_when_time_is_unexpected_type() {
+        let json = br#"{"message_id":"12345","create_time_seconds":"1700000000"}"#;
+        assert_eq!(parse_notification_content(json), (12345, 1700000000));
+    }
+
+    #[test]
+    fn notification_content_keeps_message_id_when_time_missing() {
+        let json = br#"{"message_id":"98765","content":"{\"t\":\"hi\"}"}"#;
+        assert_eq!(parse_notification_content(json), (98765, 0));
     }
 
     struct MockAdapter {
@@ -6135,7 +6389,7 @@ mod tests {
         let cid = t.generate_cid();
         let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
         assert!(err.to_string().contains("not connected"));
-        assert!(t.pending_requests.read().await.is_empty());
+        assert!(t.pending_requests.lock().is_empty());
     }
 
     #[tokio::test]
@@ -6146,7 +6400,7 @@ mod tests {
         let cid = t.generate_cid();
         let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
         assert!(err.to_string().contains("mock send failed"));
-        assert!(t.pending_requests.read().await.is_empty());
+        assert!(t.pending_requests.lock().is_empty());
     }
 
     #[test]

@@ -10,7 +10,7 @@ use mezon_client::transport::{ApiMessageContent, ApiMessageReaction, ContentToke
 
 use crate::album_layout::AlbumLayout;
 use crate::ids::{MessageId, UserId};
-use crate::message_time::local_day_key;
+use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
 pub struct MessageAttachment {
@@ -75,7 +75,9 @@ pub fn tenor_mp4_url(gif_url: &str) -> Option<String> {
         return None;
     }
     let content_id = &media_id[..11];
-    Some(format!("https://media.tenor.com/{content_id}AAAPo/{name}.mp4"))
+    Some(format!(
+        "https://media.tenor.com/{content_id}AAAPo/{name}.mp4"
+    ))
 }
 
 /// Message type/category, mirroring React `TypeMessage`. Drives how a row is
@@ -178,31 +180,37 @@ pub struct Reaction {
     pub sender_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MentionTarget {
+    pub user_id: Option<String>,
+    pub role_id: Option<String>,
+}
+
 /// An inline rich-text span produced from a message's content tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageSpan {
-    Text(String),
-    Bold(String),
-    Code(String),
+    Text(SharedString),
+    Bold(SharedString),
+    Code(SharedString),
     CodeBlock {
         language: Option<String>,
-        text: String,
+        text: SharedString,
     },
     Link {
-        text: String,
+        text: SharedString,
         url: String,
     },
     Mention {
-        display: String,
+        display: SharedString,
         user_id: Option<String>,
         role_id: Option<String>,
     },
     Hashtag {
-        display: String,
+        display: SharedString,
         channel_id: Option<String>,
     },
     Emoji {
-        name: String,
+        name: SharedString,
         emoji_id: String,
     },
 }
@@ -215,17 +223,21 @@ pub struct Message {
     pub content: String,
     pub sender_id: String,
     pub sender_user_id: Option<UserId>,
-    pub sender_name: String,
-    pub avatar_url: String,
+    pub sender_name: SharedString,
+    pub avatar_url: SharedString,
     pub avatar_proxied: SharedString,
     pub create_time: i64,
     pub update_time: i64,
     pub day_label: String,
+    pub time_hhmm: SharedString,
+    pub local_date: Option<chrono::NaiveDate>,
     pub code: MessageCode,
     pub is_edited: bool,
     pub is_forwarded: bool,
     pub combined_with_prev: bool,
+    pub highlights_viewer_direct: bool,
     pub spans: Vec<MessageSpan>,
+    pub mention_targets: Vec<MentionTarget>,
     pub references: Vec<MessageReference>,
     pub reactions: Vec<Reaction>,
     pub attachments: Vec<MessageAttachment>,
@@ -245,10 +257,10 @@ pub const COMBINE_TIME_WINDOW: i64 = 600;
 /// Whether two rows are from the same author (React `message.user.id` parity).
 /// Treats ack rows with `sender_id == "0"` as matching when the resolved user id agrees.
 pub fn same_message_sender(a: &Message, b: &Message) -> bool {
-    if let (Some(au), Some(bu)) = (resolved_sender_user_id(a), resolved_sender_user_id(b)) {
-        if au == bu {
-            return true;
-        }
+    if let (Some(au), Some(bu)) = (resolved_sender_user_id(a), resolved_sender_user_id(b))
+        && au == bu
+    {
+        return true;
     }
     let a_id = a.sender_id.as_str();
     let b_id = b.sender_id.as_str();
@@ -277,9 +289,6 @@ pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool
     let Some(prev) = prev else {
         return false;
     };
-    if !prev.code.is_user_timeline() {
-        return false;
-    }
     if msg.create_time == 0 {
         return false;
     }
@@ -290,6 +299,72 @@ pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool
 /// Mirrors React `MessageWithUser` `showMessageHead`.
 pub fn should_show_message_head(msg: &Message, is_combine: bool) -> bool {
     !msg.references.is_empty() || !is_combine
+}
+
+pub fn message_row_highlight(msg: &Message, viewer_id: Option<UserId>, role_ids: &[i64]) -> bool {
+    viewer_highlight_direct(&msg.references, &msg.mention_targets, &msg.spans, viewer_id)
+        || message_row_highlight_roles(msg, role_ids)
+}
+
+pub(crate) fn viewer_highlight_direct(
+    references: &[MessageReference],
+    mention_targets: &[MentionTarget],
+    spans: &[MessageSpan],
+    viewer_id: Option<UserId>,
+) -> bool {
+    let Some(viewer_id) = viewer_id else {
+        return false;
+    };
+    if references
+        .iter()
+        .any(|reference| reference.sender_id == viewer_id)
+    {
+        return true;
+    }
+    if mention_targets.iter().any(|target| {
+        target
+            .user_id
+            .as_deref()
+            .is_some_and(|uid| mention_user_id_targets_viewer(uid, viewer_id))
+    }) {
+        return true;
+    }
+    spans.iter().any(|span| {
+        matches!(span, MessageSpan::Mention { user_id, .. }
+            if user_id
+                .as_deref()
+                .is_some_and(|uid| mention_user_id_targets_viewer(uid, viewer_id)))
+    })
+}
+
+pub fn message_row_highlight_roles(msg: &Message, role_ids: &[i64]) -> bool {
+    if role_ids.is_empty() {
+        return false;
+    }
+    if msg.mention_targets.iter().any(|target| {
+        target.role_id.as_deref().is_some_and(|rid| {
+            rid.parse::<i64>()
+                .ok()
+                .is_some_and(|id| role_ids.contains(&id))
+        })
+    }) {
+        return true;
+    }
+    msg.spans.iter().any(|span| {
+        matches!(span, MessageSpan::Mention { role_id, .. }
+            if role_id.as_deref().is_some_and(|r| !r.is_empty())
+                && role_id
+                    .as_deref()
+                    .and_then(|r| r.parse::<i64>().ok())
+                    .is_some_and(|id| role_ids.contains(&id)))
+    })
+}
+
+fn mention_user_id_targets_viewer(uid: &str, viewer_id: UserId) -> bool {
+    !uid.is_empty()
+        && uid != "0"
+        && (mezon_client::transport::is_here_user_id(uid)
+            || uid.parse::<i64>().ok().map(UserId) == Some(viewer_id))
 }
 
 /// Aggregate raw per-user reaction entries into per-emoji totals (cf. React
@@ -433,7 +508,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
             continue;
         }
         if last < s {
-            spans.push(MessageSpan::Text(slice(last, s)));
+            spans.push(MessageSpan::Text(slice(last, s).into()));
         }
         let inner = slice(s, e);
         match kind {
@@ -445,46 +520,52 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                     || tok.username.is_some();
                 if is_user {
                     spans.push(MessageSpan::Mention {
-                        display: inner,
+                        display: inner.into(),
                         user_id: tok.user_id.clone(),
                         role_id: None,
                     });
                 } else if tok.role_id.as_deref().is_some_and(|r| !r.is_empty()) {
                     spans.push(MessageSpan::Mention {
-                        display: inner,
+                        display: inner.into(),
                         user_id: None,
                         role_id: tok.role_id.clone(),
                     });
                 } else {
-                    spans.push(MessageSpan::Text(inner));
+                    spans.push(MessageSpan::Text(inner.into()));
                 }
             }
             Kind::Hashtag => spans.push(MessageSpan::Hashtag {
-                display: inner,
+                display: inner.into(),
                 channel_id: tok.channel_id.clone(),
             }),
             Kind::Emoji => spans.push(MessageSpan::Emoji {
-                name: inner,
+                name: inner.into(),
                 emoji_id: tok.emojiid.clone().unwrap_or_default(),
             }),
             Kind::Link => {
                 let url = tok.url.clone().unwrap_or_else(|| inner.clone());
-                spans.push(MessageSpan::Link { text: inner, url });
+                spans.push(MessageSpan::Link {
+                    text: inner.into(),
+                    url,
+                });
             }
             Kind::Markdown => {
                 let ty = tok.kind.as_deref().unwrap_or("");
                 match ty {
-                    "b" => spans.push(MessageSpan::Bold(strip_marker(&inner, "**"))),
-                    "c" | "s" => spans.push(MessageSpan::Code(strip_marker(&inner, "`"))),
+                    "b" => spans.push(MessageSpan::Bold(strip_marker(&inner, "**").into())),
+                    "c" | "s" => spans.push(MessageSpan::Code(strip_marker(&inner, "`").into())),
                     "t" | "pre" => spans.push(MessageSpan::CodeBlock {
                         language: None,
-                        text: strip_marker(&inner, "```"),
+                        text: strip_marker(&inner, "```").into(),
                     }),
                     "lk" | "lk_yt" | "lk_fb" | "lk_tt" => {
                         let url = tok.url.clone().unwrap_or_else(|| inner.clone());
-                        spans.push(MessageSpan::Link { text: inner, url });
+                        spans.push(MessageSpan::Link {
+                            text: inner.into(),
+                            url,
+                        });
                     }
-                    _ => spans.push(MessageSpan::Text(inner)),
+                    _ => spans.push(MessageSpan::Text(inner.into())),
                 }
             }
         }
@@ -492,7 +573,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
         last = e;
     }
     if last < total {
-        spans.push(MessageSpan::Text(slice(last, total)));
+        spans.push(MessageSpan::Text(slice(last, total).into()));
     }
     spans
 }
@@ -535,14 +616,14 @@ impl Message {
         id: MessageId,
         content: impl Into<String>,
         sender_id: impl Into<String>,
-        sender_name: impl Into<String>,
+        sender_name: impl Into<SharedString>,
         create_time: i64,
     ) -> Self {
         let content: String = content.into();
         let spans = if content.is_empty() {
             Vec::new()
         } else {
-            vec![MessageSpan::Text(content.clone())]
+            vec![MessageSpan::Text(content.as_str().into())]
         };
         let sender_id: String = sender_id.into();
         let sender_user_id = sender_id.parse::<i64>().ok().map(UserId);
@@ -553,16 +634,20 @@ impl Message {
             sender_id,
             sender_user_id,
             sender_name: sender_name.into(),
-            avatar_url: String::new(),
+            avatar_url: SharedString::default(),
             avatar_proxied: SharedString::default(),
             create_time,
             update_time: 0,
             day_label: local_day_key(create_time),
+            time_hhmm: format_local_time_hhmm(create_time).into(),
+            local_date: local_datetime(create_time).map(|dt| dt.date_naive()),
             code: MessageCode::Chat,
             is_edited: false,
             is_forwarded: false,
             combined_with_prev: false,
+            highlights_viewer_direct: false,
             spans,
+            mention_targets: Vec::new(),
             references: Vec::new(),
             reactions: Vec::new(),
             attachments: Vec::new(),
@@ -596,6 +681,16 @@ impl Message {
         self
     }
 
+    pub fn with_mention_targets(mut self, mention_targets: Vec<MentionTarget>) -> Self {
+        self.mention_targets = mention_targets;
+        self
+    }
+
+    pub fn with_viewer_highlight(mut self, highlights_viewer_direct: bool) -> Self {
+        self.highlights_viewer_direct = highlights_viewer_direct;
+        self
+    }
+
     pub fn with_references(mut self, references: Vec<MessageReference>) -> Self {
         self.references = references;
         self
@@ -617,7 +712,7 @@ impl Message {
         self
     }
 
-    pub fn with_avatar(mut self, avatar_url: impl Into<String>) -> Self {
+    pub fn with_avatar(mut self, avatar_url: impl Into<SharedString>) -> Self {
         self.avatar_url = avatar_url.into();
         self
     }
@@ -692,6 +787,57 @@ mod tests {
     }
 
     #[test]
+    fn parse_spans_accepts_numeric_user_id_from_json() {
+        let content: ApiMessageContent = serde_json::from_str(
+            r#"{"t":"hi @bob","mentions":[{"s":3,"e":7,"user_id":42,"username":"bob"}]}"#,
+        )
+        .expect("mention token json");
+        let spans = parse_spans(&content);
+        assert_eq!(
+            spans,
+            vec![
+                MessageSpan::Text("hi ".into()),
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("42".into()),
+                    role_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn message_row_highlight_uses_entity_mention_targets() {
+        let mut msg = Message::new(MessageId(1), "hi", "7", "alice", 100);
+        msg.mention_targets = vec![MentionTarget {
+            user_id: Some("42".into()),
+            role_id: None,
+        }];
+        assert!(message_row_highlight(&msg, Some(UserId(42)), &[]));
+        assert!(!message_row_highlight(&msg, Some(UserId(7)), &[]));
+    }
+
+    #[test]
+    fn message_row_highlight_detects_user_mention_and_reply() {
+        let user = UserId(42);
+        let mut msg = Message::new(MessageId(1), "hi", "7", "alice", 100);
+        msg.spans = vec![MessageSpan::Mention {
+            display: "@bob".into(),
+            user_id: Some("42".into()),
+            role_id: None,
+        }];
+        assert!(message_row_highlight(&msg, Some(user), &[]));
+
+        let mut reply = Message::new(MessageId(2), "yo", "7", "alice", 101);
+        reply.references.push(MessageReference {
+            message_ref_id: MessageId(9),
+            sender_id: user,
+            ..Default::default()
+        });
+        assert!(message_row_highlight(&reply, Some(user), &[]));
+    }
+
+    #[test]
     fn parse_spans_handles_utf16_indices() {
         let content = ApiMessageContent {
             t: "😀 @x".into(),
@@ -742,6 +888,14 @@ mod tests {
         assert_eq!(agg[0].key, "10");
         assert_eq!(agg[0].count, 2);
         assert_eq!(agg[0].sender_ids, vec!["u1".to_string(), "u2".to_string()]);
+    }
+
+    #[test]
+    fn user_message_after_system_from_same_sender_combines() {
+        let mut sys = Message::new(MessageId(1), "thread", "u1", "U1", 100);
+        sys.code = MessageCode::CreateThread;
+        let next = Message::new(MessageId(2), "hello", "u1", "U1", 110);
+        assert!(message_combined_with_prev(Some(&sys), &next));
     }
 
     #[test]
@@ -826,8 +980,10 @@ mod tests {
     #[test]
     fn tenor_gif_url_derives_mp4_variant() {
         assert_eq!(
-            tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/may-day-flowers-happy-may-day.gif")
-                .as_deref(),
+            tenor_mp4_url(
+                "https://media.tenor.com/rmtqGXO15tYAAAAC/may-day-flowers-happy-may-day.gif"
+            )
+            .as_deref(),
             Some("https://media.tenor.com/rmtqGXO15tYAAAPo/may-day-flowers-happy-may-day.mp4")
         );
         assert_eq!(
@@ -843,8 +999,14 @@ mod tests {
             tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/clip.mp4"),
             None
         );
-        assert_eq!(tenor_mp4_url("https://media.tenor.com/short/clip.gif"), None);
-        assert_eq!(tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/.gif"), None);
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/short/clip.gif"),
+            None
+        );
+        assert_eq!(
+            tenor_mp4_url("https://media.tenor.com/rmtqGXO15tYAAAAC/.gif"),
+            None
+        );
     }
 
     #[test]

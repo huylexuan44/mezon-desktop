@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 pub use mezon_voice::{
     PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
     VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, preload_screen_share_options,
+    peek_screen_share_options,
 };
 
 use crate::AppConfig;
@@ -73,15 +73,23 @@ pub struct VoiceStore {
     camera_enabled: bool,
     screen_share_enabled: bool,
     focused_tile: Option<String>,
+    fullscreen_screen: Option<u64>,
+    pip: Option<PipWindow>,
     participants: Vec<VoiceParticipant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
     render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
+    pending_texture_drops: Mutex<Vec<Arc<RenderImage>>>,
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     last_repaint_seq: Option<u64>,
     _events_task: Option<Task<()>>,
     _repaint_task: Option<Task<()>>,
+}
+
+struct PipWindow {
+    key: u64,
+    handle: gpui::AnyWindowHandle,
 }
 
 struct GlobalVoiceStore(Entity<VoiceStore>);
@@ -113,10 +121,13 @@ impl VoiceStore {
             camera_enabled: false,
             screen_share_enabled: false,
             focused_tile: None,
+            fullscreen_screen: None,
+            pip: None,
             participants: Vec::new(),
             session: None,
             frame_store: None,
             render_cache: Mutex::new(HashMap::new()),
+            pending_texture_drops: Mutex::new(Vec::new()),
             cached_meet_token: None,
             meet_token_prefetching: None,
             last_repaint_seq: None,
@@ -126,19 +137,7 @@ impl VoiceStore {
     }
 
     fn current_max_frame_seq(&self) -> Option<u64> {
-        let store = self.frame_store.as_ref()?;
-        let mut max_seq = None;
-        for participant in &self.participants {
-            for key in [participant.camera, participant.screenshare]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(frame) = store.get(key) {
-                    max_seq = Some(max_seq.map_or(frame.seq, |m: u64| m.max(frame.seq)));
-                }
-            }
-        }
-        max_seq
+        Some(self.frame_store.as_ref()?.publish_seq())
     }
 
     fn cached_token_for(&self, channel_id: &str) -> Option<String> {
@@ -221,24 +220,29 @@ impl VoiceStore {
 
     pub fn render_image(&self, key: u64) -> Option<Arc<RenderImage>> {
         let store = self.frame_store.as_ref()?;
-        let frame = store.get(key)?;
-        let mut cache = self.render_cache.lock();
-        if let Some(entry) = cache.get(&key)
-            && entry.seq == frame.seq
-        {
-            return Some(entry.image.clone());
-        }
-        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
+        let cached_seq = self.render_cache.lock().get(&key).map(|entry| entry.seq);
+        let Some(frame) = store.take_new(key, cached_seq) else {
+            return self
+                .render_cache
+                .lock()
+                .get(&key)
+                .map(|entry| entry.image.clone());
+        };
+        let seq = frame.seq;
+        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
         let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
             buffer,
         )]));
-        cache.insert(
+        let previous = self.render_cache.lock().insert(
             key,
             CachedRenderImage {
-                seq: frame.seq,
+                seq,
                 image: image.clone(),
             },
         );
+        if let Some(previous) = previous {
+            self.pending_texture_drops.lock().push(previous.image);
+        }
         Some(image)
     }
 
@@ -256,7 +260,23 @@ impl VoiceStore {
                 live_keys.insert(key);
             }
         }
-        cache.retain(|key, _| live_keys.contains(key));
+        let mut drops = self.pending_texture_drops.lock();
+        cache.retain(|key, entry| {
+            if live_keys.contains(key) {
+                true
+            } else {
+                drops.push(entry.image.clone());
+                false
+            }
+        });
+    }
+
+    fn flush_texture_drops(&self, cx: &mut App) {
+        let drops: Vec<Arc<RenderImage>> =
+            std::mem::take(&mut *self.pending_texture_drops.lock());
+        for image in drops {
+            cx.drop_image(image, None);
+        }
     }
 
     pub fn focused_tile(&self) -> Option<&str> {
@@ -285,6 +305,60 @@ impl VoiceStore {
         }
     }
 
+    pub fn fullscreen_screen(&self) -> Option<u64> {
+        self.fullscreen_screen
+    }
+
+    pub fn toggle_fullscreen_screen(&mut self, key: u64, cx: &mut Context<Self>) {
+        self.fullscreen_screen = if self.fullscreen_screen == Some(key) {
+            None
+        } else {
+            Some(key)
+        };
+        cx.notify();
+    }
+
+    pub fn clear_fullscreen_screen(&mut self, cx: &mut Context<Self>) {
+        if self.fullscreen_screen.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
+        if let Some(prev) = self.pip.take() {
+            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.pip = Some(PipWindow { key, handle });
+        cx.notify();
+    }
+
+    pub fn close_pip(&mut self, cx: &mut Context<Self>) {
+        if let Some(prev) = self.pip.take() {
+            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            cx.notify();
+        }
+    }
+
+    pub fn on_pip_closed(&mut self, key: u64, cx: &mut Context<Self>) {
+        if self.pip.as_ref().is_some_and(|p| p.key == key) {
+            self.pip = None;
+            cx.notify();
+        }
+    }
+
+    fn prune_screen_targets(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.fullscreen_screen
+            && !self.participants.iter().any(|p| p.screenshare == Some(key))
+        {
+            self.fullscreen_screen = None;
+        }
+        if let Some(key) = self.pip.as_ref().map(|p| p.key)
+            && !self.participants.iter().any(|p| p.screenshare == Some(key))
+        {
+            self.close_pip(cx);
+        }
+    }
+
     pub fn is_connected_to(&self, channel_id: &str) -> bool {
         matches!(self.connection.connected_channel(), Some((id, _)) if id == channel_id)
     }
@@ -307,7 +381,7 @@ impl VoiceStore {
             return;
         }
 
-        self.teardown();
+        self.teardown(cx);
         self.channel_label = channel_label;
 
         let ws_url = AppConfig::global(cx).meet_ws_url.clone();
@@ -416,6 +490,7 @@ impl VoiceStore {
             loop {
                 frame_store.frame_changed().await;
                 let keep_going = this.update(cx, |this, cx| {
+                    this.flush_texture_drops(cx);
                     if this.has_active_video() {
                         let seq = this.current_max_frame_seq();
                         if seq.is_some() && seq != this.last_repaint_seq {
@@ -437,6 +512,15 @@ impl VoiceStore {
     fn ice_servers(cx: &App) -> Vec<IceServerConfig> {
         let config = AppConfig::global(cx);
         if config.webrtc_ice_servers_url.is_empty() {
+            return Vec::new();
+        }
+        if config.webrtc_ice_servers_url.starts_with("turn")
+            && config.webrtc_ice_servers_credential.is_empty()
+        {
+            tracing::warn!(
+                "skipping TURN server {}: missing credential",
+                config.webrtc_ice_servers_url
+            );
             return Vec::new();
         }
         vec![IceServerConfig {
@@ -493,10 +577,12 @@ impl VoiceStore {
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
                 self.evict_stale_render_cache();
+                self.flush_texture_drops(cx);
+                self.prune_screen_targets(cx);
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
-                self.teardown();
+                self.teardown(cx);
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -516,7 +602,7 @@ impl VoiceStore {
     }
 
     pub fn leave(&mut self, cx: &mut Context<Self>) {
-        self.teardown();
+        self.teardown(cx);
         cx.notify();
     }
 
@@ -570,10 +656,19 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn teardown(&mut self) {
+    fn teardown(&mut self, cx: &mut Context<Self>) {
+        self.close_pip(cx);
+        self.fullscreen_screen = None;
         self.session = None;
         self.frame_store = None;
-        self.render_cache.lock().clear();
+        let stale: Vec<Arc<RenderImage>> = {
+            let mut cache = self.render_cache.lock();
+            cache.drain().map(|(_, entry)| entry.image).collect()
+        };
+        for image in stale {
+            cx.drop_image(image, None);
+        }
+        self.flush_texture_drops(cx);
         self._events_task = None;
         self._repaint_task = None;
         self.connection = VoiceConnection::Idle;

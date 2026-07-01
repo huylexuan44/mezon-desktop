@@ -6,6 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
+use gstreamer_video::VideoFrameExt;
 
 use crate::{PlayerError, VideoFrame};
 
@@ -31,22 +32,28 @@ pub struct PlayerImpl {
 }
 
 impl PlayerImpl {
-    pub fn open(url: &str) -> Result<Self, PlayerError> {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
         ensure_gstreamer()?;
-        Self::build(url).map_err(|error| {
+        Self::build(url, max_size).map_err(|error| {
             tracing::warn!(target: "mezon_video", %error, "failed to build gstreamer pipeline");
             PlayerError::Open
         })
     }
 
-    fn build(url: &str) -> Result<Self, gst::glib::BoolError> {
+    fn build(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, gst::glib::BoolError> {
         let playbin = gst::ElementFactory::make("playbin").build()?;
-        let caps = gst_video::VideoCapsBuilder::new()
-            .format(gst_video::VideoFormat::Bgra)
-            .build();
+        let mut caps_builder =
+            gst_video::VideoCapsBuilder::new().format(gst_video::VideoFormat::Bgra);
+        if let Some((width, height)) = max_size
+            && width > 0
+            && height > 0
+        {
+            caps_builder = caps_builder.width(width as i32).height(height as i32);
+        }
+        let caps = caps_builder.build();
         let appsink = gst_app::AppSink::builder()
             .caps(&caps)
             .max_buffers(2)

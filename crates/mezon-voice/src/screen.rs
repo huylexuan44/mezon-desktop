@@ -13,6 +13,8 @@ use crate::screen_picker::{PickedScreen, scap_target_for_pick};
 use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
 const CAPTURE_FPS: u32 = 15;
+const PREVIEW_MAX_WIDTH: usize = 640;
+const PREVIEW_MAX_HEIGHT: usize = 400;
 
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
@@ -157,9 +159,9 @@ pub fn start_screen(
                     source.capture_frame(&frame);
                 }
 
-                let preview =
-                    normalize_bgra(&bgra.data, src_w as usize, src_h as usize, row_stride);
-                frame_store.publish(key, src_w, src_h, preview);
+                let (pw, ph, preview) =
+                    downscale_bgra(&bgra.data, src_w as usize, src_h as usize, row_stride);
+                frame_store.publish(key, pw, ph, preview);
             }
 
             capturer.stop_capture();
@@ -176,19 +178,25 @@ pub fn start_screen(
     (ScreenStopper { stop }, track_rx)
 }
 
-fn normalize_bgra(src: &[u8], width: usize, height: usize, row_stride: usize) -> Vec<u8> {
-    let tight = width * 4;
-    if row_stride == tight {
-        return src[..(tight * height).min(src.len())].to_vec();
-    }
-    let mut out = vec![0u8; tight * height];
-    for y in 0..height {
-        let s = y * row_stride;
-        let d = y * tight;
-        if s + tight > src.len() {
-            break;
+fn downscale_bgra(src: &[u8], width: usize, height: usize, row_stride: usize) -> (u32, u32, Vec<u8>) {
+    let scale = (PREVIEW_MAX_WIDTH as f32 / width.max(1) as f32)
+        .min(PREVIEW_MAX_HEIGHT as f32 / height.max(1) as f32)
+        .min(1.0);
+    let dw = ((width as f32 * scale) as usize).max(1);
+    let dh = ((height as f32 * scale) as usize).max(1);
+    let mut out = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        let sy = y * height / dh;
+        let s_row = sy * row_stride;
+        let d_row = y * dw * 4;
+        for x in 0..dw {
+            let sx = x * width / dw;
+            let s = s_row + sx * 4;
+            let d = d_row + x * 4;
+            if s + 4 <= src.len() {
+                out[d..d + 4].copy_from_slice(&src[s..s + 4]);
+            }
         }
-        out[d..d + tight].copy_from_slice(&src[s..s + tight]);
     }
-    out
+    (dw as u32, dh as u32, out)
 }
