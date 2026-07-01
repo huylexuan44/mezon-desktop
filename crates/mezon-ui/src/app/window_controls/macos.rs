@@ -1,11 +1,17 @@
 use block::ConcreteBlock;
-use gpui::{App, Window, WindowHandle, div, prelude::*};
+use gpui::{App, Window, WindowHandle, div, prelude::*, px, rgb};
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::{Once, OnceLock};
 
+use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
+
+use super::{
+    MACOS_TRAFFIC_LIGHT_BUTTON_SIZE, MACOS_TRAFFIC_LIGHT_GAP, MACOS_TRAFFIC_LIGHT_PADDING_X,
+    MACOS_TRAFFIC_LIGHT_PADDING_Y,
+};
 
 const NS_KEY_DOWN_MASK: u64 = 1 << 10;
 const NS_COMMAND_KEY_MASK: u64 = 1 << 20;
@@ -21,7 +27,67 @@ unsafe impl Sync for EventMonitor {}
 static EVENT_MONITOR: OnceLock<EventMonitor> = OnceLock::new();
 
 pub fn render_controls(_theme: &Theme, _window: &Window) -> impl IntoElement {
+    let zoom_icon = IconName::MacOSMaximizeIcon;
+
     div()
+        .id("macos-window-controls")
+        .absolute()
+        .top_0()
+        .left_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(MACOS_TRAFFIC_LIGHT_GAP))
+        .pl(px(MACOS_TRAFFIC_LIGHT_PADDING_X))
+        .pr(px(8.))
+        .py(px(MACOS_TRAFFIC_LIGHT_PADDING_Y))
+        .child(macos_traffic_button(
+            "macos-close",
+            rgb(0xff5f57),
+            IconName::MacOSCloseIcon,
+            |window, _| hide_window(window),
+        ))
+        .child(macos_traffic_button(
+            "macos-minimize",
+            rgb(0xffbd2e),
+            IconName::MacOSMinimizeIcon,
+            |window, _| window.minimize_window(),
+        ))
+        .child(macos_traffic_button(
+            "macos-zoom",
+            rgb(0x28ca42),
+            zoom_icon,
+            |window, _| window.zoom_window(),
+        ))
+}
+
+fn macos_traffic_button(
+    id: &'static str,
+    background: gpui::Rgba,
+    icon: IconName,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .group("macos-traffic")
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(MACOS_TRAFFIC_LIGHT_BUTTON_SIZE))
+        .rounded_full()
+        .bg(background)
+        .cursor_pointer()
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .child(
+            div()
+                .opacity(0.)
+                .group_hover("macos-traffic", |s| s.opacity(100.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size_full()
+                .child(Icon::new(icon).size(px(8.)).text_color(gpui::black())),
+        )
 }
 
 pub fn hide_window(window: &Window) {

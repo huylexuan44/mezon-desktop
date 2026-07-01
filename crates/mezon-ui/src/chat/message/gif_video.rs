@@ -1,15 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
 
-use gpui::{
-    AnyElement, Context, ObjectFit, SharedString, Task, Window, div, img, prelude::*, px,
-};
+use gpui::{AnyElement, Context, ObjectFit, SharedString, Window, div, img, prelude::*, px};
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::theme::ActiveTheme;
 
-const FRAME_INTERVAL_MS: u64 = 16;
 const LOOP_EPSILON_SECONDS: f64 = 0.08;
 
 #[derive(Default)]
@@ -24,7 +20,7 @@ pub struct GifVideoView {
     height: f32,
     player: Option<Rc<VideoPlayer>>,
     shared: Rc<RefCell<GifPlayback>>,
-    _pump: Option<Task<()>>,
+    playing: bool,
 }
 
 impl GifVideoView {
@@ -35,13 +31,15 @@ impl GifVideoView {
         height: f32,
         cx: &mut Context<Self>,
     ) -> Self {
-        let player = VideoPlayer::open(mp4_url.as_ref()).ok().map(Rc::new);
+        let player = VideoPlayer::open(mp4_url.as_ref(), decode_size(width, height))
+            .ok()
+            .map(Rc::new);
         if let Some(player) = player.as_ref() {
             player.set_muted(true);
             player.play();
         }
+        let playing = player.is_some();
         let shared = Rc::new(RefCell::new(GifPlayback::default()));
-        let pump = player.as_ref().map(|_| Self::spawn_pump(cx));
         Self::register_teardown(cx);
         Self {
             fallback_gif,
@@ -49,24 +47,24 @@ impl GifVideoView {
             height,
             player,
             shared,
-            _pump: pump,
+            playing,
         }
     }
 
-    fn spawn_pump(cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(FRAME_INTERVAL_MS))
-                    .await;
-                if this.update(cx, |view, cx| view.tick(cx)).is_err() {
-                    break;
-                }
-            }
-        })
+    pub fn set_playing(&mut self, playing: bool, cx: &mut Context<Self>) {
+        let Some(player) = self.player.clone() else {
+            return;
+        };
+        if playing {
+            player.play();
+        } else {
+            player.pause();
+        }
+        self.playing = playing;
+        cx.notify();
     }
 
-    fn tick(&mut self, cx: &mut Context<Self>) {
+    fn poll_frame(&mut self, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -78,22 +76,14 @@ impl GifVideoView {
             player.play();
         }
         let new_frame = player.copy_frame();
-        let mut changed = false;
-        {
+        let previous = {
             let mut shared = self.shared.borrow_mut();
             if failed != shared.failed {
                 shared.failed = failed;
-                changed = true;
             }
-            if let Some(frame) = new_frame {
-                let previous = shared.frame.replace(frame);
-                Self::release_frame(previous, cx);
-                changed = true;
-            }
-        }
-        if changed {
-            cx.notify();
-        }
+            new_frame.and_then(|frame| shared.frame.replace(frame))
+        };
+        Self::release_frame(previous, cx);
     }
 
     #[cfg(target_os = "macos")]
@@ -139,7 +129,8 @@ impl GifVideoView {
 }
 
 impl Render for GifVideoView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.poll_frame(cx);
         let theme = cx.theme();
         let failed = self.shared.borrow().failed;
         let root = div()
@@ -158,6 +149,20 @@ impl Render for GifVideoView {
             );
         }
 
+        if self.playing && !failed && self.player.is_some() && window.is_window_active() {
+            window.request_animation_frame();
+        }
+
         root.children(if failed { None } else { self.frame_child() })
+    }
+}
+
+fn decode_size(width: f32, height: f32) -> Option<(u32, u32)> {
+    let width = width.round();
+    let height = height.round();
+    if width >= 1.0 && height >= 1.0 {
+        Some((width as u32, height as u32))
+    } else {
+        None
     }
 }

@@ -1,5 +1,5 @@
 use gpui::{Anchor, AnyElement, App, SharedString, div, prelude::*, px};
-use mezon_store::Message;
+use mezon_store::{Message, MessageCode};
 
 use super::content::render_message_content;
 use super::context::{
@@ -12,6 +12,13 @@ use super::parts::{
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Icon, IconName};
 
+const GROUP_MARGIN_TOP: f32 = 10.;
+const MESSAGE_ROW_MIN_HEIGHT: f32 = 30.;
+
+fn message_pad_top(combined: bool, has_reply: bool, code: MessageCode) -> bool {
+    !combined || (has_reply && !matches!(code, MessageCode::CreatePin))
+}
+
 pub fn render_user_message(
     msg: &Message,
     combined: bool,
@@ -22,13 +29,13 @@ pub fn render_user_message(
     let has_reply = !msg.references.is_empty();
     let show_head = mezon_store::should_show_message_head(msg, combined);
     let row_key = msg.row_anchor_id.0;
-    let group_name = SharedString::from(format!("msg-{row_key}"));
 
     let mut body_column = div()
         .flex()
         .flex_col()
         .w_full()
         .min_w_0()
+        .mb_1()
         .pl(px(CONTENT_INSET))
         .pr(px(CONTENT_RIGHT_PAD));
 
@@ -85,18 +92,28 @@ pub fn render_user_message(
 
     let hover_bg = theme.bg_hover;
     let highlighted = ctx.highlight_id.is_some_and(|id| id == msg.id);
+    let mentioned = msg.highlights_viewer_direct
+        || mezon_store::message_row_highlight_roles(msg, ctx.current_role_ids);
+    let mention_bg = theme.tokens.bg_highlight;
+    let mention_border = theme.tokens.border_left_highlight;
     div()
-        .id(SharedString::from(format!("msg-row-{row_key}")))
-        .group(group_name.clone())
+        .id(("msg-row", row_key as usize))
+        .when(!ctx.suppress_hover, |d| {
+            d.group(SharedString::from(format!("msg-{row_key}")))
+        })
         .relative()
         .w_full()
-        .py(px(2.))
-        .when(!combined, |d| d.mt(px(10.)).pt_3())
+        .min_h(px(MESSAGE_ROW_MIN_HEIGHT))
+        .when(!combined, |d| d.mt(px(GROUP_MARGIN_TOP)))
+        .when(message_pad_top(combined, has_reply, msg.code), |d| d.pt_3())
         .when(highlighted, |d| {
             d.bg(gpui::Rgba {
                 a: 0.16,
                 ..theme.brand
             })
+        })
+        .when(mentioned && !highlighted, |d| {
+            d.bg(mention_bg).border_l_3().border_color(mention_border)
         })
         .when(!ctx.suppress_hover, |d| d.hover(move |s| s.bg(hover_bg)))
         .when(has_reply, |d| {
@@ -116,16 +133,20 @@ fn build_avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         return plain;
     };
     let settings = ctx.settings.clone();
-    let trigger_id = SharedString::from(format!("msg-avatar-trigger-{}", msg.sender_id));
-    let popover_id = SharedString::from(format!("msg-avatar-popover-{}", msg.sender_id));
-    profile_popover_menu(popover_id, user_id, profile_ctx, settings)
-        .anchor(Anchor::TopLeft)
-        .attach(Anchor::TopRight)
-        .trigger(
-            ClickableContainer::new(trigger_id)
-                .size_full()
-                .cursor_pointer()
-                .child(plain),
-        )
-        .into_any_element()
+    let avatar_key = user_id.get() as usize;
+    profile_popover_menu(
+        ("msg-avatar-popover", avatar_key),
+        user_id,
+        profile_ctx,
+        settings,
+    )
+    .anchor(Anchor::TopLeft)
+    .attach(Anchor::TopRight)
+    .trigger(
+        ClickableContainer::new(("msg-avatar-trigger", avatar_key))
+            .size_full()
+            .cursor_pointer()
+            .child(plain),
+    )
+    .into_any_element()
 }

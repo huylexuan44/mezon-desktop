@@ -716,8 +716,8 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
         return ThreadCardPreview {
             content: message.content.clone(),
             sender_id_raw: message.sender_id.clone(),
-            sender_name: message.sender_name.clone(),
-            sender_avatar: message.avatar_url.clone(),
+            sender_name: message.sender_name.to_string(),
+            sender_avatar: message.avatar_url.to_string(),
             timestamp: message.create_time,
         };
     }

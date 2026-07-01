@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, Entity, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px};
+use gpui::{
+    AnyElement, App, Entity, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, rems,
+};
 use mezon_store::{
     AlbumLayout, Message, MessageAttachment, MessageId, MessageReference, MessagesStore, Reaction,
     ReplyDraft, ViewerMedia, resolve_user_profile,
@@ -13,8 +15,6 @@ use super::video_player::VideoActivation;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 
-/// Build the 40px message avatar (proxied src with raw fallback), cf. React
-/// `MessageAvatar`.
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let mut avatar = Avatar::new()
@@ -53,15 +53,14 @@ fn resolve_message_avatar_urls(
 
     let proxied = msg.avatar_proxied.clone();
     if !proxied.is_empty() {
-        return (msg.avatar_url.clone(), Some(proxied));
+        return (msg.avatar_url.to_string(), Some(proxied));
     }
-    (msg.avatar_url.clone(), None)
+    (msg.avatar_url.to_string(), None)
 }
 
-/// Username + timestamp header (React `MessageHead`).
 pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     let theme = ctx.theme;
-    let time_label = format_message_time(msg.create_time, ctx.locale);
+    let time_label = format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now);
     div()
         .flex()
         .flex_row()
@@ -83,7 +82,6 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         .into_any_element()
 }
 
-/// Reply quote block shown above a message (React `MessageReply`).
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let preview = if reference.content.is_empty() {
@@ -111,10 +109,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
 
     let jump_target = reference.message_ref_id;
     div()
-        .id(SharedString::from(format!(
-            "reply-{}",
-            reference.message_ref_id
-        )))
+        .id(("reply", reference.message_ref_id.0 as usize))
         .flex()
         .flex_row()
         .items_center()
@@ -153,8 +148,6 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
-/// Render image/file attachments below the message body (React
-/// `MessageAttachment`, simplified to image + generic file for P0).
 pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     if msg.attachments.is_empty() {
         return None;
@@ -176,9 +169,9 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     }
 
     let uploader = Uploader {
-        name: SharedString::from(msg.sender_name.clone()),
+        name: msg.sender_name.clone(),
         avatar: if msg.avatar_proxied.is_empty() {
-            SharedString::from(msg.avatar_url.clone())
+            msg.avatar_url.clone()
         } else {
             msg.avatar_proxied.clone()
         },
@@ -192,7 +185,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         && let Some(layout) = msg.album_layout.as_ref()
     {
         col = col.child(render_album(
-            msg.id,
             &images,
             layout,
             &msg.viewer_media,
@@ -205,7 +197,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
             .as_ref()
             .and_then(|_| ctx.gif_videos.get(&(msg.id, att_index)).cloned());
         col = col.child(render_photo(
-            msg.id,
             0,
             att,
             theme,
@@ -228,7 +219,6 @@ struct Uploader {
 }
 
 fn render_album(
-    msg_id: MessageId,
     images: &[(usize, &MessageAttachment)],
     layout: &AlbumLayout,
     _gallery: &Arc<[ViewerMedia]>,
@@ -251,10 +241,7 @@ fn render_album(
         // let uploader_name = uploader.name.clone();
         // let uploader_avatar = uploader.avatar.clone();
         let tile_element = div()
-            .id(SharedString::from(format!(
-                "msg-album-{}-{}",
-                msg_id.0, index
-            )))
+            .id(("msg-album", index))
             .absolute()
             .left(px(tile.x))
             .top(px(tile.y))
@@ -283,7 +270,6 @@ fn render_album(
 }
 
 fn render_photo(
-    msg_id: MessageId,
     index: usize,
     att: &MessageAttachment,
     theme: &Theme,
@@ -297,7 +283,7 @@ fn render_photo(
     }
     if let Some(player) = gif_player {
         return div()
-            .id(SharedString::from(format!("msg-gif-{}-{}", msg_id.0, index)))
+            .id(("msg-gif", index))
             .w(px(att.display_width))
             .h(px(att.display_height))
             .max_w_full()
@@ -317,10 +303,7 @@ fn render_photo(
     // let uploader_name = uploader.name.clone();
     // let uploader_avatar = uploader.avatar.clone();
     div()
-        .id(SharedString::from(format!(
-            "msg-img-{}-{}",
-            msg_id.0, index
-        )))
+        .id(("msg-img", index))
         .w(px(att.display_width))
         .h(px(att.display_height))
         .rounded_md()
@@ -423,10 +406,7 @@ fn render_video_poster(
                 ),
         );
     div()
-        .id(SharedString::from(format!(
-            "msg-video-{}-{}",
-            msg_id.0, index
-        )))
+        .id(("msg-video", index))
         .relative()
         .flex()
         .items_center()
@@ -513,7 +493,6 @@ fn attachment_box(label: String, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// Reaction pills row (React `MessageReaction`), display-only for now.
 pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     if msg.reactions.is_empty() {
         return None;
@@ -521,19 +500,12 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     let theme = ctx.theme;
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for (i, reaction) in msg.reactions.iter().enumerate() {
-        row = row.child(reaction_pill(
-            msg.id,
-            i,
-            reaction,
-            ctx.current_user_id,
-            theme,
-        ));
+        row = row.child(reaction_pill(i, reaction, ctx.current_user_id, theme));
     }
     Some(row.into_any_element())
 }
 
 fn reaction_pill(
-    msg_id: MessageId,
     index: usize,
     reaction: &Reaction,
     current_user_id: &str,
@@ -547,10 +519,7 @@ fn reaction_pill(
         format!("{} {}", reaction.emoji, reaction.count)
     };
     let mut pill = div()
-        .id(SharedString::from(format!(
-            "reaction-{}-{}",
-            msg_id.0, index
-        )))
+        .id(("reaction", index))
         .flex()
         .flex_row()
         .items_center()
@@ -573,19 +542,15 @@ fn reaction_pill(
     pill.child(label).into_any_element()
 }
 
-/// Floating hover action bar (React `ChannelMessageOpt`), revealed on row hover.
-/// The Reply action sets the composer reply target; the rest are visual for now.
-/// While the list is scrolling (`suppress_hover`) the bar is not rendered, so it
-/// cannot flash in under the cursor (cf. React `toggleDisableHover`).
 pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) -> AnyElement {
     if suppress_hover {
         return div().into_any_element();
     }
-    let group_name = SharedString::from(format!("msg-{}", msg.id.0));
+    let group_name = SharedString::from(format!("msg-{}", msg.row_anchor_id.0));
     let bg_hover = theme.bg_hover;
-    let action = move |id: &str, icon: IconName| {
+    let action = move |id: &'static str, icon: IconName| {
         div()
-            .id(SharedString::from(id.to_string()))
+            .id(id)
             .p_1()
             .rounded_md()
             .cursor_pointer()
@@ -593,14 +558,7 @@ pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) 
             .child(Icon::new(icon).size_4().text_color(theme.text_secondary))
     };
 
-    let reply_draft = ReplyDraft {
-        message_ref_id: msg.id,
-        sender_id: msg.sender_user_id.unwrap_or_default(),
-        sender_name: msg.sender_name.clone(),
-        sender_avatar: msg.avatar_url.clone(),
-        content_preview: msg.content.clone(),
-        has_attachment: !msg.attachments.is_empty(),
-    };
+    let reply_id = msg.id;
 
     div()
         .absolute()
@@ -620,8 +578,7 @@ pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) 
         .child(action("react", IconName::Smile))
         .child(
             action("reply", IconName::ReplyCorner).on_click(move |_, _, cx| {
-                let draft = reply_draft.clone();
-                MessagesStore::global(cx).update(cx, |store, cx| store.set_reply(draft, cx));
+                MessagesStore::global(cx).update(cx, |store, cx| store.set_reply_to(reply_id, cx));
             }),
         )
         .child(action("edit", IconName::PenEdit))
@@ -629,24 +586,46 @@ pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) 
         .into_any_element()
 }
 
-/// Date separator row (React `MessageDateDivider`).
 pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {
+    let line_color = theme.tokens.border_color_primary;
     div()
         .id(SharedString::from(format!("date-sep-{}", label)))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .px_4()
-        .py_2()
         .w_full()
-        .child(div().flex_1().h(px(1.)).bg(theme.border))
+        .mt_5()
+        .mb_2()
+        .flex()
+        .items_center()
+        .justify_center()
         .child(
             div()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(label.to_string()),
+                .relative()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .child(div().w_full().h(px(1.)).bg(line_color)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .px_4()
+                        .rounded_lg()
+                        .bg(theme.tokens.bg_primary)
+                        .text_xs()
+                        .line_height(rems(1.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.tokens.text_theme_primary)
+                        .child(label.to_string()),
+                ),
         )
-        .child(div().flex_1().h(px(1.)).bg(theme.border))
         .into_any_element()
 }

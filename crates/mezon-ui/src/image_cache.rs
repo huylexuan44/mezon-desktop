@@ -591,9 +591,9 @@ fn decode_message_image(
             if decoder.has_animation() {
                 downscaled_animation_frames(decoder.into_frames(), animation_max_px)?
             } else {
-                vec![full_resolution_bgra_frame(image::DynamicImage::from_decoder(
-                    decoder,
-                )?)]
+                vec![full_resolution_bgra_frame(
+                    image::DynamicImage::from_decoder(decoder)?,
+                )]
             }
         }
         _ => vec![full_resolution_bgra_frame(

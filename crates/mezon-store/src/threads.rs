@@ -295,7 +295,7 @@ impl ThreadsStore {
         self.list_channel_id
             .as_ref()
             .and_then(|id| id.parse::<ChannelId>().ok())
-            .and_then(|id| ChannelList::global(cx).read(cx).find_channel(id))
+            .and_then(|id| ChannelList::global(cx).read(cx).find_channel_in_active_clan(id))
             .is_some_and(|ch| {
                 !matches!(ch.channel_type, ChannelType::Thread)
                     && matches!(
@@ -319,7 +319,7 @@ impl ThreadsStore {
                 self.category_id = None;
             }
             Some(id) => {
-                if let Some(channel) = ChannelList::global(cx).read(cx).find_channel(id) {
+                if let Some(channel) = ChannelList::global(cx).read(cx).find_channel_in_active_clan(id) {
                     self.apply_channel(channel);
                 } else {
                     self.list_channel_id = Some(id.to_string());

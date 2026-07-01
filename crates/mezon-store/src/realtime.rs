@@ -40,6 +40,7 @@ pub enum RealtimeKind {
     LastSeenUpdated,
     UserChannelAdded,
     UserChannelRemoved,
+    Notifications,
 }
 
 impl RealtimeKind {
@@ -69,6 +70,7 @@ impl RealtimeKind {
             RealtimeEvent::LastSeenUpdated(_) => Self::LastSeenUpdated,
             RealtimeEvent::UserChannelAdded(_) => Self::UserChannelAdded,
             RealtimeEvent::UserChannelRemoved(_) => Self::UserChannelRemoved,
+            RealtimeEvent::Notifications(_) => Self::Notifications,
             _ => return None,
         })
     }

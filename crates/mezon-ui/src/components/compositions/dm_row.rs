@@ -1,4 +1,4 @@
-use gpui::{AnyElement, ElementId, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, ElementId, SharedString, div, prelude::*, px};
 use mezon_store::DirectKind;
 
 use crate::components::primitives::Avatar;
@@ -11,7 +11,6 @@ pub struct DmRow {
     kind: DirectKind,
     selected: bool,
     unread: bool,
-    unread_count: u32,
     online: bool,
     avatar_src: SharedString,
     avatar_raw: SharedString,
@@ -37,7 +36,6 @@ impl DmRow {
             kind,
             selected: false,
             unread: false,
-            unread_count: 0,
             online: false,
             avatar_src: SharedString::from(""),
             avatar_raw: SharedString::from(""),
@@ -54,11 +52,6 @@ impl DmRow {
 
     pub fn unread(mut self, unread: bool) -> Self {
         self.unread = unread;
-        self
-    }
-
-    pub fn unread_count(mut self, count: u32) -> Self {
-        self.unread_count = count;
         self
     }
 
@@ -181,33 +174,6 @@ impl DmRow {
             .flex_shrink_0()
             .size(size)
             .child(inner)
-            .when(self.unread_count > 0, |this| {
-                let count = self.unread_count;
-                let badge = if count >= 100 {
-                    SharedString::from("99+")
-                } else {
-                    SharedString::from(count.to_string())
-                };
-                let wide = count >= 10;
-                this.child(
-                    div()
-                        .absolute()
-                        .bottom(px(-1.))
-                        .right(px(-2.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(16.))
-                        .when(wide, |s| s.w(px(22.)))
-                        .when(!wide, |s| s.w(px(16.)))
-                        .rounded_full()
-                        .bg(rgb(0xDA373C))
-                        .text_size(px(10.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(gpui::white())
-                        .child(badge),
-                )
-            })
             .when(online, |this| {
                 this.child(
                     div()

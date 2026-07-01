@@ -27,18 +27,24 @@ use windows as platform;
 pub const HAS_CUSTOM_TITLE_BAR: bool = cfg!(any(target_os = "linux", target_os = "windows"));
 pub const APP_NAME: &str = "Mezon";
 
-pub const MACOS_TRAFFIC_LIGHT_X: f32 = 12.0;
-pub const MACOS_TRAFFIC_LIGHT_Y: f32 = 11.0;
-pub const MACOS_TRAFFIC_LIGHT_CLEARANCE: f32 = 34.0;
+/// React `SidebarMenu`: `mt-[21px]` on desktop + sticky `pt-3` (12px).
+pub const MACOS_TITLEBAR_INSET: f32 = 21.0;
+pub const CLAN_SIDEBAR_STICKY_TOP: f32 = 12.0;
+
+pub const MACOS_TRAFFIC_LIGHT_BUTTON_SIZE: f32 = 12.0;
+pub const MACOS_TRAFFIC_LIGHT_GAP: f32 = 8.0;
+pub const MACOS_TRAFFIC_LIGHT_PADDING_X: f32 = 12.0;
+pub const MACOS_TRAFFIC_LIGHT_PADDING_Y: f32 = 12.0;
+
 pub const NAV_ARROW_ICON_SIZE: f32 = 20.0;
 pub const NAV_ARROW_BUTTON_PADDING: f32 = 4.0;
 pub const APP_HEADER_HEIGHT: f32 = 50.0;
 pub const RESIZE_BORDER_SIZE: f32 = 8.0;
 
 #[cfg(target_os = "macos")]
-pub const NAV_TOP_INSET: f32 = MACOS_TRAFFIC_LIGHT_CLEARANCE;
+pub const CLAN_SIDEBAR_HEADER_TOP: f32 = MACOS_TITLEBAR_INSET + CLAN_SIDEBAR_STICKY_TOP;
 #[cfg(not(target_os = "macos"))]
-pub const NAV_TOP_INSET: f32 = 0.0;
+pub const CLAN_SIDEBAR_HEADER_TOP: f32 = CLAN_SIDEBAR_STICKY_TOP;
 
 /// Render the platform window controls (minimize / maximize / close).
 /// Returns an empty element on macOS, where the native traffic lights are used.
@@ -54,10 +60,8 @@ pub fn window_title_options() -> TitlebarOptions {
         TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(
-                px(MACOS_TRAFFIC_LIGHT_X),
-                px(MACOS_TRAFFIC_LIGHT_Y),
-            )),
+            // Hide native traffic lights; we paint custom controls like the React app.
+            traffic_light_position: Some(point(px(-100.), px(-100.))),
         }
     }
     #[cfg(not(target_os = "macos"))]

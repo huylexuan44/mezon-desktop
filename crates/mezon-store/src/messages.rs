@@ -21,13 +21,13 @@ use crate::AppConfig;
 use crate::KeyedCache;
 use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
-use crate::channel::{ChannelEvent, ChannelList};
+use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::message::{
-    Message, MessageAttachment, MessageCode, MessageReference, ViewerMedia, aggregate_reactions,
-    apply_reaction_event, message_combined_with_prev, message_sort_key, parse_spans,
-    recompute_message_grouping, sort_messages,
+    MentionTarget, Message, MessageAttachment, MessageCode, MessageReference, ViewerMedia,
+    aggregate_reactions, apply_reaction_event, message_combined_with_prev, message_sort_key,
+    parse_spans, recompute_message_grouping, sort_messages,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -38,8 +38,10 @@ const DIRECTION_AFTER: i32 = 1;
 /// (used by jump-to-message when the target is not loaded).
 const DIRECTION_AROUND: i32 = 2;
 const CHANNEL_TYPE_CHANNEL: i32 = 1;
+const CHANNEL_TYPE_THREAD: i32 = 7;
 const STICKER_FILETYPE: &str = "sticker";
-const MAX_MESSAGES_PER_CHANNEL: usize = 100;
+// FIX
+const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 const MAX_CACHED_CHANNELS: usize = 30;
 const LAST_SEEN_DEBOUNCE: Duration = Duration::from_millis(1000);
 
@@ -238,9 +240,8 @@ impl MessageList {
             if candidate.content != content {
                 return None;
             }
-            let sender_match = candidate.sender_id == sender_id
-                || sender_id.is_empty()
-                || sender_id == "0";
+            let sender_match =
+                candidate.sender_id == sender_id || sender_id.is_empty() || sender_id == "0";
             sender_match.then_some(idx)
         })
     }
@@ -296,8 +297,24 @@ impl MessageList {
             }
             self.temp_ids.retain(|t| !evicted_temp_ids.contains(t));
         }
-        recompute_message_grouping(&mut self.items);
-        self.reindex();
+        let last_idx = self.items.len() - 1;
+        let new_id = self.items[last_idx].id;
+        self.index.insert(new_id, last_idx);
+        if new_id.is_optimistic() {
+            self.temp_ids.push(new_id);
+        }
+        self.regroup_row(last_idx);
+        if dropped > 0 {
+            self.regroup_row(0);
+        }
+    }
+
+    fn regroup_row(&mut self, idx: usize) {
+        let combined = {
+            let prev = idx.checked_sub(1).map(|p| &self.items[p]);
+            message_combined_with_prev(prev, &self.items[idx])
+        };
+        self.items[idx].combined_with_prev = combined;
     }
 
     fn replace_at(&mut self, idx: usize, msg: Message) {
@@ -320,6 +337,22 @@ impl MessageList {
     fn replace_at_and_regroup(&mut self, idx: usize, msg: Message) {
         self.replace_at(idx, msg);
         recompute_message_grouping(&mut self.items);
+    }
+
+    /// Merge a re-delivered/echoed copy of an already-present message in place,
+    /// then recompute grouping. The incoming echo is a fresh row whose derived
+    /// `combined_with_prev` defaults to `false`; without the regroup the avatar/
+    /// name head would re-appear on the just-sent row until the next mutation.
+    fn merge_existing(&mut self, id: MessageId, incoming: Message) -> bool {
+        let Some(existing) = self.get_by_id(id).cloned() else {
+            return false;
+        };
+        let merged = merge_sparse_sender(&existing, incoming);
+        if let Some(slot) = self.get_mut_by_id(id) {
+            *slot = merged;
+        }
+        recompute_message_grouping(&mut self.items);
+        true
     }
 
     fn replace_resort(&mut self, idx: usize, msg: Message) {
@@ -367,6 +400,7 @@ struct ChannelMessages {
 }
 
 const STREAM_MODE_CHANNEL: i32 = 2;
+const STREAM_MODE_THREAD: i32 = 6;
 
 pub struct MessagesStore {
     cache: KeyedCache<ChannelId, ChannelMessages>,
@@ -609,7 +643,8 @@ impl MessagesStore {
             self.last_read_message_by_channel.remove(&channel_id);
             return;
         }
-        self.last_read_message_by_channel.insert(channel_id, message_id);
+        self.last_read_message_by_channel
+            .insert(channel_id, message_id);
     }
 
     pub fn clear_last_read_message(&mut self, channel_id: ChannelId) {
@@ -620,11 +655,12 @@ impl MessagesStore {
     /// `useChannelSeen` + `updateLastSeenMessage`).
     pub fn note_viewport_seen(
         &mut self,
-        message: &Message,
+        message_id: MessageId,
+        create_time: i64,
         app_focused: bool,
         cx: &mut Context<Self>,
     ) {
-        if !app_focused || message.id.is_optimistic() {
+        if !app_focused || message_id.is_optimistic() {
             return;
         }
         let Some(channel_id) = self.active_channel_id else {
@@ -636,7 +672,7 @@ impl MessagesStore {
         if !should_write_last_seen(
             self.known_last_seen_id(channel_id, cx),
             self.last_message_by_channel.get(&channel_id).copied(),
-            message.id,
+            message_id,
         ) {
             return;
         }
@@ -644,8 +680,8 @@ impl MessagesStore {
         self.pending_last_seen = Some(PendingLastSeen {
             clan_id,
             channel_id,
-            message_id: message.id,
-            create_time: message.create_time,
+            message_id,
+            create_time,
             mode: self.mode,
             badge_count,
         });
@@ -659,13 +695,13 @@ impl MessagesStore {
             .or_else(|| {
                 ChannelList::global(cx)
                     .read(cx)
-                    .find_channel(channel_id)
+                    .find_channel_in_active_clan(channel_id)
                     .map(|ch| ch.last_seen_message_id)
             })
             .filter(|id| !id.is_zero())
     }
 
-    fn channel_badge_count(&self, channel_id: ChannelId, _clan_id: ClanId, cx: &App) -> u32 {
+    fn channel_badge_count(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> u32 {
         if self.is_dm {
             DirectMessageStore::global(cx)
                 .read(cx)
@@ -675,7 +711,7 @@ impl MessagesStore {
         } else {
             ChannelList::global(cx)
                 .read(cx)
-                .find_channel(channel_id)
+                .channel(clan_id, channel_id)
                 .map(|c| c.badge_count)
                 .unwrap_or(0)
         }
@@ -782,16 +818,19 @@ impl MessagesStore {
                 let _ = dm.note_read(pending.channel_id, cx);
             });
         } else if !pending.clan_id.is_zero() {
+            let clan_id = pending.clan_id;
+            let channel_id = pending.channel_id;
             ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.note_channel_message(
-                    pending.clan_id,
-                    pending.channel_id,
+                    clan_id,
+                    channel_id,
                     false,
                     true,
                     ts,
                     pending.message_id,
                     cx,
                 );
+                cl.apply_read(clan_id, channel_id, cx);
             });
         }
     }
@@ -1226,6 +1265,28 @@ impl MessagesStore {
         cx.notify();
     }
 
+    pub fn set_reply_to(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let Some(draft) = self
+            .cache
+            .get(&channel_id)
+            .and_then(|c| c.messages.get_by_id(message_id))
+            .map(|msg| ReplyDraft {
+                message_ref_id: msg.id,
+                sender_id: msg.sender_user_id.unwrap_or_default(),
+                sender_name: msg.sender_name.to_string(),
+                sender_avatar: msg.avatar_url.to_string(),
+                content_preview: msg.content.clone(),
+                has_attachment: !msg.attachments.is_empty(),
+            })
+        else {
+            return;
+        };
+        self.set_reply(draft, cx);
+    }
+
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
         if self.reply_target.take().is_some() {
@@ -1280,10 +1341,15 @@ impl MessagesStore {
         let markdowns = detect_markdown(&content);
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
-        let mut optimistic =
-            Message::new(temp_id, content.clone(), sender_id, display_name, create_time)
-                .with_avatar(avatar_url)
-                .with_avatar_proxied(avatar_proxied);
+        let mut optimistic = Message::new(
+            temp_id,
+            content.clone(),
+            sender_id,
+            display_name,
+            create_time,
+        )
+        .with_avatar(avatar_url)
+        .with_avatar_proxied(avatar_proxied);
         if !transport_mentions.is_empty()
             || !transport_hashtags.is_empty()
             || !transport_emojis.is_empty()
@@ -1498,6 +1564,13 @@ impl MessagesStore {
         self.open_channel(channel_id, cx);
     }
 
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.active_channel_id.is_none() && !self.is_dm {
+            return;
+        }
+        self.on_active_channel_changed(None, cx);
+    }
+
     /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
     pub fn open_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         if self.active_channel_id == Some(channel_id) && !self.is_dm {
@@ -1517,18 +1590,20 @@ impl MessagesStore {
         }
         let Some(channel) = ChannelList::global(cx)
             .read(cx)
-            .find_channel(channel_id)
+            .find_channel_in_active_clan(channel_id)
             .cloned()
         else {
             return;
         };
+        let (is_public, join_type, mode) =
+            channel_join_params(channel.channel_type, channel.parent_id, channel.private);
         self.activate(
             channel.clan_id,
             channel_id,
-            !channel.private,
+            is_public,
             false,
-            CHANNEL_TYPE_CHANNEL,
-            STREAM_MODE_CHANNEL,
+            join_type,
+            mode,
             cx,
         );
     }
@@ -1747,16 +1822,9 @@ impl MessagesStore {
             return;
         };
         if channel.messages.contains_id(msg.id) {
-            let message_id = msg.id;
-            if let Some(existing) = channel.messages.get_by_id(message_id).cloned() {
-                let merged = merge_sparse_sender(&existing, msg);
-                if let Some(slot) = channel.messages.get_mut_by_id(message_id) {
-                    *slot = merged;
-                }
-                if is_active {
-                    cx.emit(MessagesEvent::Updated);
-                    cx.notify();
-                }
+            if channel.messages.merge_existing(msg.id, msg) && is_active {
+                cx.emit(MessagesEvent::Updated);
+                cx.notify();
             }
             return;
         }
@@ -1777,11 +1845,7 @@ impl MessagesStore {
                 true
             }
         };
-        let last_id = channel
-            .messages
-            .last()
-            .map(|m| m.id)
-            .unwrap_or(tail_id);
+        let last_id = channel.messages.last().map(|m| m.id).unwrap_or(tail_id);
         self.set_last_message(parent_id, last_id);
         if is_active {
             if appended {
@@ -1862,11 +1926,13 @@ impl MessagesStore {
             self.last_message_by_channel.remove(&parent_id);
             return;
         }
-        if let Some(prev) = self
-            .cache
-            .get(&storage_id)
-            .and_then(|c| c.messages.as_slice().iter().rev().find(|m| m.id != deleted_id))
-        {
+        if let Some(prev) = self.cache.get(&storage_id).and_then(|c| {
+            c.messages
+                .as_slice()
+                .iter()
+                .rev()
+                .find(|m| m.id != deleted_id)
+        }) {
             self.set_last_message(parent_id, prev.id);
         } else {
             self.last_message_by_channel.remove(&parent_id);
@@ -2011,7 +2077,7 @@ impl MessagesStore {
         }
         let Some(last_seen_id) = ChannelList::global(cx)
             .read(cx)
-            .find_channel(channel_id)
+            .find_channel_in_active_clan(channel_id)
             .map(|ch| ch.last_seen_message_id)
             .filter(|id| !id.is_zero())
         else {
@@ -2024,10 +2090,10 @@ impl MessagesStore {
     fn set_channel(&mut self, channel_id: ChannelId, messages: Vec<Message>) {
         let active = self.active_channel_id;
         let has_more = has_more_from_oldest(&messages);
-        if let Some(newest) = messages.last() {
-            if !self.last_message_by_channel.contains_key(&channel_id) {
-                self.set_last_message(channel_id, newest.id);
-            }
+        if let Some(newest) = messages.last()
+            && !self.last_message_by_channel.contains_key(&channel_id)
+        {
+            self.set_last_message(channel_id, newest.id);
         }
         self.cache.insert(
             channel_id,
@@ -2051,12 +2117,25 @@ fn should_write_last_seen(
     channel_tail: Option<MessageId>,
     viewport_id: MessageId,
 ) -> bool {
-    if let Some(seen) = last_seen_id {
-        if snowflake_seq(viewport_id) >= snowflake_seq(seen) {
-            return true;
-        }
+    if let Some(seen) = last_seen_id
+        && snowflake_seq(viewport_id) >= snowflake_seq(seen)
+    {
+        return true;
     }
     channel_tail == Some(viewport_id)
+}
+
+fn channel_join_params(
+    channel_type: ChannelType,
+    parent_id: Option<ChannelId>,
+    private: bool,
+) -> (bool, i32, i32) {
+    let is_thread = channel_type == ChannelType::Thread || parent_id.is_some();
+    if is_thread {
+        (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
+    } else {
+        (!private, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
+    }
 }
 
 fn storage_channel_id(m: &mezon_proto::api::ChannelMessage) -> ChannelId {
@@ -2332,6 +2411,14 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
     let spans = parse_spans(&m.content_tokens);
+    let mention_targets: Vec<MentionTarget> = m
+        .entity_mentions
+        .iter()
+        .map(|mention| MentionTarget {
+            user_id: (mention.user_id != 0).then(|| mention.user_id.to_string()),
+            role_id: (mention.role_id != 0).then(|| mention.role_id.to_string()),
+        })
+        .collect();
     let references = m
         .references
         .iter()
@@ -2344,6 +2431,17 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .map(|a| MessageAttachment::from_api(a, cfg))
         .collect();
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
+    if !mention_targets.is_empty() {
+        tracing::debug!(
+            message_id = m.message_id,
+            entity = mention_targets.len(),
+            span_mentions = spans
+                .iter()
+                .filter(|s| matches!(s, crate::message::MessageSpan::Mention { .. }))
+                .count(),
+            "message mention targets parsed"
+        );
+    }
     Message::new(
         MessageId(m.message_id),
         m.content,
@@ -2353,6 +2451,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
     )
     .with_code(MessageCode::from_raw(m.code))
     .with_spans(spans)
+    .with_mention_targets(mention_targets)
     .with_references(references)
     .with_reactions(reactions)
     .with_edited(m.update_time, m.hide_editted)
@@ -2475,6 +2574,38 @@ mod tests {
     use crate::message::MessageSpan;
 
     #[test]
+    fn channel_join_params_thread_by_type_joins_as_thread() {
+        assert_eq!(
+            channel_join_params(ChannelType::Thread, None, false),
+            (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
+        );
+    }
+
+    #[test]
+    fn channel_join_params_thread_by_parent_joins_as_thread() {
+        assert_eq!(
+            channel_join_params(ChannelType::Text, Some(ChannelId(99)), true),
+            (false, CHANNEL_TYPE_THREAD, STREAM_MODE_THREAD)
+        );
+    }
+
+    #[test]
+    fn channel_join_params_public_channel_keeps_channel_type() {
+        assert_eq!(
+            channel_join_params(ChannelType::Text, None, false),
+            (true, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
+        );
+    }
+
+    #[test]
+    fn channel_join_params_private_channel_is_not_public() {
+        assert_eq!(
+            channel_join_params(ChannelType::Text, None, true),
+            (false, CHANNEL_TYPE_CHANNEL, STREAM_MODE_CHANNEL)
+        );
+    }
+
+    #[test]
     fn outgoing_mention_maps_to_transport_with_utf16_offsets() {
         let mention = OutgoingMention {
             user_id: "42".into(),
@@ -2586,6 +2717,7 @@ mod tests {
                 attachments: vec![],
                 references: vec![],
                 reactions: vec![],
+                entity_mentions: vec![],
             },
             None,
         );
@@ -2624,6 +2756,7 @@ mod tests {
                 attachments: vec![image("https://cdn/1.png"), image("https://cdn/2.png")],
                 references: vec![],
                 reactions: vec![],
+                entity_mentions: vec![],
             },
             None,
         );
@@ -2652,13 +2785,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let mut list = MessageList::from_messages(vec![Message::new(
-            MessageId(1),
-            "a",
-            "42",
-            "Me",
-            now - 5,
-        )]);
+        let mut list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
         assert_eq!(optimistic_create_time(&list, "42"), now + 1);
         list.push_trim_regroup(Message::new(
             MessageId::next_optimistic(),
@@ -2847,6 +2975,23 @@ mod tests {
     }
 
     #[test]
+    fn server_echo_merge_preserves_message_grouping() {
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(100), "first", "u9", "Me", 200),
+            Message::new(MessageId(101), "second", "u9", "Me", 201),
+        ]);
+        // Server echo of the second message: a fresh row (so `combined_with_prev`
+        // defaults to false) with a sparse "0" sender, same id as the existing row.
+        let echo = Message::new(MessageId(101), "second", "0", "", 201);
+        assert!(list.merge_existing(MessageId(101), echo));
+        assert!(
+            list.as_slice()[1].combined_with_prev,
+            "echo merge must recompute grouping, else the head re-appears until the next send"
+        );
+        assert_list_consistent(&list);
+    }
+
+    #[test]
     fn append_update_remove_keep_index_and_order() {
         let mut list = MessageList::from_messages(vec![
             Message::new(MessageId(10), "a", "u1", "U", 100),
@@ -2983,16 +3128,22 @@ mod tests {
 
     #[test]
     fn has_more_bottom_false_without_tail_or_empty_buffer() {
-        let list = MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
+        let list =
+            MessageList::from_messages(vec![Message::new(MessageId(1), "a", "u1", "U", 100)]);
         assert!(!has_more_bottom_for(None, &list));
-        assert!(!has_more_bottom_for(Some(MessageId(1)), &MessageList::default()));
+        assert!(!has_more_bottom_for(
+            Some(MessageId(1)),
+            &MessageList::default()
+        ));
     }
 
     #[test]
     fn storage_channel_id_uses_topic_bucket() {
-        let mut m = mezon_proto::api::ChannelMessage::default();
-        m.channel_id = 10;
-        m.topic_id = 99;
+        let mut m = mezon_proto::api::ChannelMessage {
+            channel_id: 10,
+            topic_id: 99,
+            ..Default::default()
+        };
         assert_eq!(storage_channel_id(&m), ChannelId(99));
         m.topic_id = 0;
         assert_eq!(storage_channel_id(&m), ChannelId(10));
@@ -3000,21 +3151,18 @@ mod tests {
 
     #[test]
     fn patch_reply_previews_after_delete_marks_reference() {
-        let mut list = MessageList::from_messages(vec![Message::new(
-            MessageId(1),
-            "reply",
-            "u1",
-            "U",
-            100,
-        )
-        .with_references(vec![MessageReference {
-            message_ref_id: MessageId(42),
-            sender_id: UserId(1),
-            sender_name: "x".into(),
-            sender_avatar: String::new(),
-            content: "orig".into(),
-            has_attachment: false,
-        }])]);
+        let mut list = MessageList::from_messages(vec![
+            Message::new(MessageId(1), "reply", "u1", "U", 100).with_references(vec![
+                MessageReference {
+                    message_ref_id: MessageId(42),
+                    sender_id: UserId(1),
+                    sender_name: "x".into(),
+                    sender_avatar: String::new(),
+                    content: "orig".into(),
+                    has_attachment: false,
+                },
+            ]),
+        ]);
         patch_reply_previews_after_delete(&mut list, MessageId(42));
         assert_eq!(
             list.as_slice()[0].references[0].content,
@@ -3030,10 +3178,6 @@ mod tests {
         let tail = MessageId(15_i64 << 22);
         assert!(should_write_last_seen(Some(seen), Some(tail), newer));
         assert!(should_write_last_seen(Some(seen), Some(tail), tail));
-        assert!(!should_write_last_seen(
-            Some(newer),
-            Some(tail),
-            seen
-        ));
+        assert!(!should_write_last_seen(Some(newer), Some(tail), seen));
     }
 }

@@ -16,13 +16,13 @@ use crate::theme::{ActiveTheme, Theme};
 mod clan_row;
 mod direct_unread_list;
 use clan_row::{ClanRow, render_clan_row, render_pill};
-use direct_unread_list::{DirectUnreadItem, build_direct_unread_items, render_direct_unread_list};
+use direct_unread_list::{DirectUnreadListState, build_direct_unread_items};
 
 pub struct ClanSidebar {
     clan_list: Entity<ClanList>,
     settings: Entity<Settings>,
     rows: Rc<Vec<ClanRow>>,
-    direct_unread_items: Rc<Vec<DirectUnreadItem>>,
+    direct_unread: DirectUnreadListState,
     list_state: ListState,
     active_clan_id: Option<ClanId>,
     dm_active: bool,
@@ -42,9 +42,8 @@ impl ClanSidebar {
     ) -> Self {
         let direct_store = DirectMessageStore::global(cx);
         let direct_sub = cx.observe(&direct_store, |this, store, cx| {
-            this.direct_unread_items =
-                Rc::new(build_direct_unread_items(store.read(cx), cx));
-            cx.notify();
+            let live = build_direct_unread_items(store.read(cx), cx);
+            this.direct_unread.sync(live, cx);
         });
 
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
@@ -83,7 +82,7 @@ impl ClanSidebar {
             clan_list,
             settings,
             rows: Rc::new(Vec::new()),
-            direct_unread_items: Rc::new(build_direct_unread_items(
+            direct_unread: DirectUnreadListState::new(build_direct_unread_items(
                 direct_store.read(cx),
                 cx,
             )),
@@ -114,7 +113,11 @@ impl ClanSidebar {
                 let proxied_avatar_url: Option<SharedString> =
                     clan.avatar_url.as_deref().map(|url| {
                         SharedString::from(crate::util::imgproxy::proxied(
-                            cx, url, 100, 100, "fill-down",
+                            cx,
+                            url,
+                            100,
+                            100,
+                            "fill-down",
                         ))
                     });
                 ClanRow {
@@ -178,7 +181,7 @@ impl Render for ClanSidebar {
         })
         .size_full();
 
-        let unread_list = render_direct_unread_list(&self.direct_unread_items);
+        let unread_list = self.direct_unread.render();
 
         div()
             .flex()
@@ -187,11 +190,6 @@ impl Render for ClanSidebar {
             .h_full()
             .bg(theme.bg_tertiary)
             .items_center()
-            .child(render_window_nav(
-                theme,
-                self.can_go_back,
-                self.can_go_forward,
-            ))
             .child(
                 div()
                     .flex()
@@ -199,7 +197,12 @@ impl Render for ClanSidebar {
                     .items_center()
                     .w_full()
                     .bg(theme.bg_tertiary)
-                    .pt_2()
+                    .pt(px(window_controls::CLAN_SIDEBAR_HEADER_TOP))
+                    .child(render_window_nav(
+                        theme,
+                        self.can_go_back,
+                        self.can_go_forward,
+                    ))
                     .child(
                         div()
                             .id("dm-logo")
@@ -211,7 +214,17 @@ impl Render for ClanSidebar {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .on_click(|_, _, cx| crate::router::navigate(cx, Route::Direct))
+                            .on_click(|_, _, cx| {
+                                let target = DirectMessageStore::global(cx)
+                                    .read(cx)
+                                    .current()
+                                    .map(|(id, ty)| Route::DirectMessage {
+                                        direct_id: id,
+                                        message_type: ty.to_string(),
+                                    })
+                                    .unwrap_or(Route::Direct);
+                                crate::router::navigate(cx, target);
+                            })
                             .child(render_pill(dm_active, "dm-group".into(), pill_color))
                             .child(
                                 img(SharedString::from(
@@ -223,7 +236,7 @@ impl Render for ClanSidebar {
                             ),
                     )
                     .child(unread_list)
-                    .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3()),
+                    .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3().mb_3()),
             )
             .child(div().flex_1().min_h_0().w_full().child(list_element))
     }
@@ -236,7 +249,6 @@ fn render_window_nav(theme: &Theme, can_go_back: bool, can_go_forward: bool) -> 
         .items_center()
         .justify_center()
         .w_full()
-        .pt(px(window_controls::NAV_TOP_INSET))
         .pb(px(4.))
         .child(nav_arrow("clan-nav-back", can_go_back, true, theme))
         .child(nav_arrow("clan-nav-forward", can_go_forward, false, theme))

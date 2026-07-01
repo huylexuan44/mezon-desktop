@@ -218,6 +218,7 @@ mod tests {
             kind: DirectKind::Dm,
             avatar: "alice.png".into(),
             peer_user_id: Some(UserId(5)),
+            creator_id: None,
             online: true,
             member_count: 2,
             unread_count: 0,
