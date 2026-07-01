@@ -167,6 +167,8 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
             &msg.viewer_media,
             theme,
             &uploader,
+            msg,
+            ctx,
         ));
     } else if let Some(&(att_index, att)) = images.first() {
         let gif_player = att
@@ -176,7 +178,8 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         col = col.child(render_photo(
             0,
             att,
-            theme,
+            msg,
+            ctx,
             &msg.viewer_media,
             &uploader,
             gif_player,
@@ -188,8 +191,6 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     Some(col.into_any_element())
 }
 
-// image-viewer: fields read only by the disabled viewer; reimplement later
-#[allow(dead_code)]
 struct Uploader {
     name: SharedString,
     avatar: SharedString,
@@ -201,6 +202,8 @@ fn render_album(
     _gallery: &Arc<[ViewerMedia]>,
     theme: &Theme,
     _uploader: &Uploader,
+    msg: &Message,
+    ctx: &RowCtx,
 ) -> AnyElement {
     let mut container = div()
         .relative()
@@ -213,10 +216,9 @@ fn render_album(
     for (index, (tile, image)) in layout.tiles.iter().zip(images.iter()).enumerate() {
         let att = image.1;
         let src = att.proxied_src.clone();
-        // image-viewer: disabled, reimplement later
-        // let gallery = gallery.clone();
-        // let uploader_name = uploader.name.clone();
-        // let uploader_avatar = uploader.avatar.clone();
+        let settings = ctx.settings.clone();
+        let raw_url = SharedString::from(att.url.clone());
+        let anchor = (msg.create_time + 86_400).max(0) as u32;
         let tile_element = div()
             .id(("msg-album", index))
             .absolute()
@@ -225,22 +227,13 @@ fn render_album(
             .w(px(tile.width))
             .h(px(tile.height))
             .bg(theme.bg_tertiary)
-            // image-viewer: click-to-open disabled, reimplement later
-            // .cursor_pointer()
+            .cursor_pointer()
             .when(!src.is_empty(), |d| {
                 d.child(img(src).size_full().object_fit(ObjectFit::Cover))
+            })
+            .on_click(move |_, _window, cx| {
+                open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
             });
-        // image-viewer: disabled, reimplement later
-        // .on_click(move |_, window, cx| {
-        //     ImageViewer::open(
-        //         gallery.clone(),
-        //         index,
-        //         uploader_name.clone(),
-        //         uploader_avatar.clone(),
-        //         window,
-        //         cx,
-        //     );
-        // });
         container = container.child(tile_element);
     }
     container.into_any_element()
@@ -249,14 +242,15 @@ fn render_album(
 fn render_photo(
     index: usize,
     att: &MessageAttachment,
-    theme: &Theme,
+    msg: &Message,
+    ctx: &RowCtx,
     _gallery: &Arc<[ViewerMedia]>,
     _uploader: &Uploader,
     gif_player: Option<Entity<GifVideoView>>,
 ) -> AnyElement {
     let src = att.proxied_src.clone();
     if src.is_empty() {
-        return attachment_box(att.filename.clone(), theme);
+        return attachment_box(att.filename.clone(), ctx.theme);
     }
     if let Some(player) = gif_player {
         return div()
@@ -267,6 +261,7 @@ fn render_photo(
             .child(player)
             .into_any_element();
     }
+    let theme = ctx.theme;
     let object_fit = if is_gif(&att.url) {
         ObjectFit::Contain
     } else {
@@ -274,11 +269,10 @@ fn render_photo(
     };
     let fallback_bg = theme.bg_tertiary;
     let fallback_fg = theme.text_muted;
-    // image-viewer: disabled, reimplement later
-    // let is_sticker = att.filetype == "sticker";
-    // let gallery = gallery.clone();
-    // let uploader_name = uploader.name.clone();
-    // let uploader_avatar = uploader.avatar.clone();
+    let is_sticker = att.filetype == "sticker";
+    let settings = ctx.settings.clone();
+    let raw_url = SharedString::from(att.url.clone());
+    let anchor = (msg.create_time + 86_400).max(0) as u32;
     div()
         .id(("msg-img", index))
         .w(px(att.display_width))
@@ -286,19 +280,11 @@ fn render_photo(
         .rounded_md()
         .overflow_hidden()
         .bg(theme.bg_tertiary)
-        // image-viewer: click-to-open disabled, reimplement later
-        // .when(!is_sticker, |d| {
-        //     d.cursor_pointer().on_click(move |_, window, cx| {
-        //         ImageViewer::open(
-        //             gallery.clone(),
-        //             index,
-        //             uploader_name.clone(),
-        //             uploader_avatar.clone(),
-        //             window,
-        //             cx,
-        //         );
-        //     })
-        // })
+        .when(!is_sticker, |d| {
+            d.cursor_pointer().on_click(move |_, _window, cx| {
+                open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+            })
+        })
         .child(
             img(src)
                 .size_full()
@@ -561,6 +547,50 @@ pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) 
         .child(action("edit", IconName::PenEdit))
         .child(action("delete", IconName::TrashIcon))
         .into_any_element()
+}
+
+fn open_viewer_from_message(
+    settings: &Entity<mezon_store::Settings>,
+    url: SharedString,
+    anchor_before: u32,
+    cx: &mut gpui::App,
+) {
+    use crate::image_viewer::{OpenViewerRequest, open_image_viewer};
+    use crate::router::{Route, Router};
+    use mezon_store::ClanId;
+
+    let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
+        Route::Channel {
+            clan_id,
+            channel_id,
+        }
+        | Route::Thread {
+            clan_id,
+            channel_id,
+            ..
+        }
+        | Route::Canvas {
+            clan_id,
+            channel_id,
+            ..
+        } => (clan_id, channel_id),
+        Route::DirectMessage { direct_id, .. } => (ClanId(0), direct_id),
+        _ => return,
+    };
+
+    open_image_viewer(
+        OpenViewerRequest {
+            clan_id,
+            channel_id,
+            channel_label: SharedString::default(),
+            settings: settings.clone(),
+            attachments: Vec::new(),
+            selected_index: 0,
+            selected_url: Some(url),
+            anchor_before: Some(anchor_before),
+        },
+        cx,
+    );
 }
 
 pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {

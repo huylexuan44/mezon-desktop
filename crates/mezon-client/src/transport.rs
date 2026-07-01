@@ -466,6 +466,41 @@ pub struct ApiAttachment {
     pub duration: i32,
 }
 
+/// A channel attachment record returned by `ListChannelAttachment` (gallery /
+/// image viewer). Richer than [`ApiAttachment`] — it carries the uploader, the
+/// originating message, and the creation timestamp used for date grouping and
+/// pagination cursors. Mirrors React's `ApiChannelAttachment` / `IAttachmentEntity`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiChannelAttachment {
+    pub id: i64,
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+    pub filesize: String,
+    pub width: i32,
+    pub height: i32,
+    pub uploader: i64,
+    pub message_id: i64,
+    pub create_time_seconds: u32,
+}
+
+impl ApiChannelAttachment {
+    fn from_proto(a: api::ChannelAttachment) -> Self {
+        Self {
+            id: a.id,
+            url: a.url,
+            filename: a.filename,
+            filetype: a.filetype,
+            filesize: a.filesize,
+            width: a.width,
+            height: a.height,
+            uploader: a.uploader,
+            message_id: a.message_id,
+            create_time_seconds: a.create_time_seconds,
+        }
+    }
+}
+
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     if bytes.is_empty() {
         return Vec::new();
@@ -2884,18 +2919,29 @@ impl MezonTransport {
         Ok(api::SdTopic::decode(response.as_slice())?)
     }
 
-    /// List channel attachment.
+    /// List channel attachment. Parameter order and fields mirror mezon-js
+    /// `listChannelAttachments(clanId, channelId, fileType, state, limit, before, after)`
+    /// so the server cache key matches the web client (see `CACHE_FLOW.md`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_channel_attachment(
         &self,
-        channel_id: i64,
         clan_id: i64,
+        channel_id: i64,
+        file_type: String,
+        state: i32,
         limit: i32,
-    ) -> Result<api::ChannelAttachmentList> {
+        before: u32,
+        after: u32,
+    ) -> Result<Vec<ApiChannelAttachment>> {
         let cid = self.generate_cid();
         let body = api::ListChannelAttachmentRequest {
-            channel_id,
             clan_id,
+            channel_id,
+            file_type,
             limit,
+            state,
+            before,
+            after,
             ..Default::default()
         }
         .encode_to_vec();
@@ -2905,7 +2951,13 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelAttachmentList::decode(response.as_slice())?)
+        let list = api::ChannelAttachmentList::decode(response.as_slice())?;
+        Ok(list
+            .attachments
+            .into_iter()
+            .filter(|a| !a.url.is_empty())
+            .map(ApiChannelAttachment::from_proto)
+            .collect())
     }
 
     /// List voice channel users.

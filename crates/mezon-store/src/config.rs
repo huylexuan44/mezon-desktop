@@ -408,6 +408,50 @@ impl AppConfig {
             display_h,
         )
     }
+
+    /// Full-size imgproxy URL for the image viewer. Caps the longest side to
+    /// 1600 px preserving aspect ratio (React `MessageAttachment` / `GalleryModal`
+    /// open: width clamped to 1600, height scaled).
+    pub fn viewer_proxy(&self, source: &str, real_width: u32, real_height: u32) -> String {
+        if source.is_empty() {
+            return String::new();
+        }
+        let (w, h) = viewer_dimensions(real_width, real_height);
+        self.imgproxy_url(source, w, h, "fit")
+    }
+
+    /// Square thumbnail URL for the gallery grid (React: 120x120 `fill`).
+    pub fn gallery_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(source, GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE, "fill")
+    }
+
+    /// Thumbnail URL for the image viewer's sidebar strip.
+    pub fn viewer_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(source, VIEWER_THUMB_SIZE, VIEWER_THUMB_SIZE, "fill")
+    }
+}
+
+pub const VIEWER_MAX_DIMENSION: u32 = 1600;
+pub const GALLERY_THUMB_SIZE: u32 = 120;
+pub const VIEWER_THUMB_SIZE: u32 = 80;
+
+/// Viewer imgproxy target dimensions: clamp the longest side to
+/// [`VIEWER_MAX_DIMENSION`], preserving aspect ratio. `0` means "let imgproxy
+/// decide" (unknown source size).
+fn viewer_dimensions(real_width: u32, real_height: u32) -> (u32, u32) {
+    if real_width == 0 || real_height == 0 {
+        return (VIEWER_MAX_DIMENSION, 0);
+    }
+    if real_width <= VIEWER_MAX_DIMENSION && real_height <= VIEWER_MAX_DIMENSION {
+        return (real_width, real_height);
+    }
+    if real_width >= real_height {
+        let h = (VIEWER_MAX_DIMENSION as u64 * real_height as u64 / real_width as u64) as u32;
+        (VIEWER_MAX_DIMENSION, h.max(1))
+    } else {
+        let w = (VIEWER_MAX_DIMENSION as u64 * real_width as u64 / real_height as u64) as u32;
+        (w.max(1), VIEWER_MAX_DIMENSION)
+    }
 }
 
 pub const REM: f32 = 16.0;
@@ -679,5 +723,19 @@ mod tests {
             url.contains(&format!("rs:fill:{pw}:{ph}:1/mb:2097152/plain/")),
             "attachment proxy must be 1x display dims like React Photo.tsx: {url}"
         );
+    }
+
+    #[test]
+    fn viewer_dimensions_clamp_longest_side() {
+        assert_eq!(viewer_dimensions(800, 600), (800, 600));
+        assert_eq!(viewer_dimensions(3200, 1600), (1600, 800));
+        assert_eq!(viewer_dimensions(1600, 3200), (800, 1600));
+        assert_eq!(viewer_dimensions(0, 0), (VIEWER_MAX_DIMENSION, 0));
+    }
+
+    #[test]
+    fn viewer_proxy_empty_returns_empty() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.viewer_proxy("", 100, 100), "");
     }
 }
