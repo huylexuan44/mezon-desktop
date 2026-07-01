@@ -19,7 +19,7 @@ use mezon_store::{
     resolve_attachment_uploader,
 };
 
-use crate::chat::message::{VideoActivation, VideoPlayerView};
+use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 use crate::app::main_window::activate_main_window;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls::{self, APP_NAME};
@@ -282,6 +282,8 @@ impl ImageViewer {
             poster,
             width,
             height,
+            fullscreen_mode: VideoFullscreenMode::InPlaceTheater,
+            layout: VideoLayout::FillContainer,
         };
         self.active_video = Some(cx.new(|cx| VideoPlayerView::new(activation, window, cx)));
         self.active_video_url = Some(url);
@@ -920,9 +922,6 @@ impl ImageViewer {
         };
         div()
             .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
             .min_w_0()
             .child(view.clone())
             .into_any_element()

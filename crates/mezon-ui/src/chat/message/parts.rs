@@ -14,7 +14,7 @@ use mezon_store::{
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
 use super::time::format_message_time;
-use super::video_player::VideoActivation;
+use super::video_player::{VideoActivation, VideoFullscreenMode, VideoLayout};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 
@@ -395,6 +395,8 @@ fn render_video_poster(
                 poster: thumbnail.clone(),
                 width,
                 height,
+                fullscreen_mode: VideoFullscreenMode::default(),
+                layout: VideoLayout::default(),
             };
             let _ = host.update(cx, |host, cx| {
                 host.activate_video((msg_id, index), activation, window, cx);

@@ -71,8 +71,14 @@ impl PlayerImpl {
     fn drain_bus(&self) {
         if let Some(bus) = self.playbin.bus() {
             while let Some(message) = bus.pop() {
-                if let gst::message::MessageView::Error(_) = message.view() {
-                    self.failed.set(true);
+                match message.view() {
+                    gst::message::MessageView::Error(_) => {
+                        self.failed.set(true);
+                    }
+                    gst::message::MessageView::Eos(_) => {
+                        let _ = self.playbin.set_state(gst::State::Paused);
+                    }
+                    _ => {}
                 }
             }
         }
