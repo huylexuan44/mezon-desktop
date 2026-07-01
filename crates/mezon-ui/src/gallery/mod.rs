@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::NaiveDate;
 use gpui::{
     App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -6,21 +8,22 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ClanId, GalleryStore, LoadDirection,
-    MediaFilter, Settings, UserId, enrich_uploader, resolve_attachment_uploader,
+    MediaFilter, Settings, enrich_uploader, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::components::primitives::input::{Input, InputState};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{DatePicker, DatePickerEvent, Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::image_viewer::{OpenViewerRequest, open_image_viewer};
 use crate::theme::{ActiveTheme, Theme};
+use crate::video_thumbnail::VideoThumbnail;
 
 const TILE: f32 = 144.0;
 const COLUMNS: usize = 3;
 const LOAD_MORE_THRESHOLD: usize = 4;
 const DATE_FMT: &str = "%d/%m/%Y";
 const DATE_FILTER_TOP: f32 = 92.0;
+const GALLERY_MIN_DATE: NaiveDate = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
 
 enum GalleryRow {
     Header(SharedString),
@@ -34,8 +37,8 @@ pub struct GalleryModal {
     channel_label: SharedString,
     settings: Entity<Settings>,
     active_filter: MediaFilter,
-    from_date_input: Entity<InputState>,
-    to_date_input: Entity<InputState>,
+    from_date_picker: Entity<DatePicker>,
+    to_date_picker: Entity<DatePicker>,
     date_validation_error: Option<String>,
     applied_from_date: Option<NaiveDate>,
     applied_to_date: Option<NaiveDate>,
@@ -43,8 +46,11 @@ pub struct GalleryModal {
     rows: Vec<GalleryRow>,
     list_state: ListState,
     image_cache: Entity<LruImageCache>,
+    video_thumbs: HashMap<i64, Entity<VideoThumbnail>>,
     _subscription: Subscription,
     _release: Subscription,
+    _from_picker_sub: Subscription,
+    _to_picker_sub: Subscription,
 }
 
 impl GalleryModal {
@@ -53,7 +59,7 @@ impl GalleryModal {
         channel_id: ChannelId,
         channel_label: SharedString,
         settings: Entity<Settings>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -69,22 +75,8 @@ impl GalleryModal {
                 });
             }
         });
-        let from_date_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("dd/MM/yyyy")
-                .height(px(36.))
-                .radius(px(6.))
-                .bg(cx.theme().bg_secondary)
-                .borderless()
-        });
-        let to_date_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("dd/MM/yyyy")
-                .height(px(36.))
-                .radius(px(6.))
-                .bg(cx.theme().bg_secondary)
-                .borderless()
-        });
+        let from_date_picker = cx.new(DatePicker::new);
+        let to_date_picker = cx.new(DatePicker::new);
         let mut this = Self {
             focus_handle,
             clan_id,
@@ -92,8 +84,8 @@ impl GalleryModal {
             channel_label,
             settings,
             active_filter: MediaFilter::All,
-            from_date_input,
-            to_date_input,
+            from_date_picker: from_date_picker.clone(),
+            to_date_picker: to_date_picker.clone(),
             date_validation_error: None,
             applied_from_date: None,
             applied_to_date: None,
@@ -101,9 +93,40 @@ impl GalleryModal {
             rows: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(400.)),
             image_cache,
+            video_thumbs: HashMap::new(),
             _subscription: subscription,
             _release: release,
+            _from_picker_sub: Subscription::new(|| ()),
+            _to_picker_sub: Subscription::new(|| ()),
         };
+        this._from_picker_sub = cx.subscribe(&from_date_picker, |this, _, event, cx| {
+            match event {
+                DatePickerEvent::Opened => {
+                    this.to_date_picker.update(cx, |picker, cx| picker.close(cx));
+                }
+                DatePickerEvent::Change(from) => {
+                    this.to_date_picker.update(cx, |picker, cx| {
+                        picker.set_min(*from, cx);
+                    });
+                    this.validate_dates(cx);
+                    cx.notify();
+                }
+            }
+        });
+        this._to_picker_sub = cx.subscribe(&to_date_picker, |this, _, event, cx| {
+            match event {
+                DatePickerEvent::Opened => {
+                    this.from_date_picker.update(cx, |picker, cx| picker.close(cx));
+                }
+                DatePickerEvent::Change(to) => {
+                    this.from_date_picker.update(cx, |picker, cx| {
+                        picker.set_max(*to, cx);
+                    });
+                    this.validate_dates(cx);
+                    cx.notify();
+                }
+            }
+        });
         this.install_scroll_handler(cx);
         this.rebuild_rows(cx);
         gallery.update(cx, |store, cx| {
@@ -161,17 +184,17 @@ impl GalleryModal {
         }
     }
 
-    fn parse_draft_from(&self, cx: &App) -> Option<NaiveDate> {
-        parse_date_text(self.from_date_input.read(cx).value())
+    fn draft_from(&self, cx: &App) -> Option<NaiveDate> {
+        self.from_date_picker.read(cx).selected()
     }
 
-    fn parse_draft_to(&self, cx: &App) -> Option<NaiveDate> {
-        parse_date_text(self.to_date_input.read(cx).value())
+    fn draft_to(&self, cx: &App) -> Option<NaiveDate> {
+        self.to_date_picker.read(cx).selected()
     }
 
     fn validate_dates(&mut self, cx: &mut Context<Self>) -> bool {
-        let from = self.parse_draft_from(cx);
-        let to = self.parse_draft_to(cx);
+        let from = self.draft_from(cx);
+        let to = self.draft_to(cx);
         self.date_validation_error = match (from, to) {
             (Some(start), Some(end)) if start > end => Some(
                 mezon_i18n::t(
@@ -190,8 +213,8 @@ impl GalleryModal {
             cx.notify();
             return;
         }
-        let from = self.parse_draft_from(cx);
-        let to = self.parse_draft_to(cx);
+        let from = self.draft_from(cx);
+        let to = self.draft_to(cx);
         if from.is_none() && to.is_none() {
             return;
         }
@@ -205,15 +228,22 @@ impl GalleryModal {
         cx.notify();
     }
 
-    fn clear_date_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn clear_date_filter(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.applied_from_date = None;
         self.applied_to_date = None;
         self.date_validation_error = None;
-        self.date_filter_open = false;
-        self.from_date_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.to_date_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.from_date_picker.update(cx, |picker, cx| {
+            picker.set_selected_silent(None, cx);
+            picker.set_min(Some(GALLERY_MIN_DATE), cx);
+            picker.set_max(None, cx);
+            picker.close(cx);
+        });
+        self.to_date_picker.update(cx, |picker, cx| {
+            picker.set_selected_silent(None, cx);
+            picker.set_min(None, cx);
+            picker.set_max(None, cx);
+            picker.close(cx);
+        });
         GalleryStore::global(cx).update(cx, |store, cx| {
             store.clear_date_filter(self.clan_id, self.channel_id, cx);
         });
@@ -222,6 +252,24 @@ impl GalleryModal {
 
     fn toggle_date_filter(&mut self, cx: &mut Context<Self>) {
         self.date_filter_open = !self.date_filter_open;
+        if self.date_filter_open {
+            let locale = self.locale(cx);
+            self.from_date_picker.update(cx, |picker, cx| {
+                picker.set_locale(locale.clone());
+                picker.set_selected_silent(self.applied_from_date, cx);
+                picker.set_min(Some(GALLERY_MIN_DATE), cx);
+                picker.set_max(self.applied_to_date, cx);
+                picker.close(cx);
+            });
+            self.to_date_picker.update(cx, |picker, cx| {
+                picker.set_locale(locale);
+                picker.set_selected_silent(self.applied_to_date, cx);
+                picker.set_min(self.applied_from_date, cx);
+                picker.set_max(None, cx);
+                picker.close(cx);
+            });
+            self.date_validation_error = None;
+        }
         cx.notify();
     }
 
@@ -230,6 +278,15 @@ impl GalleryModal {
             self.date_filter_open = false;
             cx.notify();
         }
+    }
+
+    fn close_calendar_pickers(&mut self, cx: &mut Context<Self>) {
+        self.from_date_picker.update(cx, |picker, cx| picker.close(cx));
+        self.to_date_picker.update(cx, |picker, cx| picker.close(cx));
+    }
+
+    fn any_calendar_open(&self, cx: &App) -> bool {
+        self.from_date_picker.read(cx).is_open() || self.to_date_picker.read(cx).is_open()
     }
 
     fn date_range_label(&self, locale: &str) -> String {
@@ -279,14 +336,29 @@ impl GalleryModal {
             },
             cx,
         );
-        self.dismiss(cx);
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.video_thumbs.clear();
         GalleryStore::global(cx).update(cx, |store, _| {
             store.reset_channel_attachments(self.channel_id);
         });
         cx.emit(DismissEvent);
+    }
+
+    fn video_thumb_for(
+        &mut self,
+        id: i64,
+        url: &str,
+        size: f32,
+        cx: &mut Context<Self>,
+    ) -> Entity<VideoThumbnail> {
+        if let Some(entity) = self.video_thumbs.get(&id) {
+            return entity.clone();
+        }
+        let entity = cx.new(|cx| VideoThumbnail::new(url, size, size, cx));
+        self.video_thumbs.insert(id, entity.clone());
+        entity
     }
 
     fn locale(&self, cx: &App) -> String {
@@ -357,16 +429,26 @@ impl Render for GalleryModal {
                 .image_cache(image_cache)
                 .child(
                     list(self.list_state.clone(), move |ix, _window, cx| {
-                        let this = entity.read(cx);
-                        match this.rows.get(ix) {
-                            Some(GalleryRow::Header(label)) => {
-                                render_header(label, &theme_for_list)
+                        if let Some(label) = entity.read(cx).rows.get(ix).and_then(|row| {
+                            if let GalleryRow::Header(label) = row {
+                                Some(label.clone())
+                            } else {
+                                None
                             }
-                            Some(GalleryRow::Images(atts)) => {
-                                render_image_row(atts, &theme_for_list, &entity, cx)
-                            }
-                            None => div().into_any_element(),
+                        }) {
+                            return render_header(&label, &theme_for_list);
                         }
+                        let atts = entity.read(cx).rows.get(ix).and_then(|row| {
+                            if let GalleryRow::Images(atts) = row {
+                                Some(atts.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(atts) = atts {
+                            return render_image_row(&atts, &theme_for_list, &entity, cx);
+                        }
+                        div().into_any_element()
                     })
                     .flex_1()
                     .size_full(),
@@ -384,7 +466,9 @@ impl Render for GalleryModal {
             .key_context("menu")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
-                if this.date_filter_open {
+                if this.any_calendar_open(cx) {
+                    this.close_calendar_pickers(cx);
+                } else if this.date_filter_open {
                     this.close_date_filter_panel(cx);
                 } else {
                     this.dismiss(cx);
@@ -429,12 +513,25 @@ impl Render for GalleryModal {
                     .on_mouse_down(
                         MouseButton::Left,
                         move |_: &MouseDownEvent, _window, cx: &mut App| {
-                            entity_body.update(cx, |this, cx| this.close_date_filter_panel(cx));
+                            entity_body.update(cx, |this, cx| {
+                                if this.any_calendar_open(cx) {
+                                    this.close_calendar_pickers(cx);
+                                } else {
+                                    this.close_date_filter_panel(cx);
+                                }
+                            });
                         },
                     )
                     .child(body),
             )
             .when(self.date_filter_open, |el| {
+                let locale = self.locale(cx);
+                self.from_date_picker.update(cx, |picker, _| {
+                    picker.set_locale(locale.clone());
+                });
+                self.to_date_picker.update(cx, |picker, _| {
+                    picker.set_locale(locale.clone());
+                });
                 el.child(
                     div()
                         .absolute()
@@ -443,8 +540,8 @@ impl Render for GalleryModal {
                         .child(render_date_filter_panel(
                             &theme,
                             &locale,
-                            self.from_date_input.clone(),
-                            self.to_date_input.clone(),
+                            self.from_date_picker.clone(),
+                            self.to_date_picker.clone(),
                             self.date_validation_error.clone(),
                             &cx.entity(),
                         )),
@@ -520,14 +617,9 @@ fn render_filter_tabs(
     entity: &Entity<GalleryModal>,
 ) -> impl IntoElement {
     let entity_toggle = entity.clone();
-    let text_color = if date_filter_open {
-        theme.text_primary
-    } else {
-        theme.text_secondary
-    };
     let mut chevron = Icon::new(IconName::ChevronDown)
         .size(px(12.))
-        .text_color(text_color);
+        .text_color(theme.text_primary);
     if date_filter_open {
         chevron = chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
             std::f32::consts::PI,
@@ -544,9 +636,8 @@ fn render_filter_tabs(
         .rounded(px(6.))
         .cursor_pointer()
         .text_size(px(13.))
-        .text_color(text_color)
-        .hover(move |s| s.bg(theme.bg_hover))
-        .when(date_filter_open, |el| el.bg(theme.bg_secondary))
+        .bg(theme.tokens.bg_surface)
+        .text_color(theme.text_primary)
         .child(date_label)
         .child(chevron)
         .on_mouse_down(
@@ -600,8 +691,8 @@ fn render_filter_tabs(
 fn render_date_filter_panel(
     theme: &Theme,
     locale: &str,
-    from_input: Entity<InputState>,
-    to_input: Entity<InputState>,
+    from_picker: Entity<DatePicker>,
+    to_picker: Entity<DatePicker>,
     validation_error: Option<String>,
     entity: &Entity<GalleryModal>,
 ) -> impl IntoElement {
@@ -618,7 +709,7 @@ fn render_date_filter_panel(
         .flex_col()
         .gap_4()
         .rounded(px(8.))
-        .bg(theme.bg_primary)
+        .bg(theme.tokens.bg_surface)
         .border_1()
         .border_color(theme.border)
         .shadow_lg()
@@ -630,10 +721,11 @@ fn render_date_filter_panel(
                 .child(
                     div()
                         .text_size(px(12.))
-                        .text_color(theme.text_muted)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_secondary)
                         .child(mezon_i18n::t(locale, "channelTopbar.gallery.fromDate")),
                 )
-                .child(div().w_full().child(Input::new(&from_input))),
+                .child(div().w_full().child(from_picker)),
         )
         .child(
             div()
@@ -643,10 +735,11 @@ fn render_date_filter_panel(
                 .child(
                     div()
                         .text_size(px(12.))
-                        .text_color(theme.text_muted)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_secondary)
                         .child(mezon_i18n::t(locale, "channelTopbar.gallery.toDate")),
                 )
-                .child(div().w_full().child(Input::new(&to_input))),
+                .child(div().w_full().child(to_picker)),
         )
         .when_some(validation_error, |el, error| {
             el.child(
@@ -665,9 +758,9 @@ fn render_date_filter_panel(
                 .child(
                     div()
                         .text_size(px(12.))
-                        .text_color(theme.text_muted)
+                        .text_color(theme.text_secondary)
                         .cursor_pointer()
-                        .hover(|el| el.text_color(theme.text_primary))
+                        .hover(|el| el.text_color(theme.interactive_hover))
                         .child(mezon_i18n::t(
                             locale,
                             "channelTopbar.gallery.buttons.clearAll",
@@ -728,7 +821,8 @@ fn filter_tab(
         .text_size(px(13.))
         .when(is_active, |el| el.bg(theme.brand).text_color(gpui::white()))
         .when(!is_active, |el| {
-            el.bg(theme.bg_secondary).text_color(theme.text_secondary)
+            el.bg(theme.tokens.bg_surface)
+                .text_color(theme.text_primary)
         })
         .child(label)
         .on_mouse_down(
@@ -755,18 +849,27 @@ fn render_image_row(
     atts: &[ChannelAttachment],
     theme: &Theme,
     entity: &Entity<GalleryModal>,
-    _cx: &App,
+    cx: &mut App,
 ) -> gpui::AnyElement {
     let mut row = div().flex().flex_row().gap_3().pb_3();
     for att in atts {
         let id = att.id;
         let entity = entity.clone();
-        let src = if att.is_video {
-            SharedString::from(att.url.clone())
-        } else {
-            att.thumb_src.clone()
-        };
         let is_video = att.is_video;
+        let media = if is_video {
+            let thumb = entity.update(cx, |this, cx| {
+                this.video_thumb_for(id, &att.url, TILE, cx)
+            });
+            div()
+                .size_full()
+                .child(thumb)
+                .into_any_element()
+        } else {
+            img(att.thumb_src.clone())
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element()
+        };
         row = row.child(
             div()
                 .id(("gallery-tile", id as usize))
@@ -776,7 +879,7 @@ fn render_image_row(
                 .bg(theme.bg_tertiary)
                 .cursor_pointer()
                 .relative()
-                .child(img(src).size_full().object_fit(gpui::ObjectFit::Cover))
+                .child(media)
                 .when(is_video, |el| {
                     el.child(
                         div()
@@ -786,9 +889,18 @@ fn render_image_row(
                             .items_center()
                             .justify_center()
                             .child(
-                                Icon::new(IconName::PlayButton)
-                                    .size(px(32.))
-                                    .text_color(gpui::white()),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(48.))
+                                    .rounded_full()
+                                    .bg(gpui::hsla(0., 0., 0., 0.6))
+                                    .child(
+                                        Icon::new(IconName::PlayButton)
+                                            .size(px(20.))
+                                            .text_color(gpui::white()),
+                                    ),
                             ),
                     )
                 })
@@ -814,14 +926,6 @@ fn empty_label(filter: MediaFilter, date_filtered: bool, locale: &str) -> String
         }
     };
     mezon_i18n::t(locale, key).to_string()
-}
-
-fn parse_date_text(text: &str) -> Option<NaiveDate> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    NaiveDate::parse_from_str(trimmed, DATE_FMT).ok()
 }
 
 fn format_date_label(date: NaiveDate) -> String {

@@ -14,3 +14,4 @@ mod video_player;
 
 pub use channel_messages::ChannelMessages;
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
+pub use video_player::{VideoActivation, VideoPlayerView};

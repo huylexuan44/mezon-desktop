@@ -1,4 +1,5 @@
 use std::borrow::{Borrow, BorrowMut};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::AsyncReadExt as _;
@@ -18,6 +19,7 @@ use mezon_store::{
     resolve_attachment_uploader,
 };
 
+use crate::chat::message::{VideoActivation, VideoPlayerView};
 use crate::app::main_window::activate_main_window;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls::{self, APP_NAME};
@@ -25,6 +27,7 @@ use crate::components::primitives::{Avatar, Icon, IconName, Spinner};
 use crate::components::primitives::{ContextMenu, context_menu_at};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
+use crate::video_thumbnail::VideoThumbnail;
 
 const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 5.0;
@@ -33,6 +36,8 @@ const THUMB_ROW_HEIGHT: f32 = 72.0;
 const SIDEBAR_WIDTH: f32 = 96.0;
 const VIEWER_FETCH_LIMIT: i32 = 50;
 const LOAD_MORE_THRESHOLD: usize = 3;
+const VIEWER_VIDEO_MAX_W: f32 = 900.0;
+const VIEWER_VIDEO_MAX_H: f32 = 580.0;
 
 /// Request to open (or update) the image viewer. Built by entry points
 /// (gallery tile click, message attachment click).
@@ -135,6 +140,9 @@ pub struct ImageViewer {
     rotation_loading: bool,
     image_cache: Entity<LruImageCache>,
     list_scroll: UniformListScrollHandle,
+    active_video: Option<Entity<VideoPlayerView>>,
+    active_video_url: Option<String>,
+    video_thumbs: HashMap<i64, Entity<VideoThumbnail>>,
 }
 
 impl ImageViewer {
@@ -175,6 +183,9 @@ impl ImageViewer {
             rotation_loading: false,
             image_cache,
             list_scroll: UniformListScrollHandle::new(),
+            active_video: None,
+            active_video_url: None,
+            video_thumbs: HashMap::new(),
         };
         this.set_request(request, window, cx);
         this
@@ -201,6 +212,7 @@ impl ImageViewer {
         self.rotated_image = None;
         self.rotation_loading = false;
         self.context_menu = None;
+        self.clear_video_player(cx);
         self.attachments = request.attachments;
         self.has_more_before = true;
 
@@ -240,6 +252,55 @@ impl ImageViewer {
 
     fn current(&self) -> Option<&ChannelAttachment> {
         self.attachments.get(self.index)
+    }
+
+    fn clear_video_player(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.active_video.take() {
+            view.update(cx, |player, cx| player.pause_for_background(cx));
+        }
+        self.active_video_url = None;
+    }
+
+    fn sync_video_player(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let video = self.current().filter(|a| a.is_video).map(|att| {
+            (
+                att.url.clone(),
+                att.thumb_src.clone(),
+                video_display_size(att),
+            )
+        });
+        let Some((url, poster, (width, height))) = video else {
+            self.clear_video_player(cx);
+            return;
+        };
+        if self.active_video_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        self.clear_video_player(cx);
+        let activation = VideoActivation {
+            url: url.clone().into(),
+            poster,
+            width,
+            height,
+        };
+        self.active_video = Some(cx.new(|cx| VideoPlayerView::new(activation, window, cx)));
+        self.active_video_url = Some(url);
+    }
+
+    fn video_thumb_for(
+        &mut self,
+        id: i64,
+        url: &str,
+        width: f32,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> Entity<VideoThumbnail> {
+        if let Some(entity) = self.video_thumbs.get(&id) {
+            return entity.clone();
+        }
+        let entity = cx.new(|cx| VideoThumbnail::new(url, width, height, cx));
+        self.video_thumbs.insert(id, entity.clone());
+        entity
     }
 
     fn fetch_initial(
@@ -610,6 +671,7 @@ impl Focusable for ImageViewer {
 
 impl Render for ImageViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_video_player(window, cx);
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
 
@@ -702,7 +764,7 @@ impl ImageViewer {
                 .into_any_element()
         } else if let Some(att) = self.current() {
             if att.is_video {
-                self.render_video_placeholder(theme, att, cx)
+                self.render_video()
             } else {
                 self.render_image(att, cx)
             }
@@ -846,43 +908,23 @@ impl ImageViewer {
             .into_any_element()
     }
 
-    fn render_video_placeholder(
-        &self,
-        theme: &Theme,
-        att: &ChannelAttachment,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let url = att.url.clone();
+    fn render_video(&self) -> gpui::AnyElement {
+        let Some(view) = &self.active_video else {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Spinner::new())
+                .into_any_element();
+        };
         div()
             .size_full()
             .flex()
-            .flex_col()
             .items_center()
             .justify_center()
-            .gap_3()
-            .child(
-                Icon::new(IconName::PlayButton)
-                    .size(px(64.))
-                    .text_color(theme.text_secondary),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .rounded(px(6.))
-                    .bg(theme.brand)
-                    .text_color(gpui::white())
-                    .cursor_pointer()
-                    .child("Open video")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_, _: &MouseDownEvent, _, cx| {
-                            if let Some(platform) = PlatformStore::try_global(cx) {
-                                let _ = platform.read(cx).open_url_external(&url);
-                            }
-                        }),
-                    ),
-            )
+            .min_w_0()
+            .child(view.clone())
             .into_any_element()
     }
 
@@ -895,17 +937,48 @@ impl ImageViewer {
         let brand = theme.brand;
 
         let list = uniform_list("viewer-thumbnails", count, move |range, _window, cx| {
-            let this = entity.read(cx);
             range
                 .map(|ix| {
-                    let Some(att) = this.attachments.get(ix) else {
+                    let info = entity.read(cx).attachments.get(ix).map(|att| {
+                        (
+                            att.is_video,
+                            att.id,
+                            att.url.clone(),
+                            att.thumb_src.clone(),
+                        )
+                    });
+                    let Some((is_video, id, url, thumb_src)) = info else {
                         return div().into_any_element();
                     };
                     let is_active = ix == active;
-                    let src = if att.is_video {
-                        att.url.clone().into()
+                    let thumb_size = THUMB_ROW_HEIGHT - 8.0;
+                    let media = if is_video {
+                        let thumb = entity.update(cx, |this, cx| {
+                            this.video_thumb_for(id, &url, thumb_size, thumb_size, cx)
+                        });
+                        div()
+                            .size_full()
+                            .relative()
+                            .child(thumb)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::new(IconName::PlayButton)
+                                            .size(px(16.))
+                                            .text_color(gpui::white()),
+                                    ),
+                            )
+                            .into_any_element()
                     } else {
-                        att.thumb_src.clone()
+                        img(thumb_src)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .into_any_element()
                     };
                     div()
                         .id(("viewer-thumb", ix))
@@ -919,7 +992,7 @@ impl ImageViewer {
                                 .overflow_hidden()
                                 .border_2()
                                 .border_color(if is_active { brand } else { gpui::rgba(0) })
-                                .child(img(src).size_full().object_fit(gpui::ObjectFit::Cover)),
+                                .child(media),
                         )
                         .on_mouse_down(MouseButton::Left, {
                             let entity = entity.clone();
@@ -1050,20 +1123,20 @@ impl ImageViewer {
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, _, cx| this.rotate_right(cx)),
                             ))
+                            .child(tool_divider(theme))
+                            .child(tool_button(IconName::MinusCircleIcon, theme).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.set_zoom(this.zoom - ZOOM_STEP, cx)
+                                }),
+                            ))
+                            .child(tool_button(IconName::Plus, theme).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.set_zoom(this.zoom + ZOOM_STEP, cx)
+                                }),
+                            ))
                     })
-                    .child(tool_divider(theme))
-                    .child(tool_button(IconName::MinusCircleIcon, theme).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.set_zoom(this.zoom - ZOOM_STEP, cx)
-                        }),
-                    ))
-                    .child(tool_button(IconName::Plus, theme).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.set_zoom(this.zoom + ZOOM_STEP, cx)
-                        }),
-                    ))
                     .child(tool_button(IconName::ImageThumbnail, theme).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -1211,4 +1284,18 @@ fn fit_contain(container: GpuiSize<Pixels>, content: GpuiSize<Pixels>) -> GpuiSi
     }
     let scale = (cw / iw).min(ch / ih);
     size(px(iw * scale), px(ih * scale))
+}
+
+fn video_display_size(att: &ChannelAttachment) -> (f32, f32) {
+    let mut w = att.width as f32;
+    let mut h = att.height as f32;
+    if w <= f32::EPSILON || h <= f32::EPSILON {
+        return (VIEWER_VIDEO_MAX_W, VIEWER_VIDEO_MAX_H);
+    }
+    let scale = (VIEWER_VIDEO_MAX_W / w)
+        .min(VIEWER_VIDEO_MAX_H / h)
+        .min(1.0);
+    w *= scale;
+    h *= scale;
+    (w, h)
 }
