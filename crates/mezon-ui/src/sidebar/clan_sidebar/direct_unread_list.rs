@@ -1,5 +1,10 @@
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::time::Duration;
+
 use gpui::{
-    AnyElement, App, ClickEvent, SharedString, Window, div, img, prelude::*, px, rgb,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, SharedString, Task, Window,
+    div, img, prelude::*, px, rgb,
 };
 use mezon_store::{ChannelId, DirectKind, DirectMessageStore};
 
@@ -7,7 +12,12 @@ use crate::components::primitives::Avatar;
 use crate::router::{Route, navigate};
 use crate::util::assets::AVATAR_GROUP;
 
-#[derive(Clone)]
+use super::ClanSidebar;
+
+const REMOVAL_DEFER_MS: u64 = 200;
+const ROW_HEIGHT: f32 = 60.;
+
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct DirectUnreadItem {
     pub channel_id: ChannelId,
     pub label: SharedString,
@@ -17,7 +27,105 @@ pub(super) struct DirectUnreadItem {
     pub avatar_raw: SharedString,
 }
 
-pub(super) fn build_direct_unread_items(store: &DirectMessageStore, cx: &App) -> Vec<DirectUnreadItem> {
+pub(super) struct DirectUnreadListState {
+    live: Rc<Vec<DirectUnreadItem>>,
+    live_ids: HashSet<ChannelId>,
+    render: Rc<Vec<DirectUnreadItem>>,
+    defer_task: Option<Task<()>>,
+}
+
+impl DirectUnreadListState {
+    pub(super) fn new(items: Vec<DirectUnreadItem>) -> Self {
+        let items = Rc::new(items);
+        let live_ids = items.iter().map(|i| i.channel_id).collect();
+        Self {
+            live: items.clone(),
+            live_ids,
+            render: items,
+            defer_task: None,
+        }
+    }
+
+    pub(super) fn sync(&mut self, live: Vec<DirectUnreadItem>, cx: &mut Context<ClanSidebar>) {
+        let live = Rc::new(live);
+        let prev_len = self.render.len();
+        let new_len = live.len();
+
+        let render_ids: HashSet<ChannelId> = self.render.iter().map(|i| i.channel_id).collect();
+        let live_ids: HashSet<ChannelId> = live.iter().map(|i| i.channel_id).collect();
+        let has_new_ids = live.iter().any(|i| !render_ids.contains(&i.channel_id));
+
+        self.live = live.clone();
+        self.live_ids = live_ids;
+
+        if (self.render.is_empty() && new_len > 0) || new_len > prev_len || has_new_ids {
+            self.defer_task = None;
+            self.render = live;
+            cx.notify();
+            return;
+        }
+
+        if self.render == live {
+            return;
+        }
+
+        if render_ids == self.live_ids {
+            self.defer_task = None;
+            self.render = live;
+            cx.notify();
+            return;
+        }
+
+        self.defer_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(REMOVAL_DEFER_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.direct_unread.apply_deferred_render();
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn apply_deferred_render(&mut self) {
+        self.render = self.live.clone();
+        self.defer_task = None;
+    }
+
+    pub(super) fn render(&self) -> impl IntoElement {
+        if self.render.is_empty() {
+            return div().into_any_element();
+        }
+
+        let live_ids = &self.live_ids;
+
+        div()
+            .id("direct-unread-list")
+            .max_h(px(256.))
+            .overflow_y_scroll()
+            .p(px(2.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .w_full()
+            .children(
+                self.render
+                    .iter()
+                    .map(|item| {
+                        let animate_out = !live_ids.contains(&item.channel_id);
+                        render_direct_unread_item(item, animate_out)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .into_any_element()
+    }
+}
+
+pub(super) fn build_direct_unread_items(
+    store: &DirectMessageStore,
+    cx: &App,
+) -> Vec<DirectUnreadItem> {
     store
         .channels()
         .iter()
@@ -56,24 +164,14 @@ fn on_direct_unread_click(
     }
 }
 
-pub(super) fn render_direct_unread_list(items: &[DirectUnreadItem]) -> impl IntoElement {
-    div()
-        .id("direct-unread-list")
-        .max_h(px(256.))
-        .overflow_y_scroll()
-        .p(px(2.))
-        .flex()
-        .flex_col()
-        .gap_1()
-        .children(items.iter().map(render_direct_unread_item))
-}
-
-fn render_direct_unread_item(item: &DirectUnreadItem) -> AnyElement {
+fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyElement {
     let channel_id = item.channel_id;
     let channel_type = item.kind.channel_type();
     let unread_count = item.unread_count;
     let badge = badge_text(unread_count);
     let wide = unread_count >= 10;
+    let anim_key = SharedString::from(format!("direct-unread-anim-{channel_id}"));
+    let ease = |t: f32| 1.0 - (1.0 - t).powi(2);
 
     let avatar_size = px(40.);
     let avatar = if item.kind == DirectKind::Group && item.avatar_src.is_empty() {
@@ -83,9 +181,7 @@ fn render_direct_unread_item(item: &DirectUnreadItem) -> AnyElement {
             .object_fit(gpui::ObjectFit::Cover)
             .into_any_element()
     } else {
-        let mut avatar = Avatar::new()
-            .name(item.label.clone())
-            .size_px(avatar_size);
+        let mut avatar = Avatar::new().name(item.label.clone()).size_px(avatar_size);
         if !item.avatar_src.is_empty() {
             avatar = avatar.src(item.avatar_src.to_string());
             if !item.avatar_raw.is_empty() && item.avatar_raw != item.avatar_src {
@@ -102,34 +198,62 @@ fn render_direct_unread_item(item: &DirectUnreadItem) -> AnyElement {
             .into_any_element()
     };
 
-    div()
-        .id(SharedString::from(format!("direct-unread-{}", channel_id)))
+    let badge_el = div()
+        .absolute()
+        .bottom(px(-1.))
+        .right(px(-2.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(16.))
+        .when(wide, |s| s.w(px(22.)))
+        .when(!wide, |s| s.w(px(16.)))
+        .rounded_full()
+        .bg(rgb(0xDA373C))
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(gpui::white())
+        .child(badge);
+
+    let inner: AnyElement = if animate_out {
+        div()
+            .relative()
+            .child(avatar)
+            .child(badge_el)
+            .with_animation(
+                SharedString::from(format!("{anim_key}-fade-out")),
+                Animation::new(Duration::from_millis(REMOVAL_DEFER_MS)).with_easing(ease),
+                |el, delta| el.opacity(1.0 - delta),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .relative()
+            .child(avatar)
+            .child(badge_el)
+            .into_any_element()
+    };
+
+    let row = div()
+        .id(SharedString::from(format!("direct-unread-{channel_id}")))
         .flex()
         .items_end()
+        .justify_center()
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .overflow_hidden()
         .cursor_pointer()
-        .child(
-            div()
-                .relative()
-                .child(avatar)
-                .child(
-                    div()
-                        .absolute()
-                        .bottom(px(-1.))
-                        .right(px(-2.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(16.))
-                        .when(wide, |s| s.w(px(22.)))
-                        .when(!wide, |s| s.w(px(16.)))
-                        .rounded_full()
-                        .bg(rgb(0xDA373C))
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(gpui::white())
-                        .child(badge),
-                ),
-        )
         .on_click(on_direct_unread_click(channel_id, channel_type))
+        .child(inner);
+
+    if animate_out {
+        row.with_animation(
+            SharedString::from(format!("{anim_key}-height-out")),
+            Animation::new(Duration::from_millis(REMOVAL_DEFER_MS)).with_easing(ease),
+            |el, delta| el.h(px(ROW_HEIGHT * (1.0 - delta).max(0.0))),
+        )
         .into_any_element()
+    } else {
+        row.into_any_element()
+    }
 }

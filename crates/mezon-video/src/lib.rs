@@ -41,8 +41,8 @@ pub struct VideoPlayer {
 }
 
 impl VideoPlayer {
-    pub fn open(url: &str) -> Result<Self, PlayerError> {
-        let inner = platform::PlayerImpl::open(url)?;
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        let inner = platform::PlayerImpl::open(url, max_size)?;
         Ok(Self { inner })
     }
 

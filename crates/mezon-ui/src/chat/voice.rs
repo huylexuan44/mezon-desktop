@@ -446,9 +446,94 @@ fn render_in_call(
         .min_h_0()
         .child(voice_header(theme, &channel.name, true, status_badge))
         .child(body)
-        .child(control_bar(theme, locale, voice, settings, store))
+        .when(store.fullscreen_screen().is_none(), |this| {
+            this.child(control_bar(theme, locale, voice, settings, store))
+        })
         .children(mic_modal)
         .into_any_element()
+}
+
+pub(crate) fn render_screen_fullscreen_overlay(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+    settings: &Entity<Settings>,
+    store: &VoiceStore,
+) -> Option<AnyElement> {
+    let key = store.fullscreen_screen()?;
+    let exit_voice = voice.clone();
+    let bg_voice = voice.clone();
+
+    let media = match store.render_image(key) {
+        Some(image) => img(image)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        None => Icon::new(IconName::VoiceScreenShareIcon)
+            .size(px(64.))
+            .text_color(theme.text_muted)
+            .into_any_element(),
+    };
+
+    let exit_btn = div()
+        .id("screen-fs-exit")
+        .absolute()
+        .top_4()
+        .right_4()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(40.))
+        .h(px(40.))
+        .rounded_full()
+        .bg(gpui::rgba(0x000000a6))
+        .cursor_pointer()
+        .hover(|s| s.bg(gpui::rgba(0x000000d9)))
+        .child(
+            Icon::new(IconName::ExitFullScreen)
+                .size(px(20.))
+                .text_color(gpui::rgb(0xffffff)),
+        )
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            exit_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
+        });
+
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(gpui::rgb(0x000000))
+            .child(
+                div()
+                    .id("screen-fs-video")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(media)
+                    .child(exit_btn)
+                    .on_click(move |_, _, cx| {
+                        bg_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .py_4()
+                    .child(control_bar(theme, locale, voice, settings, store)),
+            )
+            .into_any_element(),
+    )
 }
 
 fn open_microphone_settings() {
@@ -714,9 +799,12 @@ fn focus_main_tile(
 ) -> AnyElement {
     let voice = voice.clone();
     let inner = tile_inner(theme, store, cell, true);
+    let group = SharedString::from(format!("screen-ctl-{}", cell.id));
+    let screen_key = cell.key.filter(|_| cell.is_screen);
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
+        .group(group.clone())
         .relative()
         .flex()
         .flex_1()
@@ -730,6 +818,9 @@ fn focus_main_tile(
         .cursor_pointer()
         .child(inner)
         .child(tile_label(theme, locale, cell))
+        .when_some(screen_key, |this, key| {
+            this.child(screen_tile_controls(&voice, key, group.clone()))
+        })
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.clear_focus(cx));
         })
@@ -786,9 +877,12 @@ fn video_tile(
     let voice = voice.clone();
     let id = cell.id.clone();
     let inner = tile_inner(theme, store, cell, false);
+    let group = SharedString::from(format!("screen-ctl-{}", cell.id));
+    let screen_key = cell.key.filter(|_| cell.is_screen);
 
     div()
         .id(SharedString::from(format!("tile-{}", cell.id)))
+        .group(group.clone())
         .relative()
         .flex()
         .items_center()
@@ -804,6 +898,9 @@ fn video_tile(
         })
         .child(inner)
         .child(tile_label(theme, locale, cell))
+        .when_some(screen_key, |this, key| {
+            this.child(screen_tile_controls(&voice, key, group.clone()))
+        })
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.toggle_focus(id.clone(), cx));
         })
@@ -1012,6 +1109,7 @@ fn control_bar(
     let left = div()
         .flex()
         .flex_row()
+        .flex_1()
         .items_center()
         .gap_3()
         .child(decorative_circle(theme, IconName::VoiceEmojiControlIcon))
@@ -1023,26 +1121,16 @@ fn control_bar(
         .items_center()
         .justify_center()
         .gap_3()
-        .flex_1()
         .child(mic_button)
         .child(camera_button)
         .child(screen_button)
         .child(decorative_circle(theme, IconName::ShadowBotIcon))
         .child(leave_button);
 
-    let right = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .child(decorative_circle(theme, IconName::VoicePopOutIcon))
-        .child(decorative_circle(theme, IconName::FullScreen));
-
     div()
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
         .px_4()
         .py_3()
         .bg(theme.bg_tertiary)
@@ -1050,7 +1138,7 @@ fn control_bar(
         .border_color(theme.border)
         .child(left)
         .child(center)
-        .child(right)
+        .child(div().flex_1())
         .into_any_element()
 }
 
@@ -1067,6 +1155,72 @@ fn decorative_circle(theme: &Theme, icon: IconName) -> AnyElement {
         .cursor_default()
         .bg(theme.bg_secondary)
         .child(Icon::new(icon).size(px(20.)).text_color(theme.text_muted))
+        .into_any_element()
+}
+
+fn screen_tile_controls(voice: &Entity<VoiceStore>, key: u64, group: SharedString) -> AnyElement {
+    let pip_voice = voice.clone();
+    let fs_voice = voice.clone();
+    let btn_bg = gpui::rgba(0x000000a6);
+    let btn_hover = gpui::rgba(0x000000d9);
+    div()
+        .absolute()
+        .bottom_2()
+        .right_2()
+        .flex()
+        .gap_2()
+        .opacity(0.)
+        .group_hover(group, |s| s.opacity(1.))
+        .child(
+            div()
+                .id(SharedString::from(format!("screen-pip-{key}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(36.))
+                .h(px(36.))
+                .rounded_full()
+                .bg(btn_bg)
+                .cursor_pointer()
+                .hover(move |s| s.bg(btn_hover))
+                .child(
+                    Icon::new(IconName::VoicePopOutIcon)
+                        .size(px(18.))
+                        .text_color(gpui::rgb(0xffffff)),
+                )
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(handle) = crate::chat::screen_share_pip::open_screen_share_pip(
+                        pip_voice.clone(),
+                        key,
+                        cx,
+                    ) {
+                        pip_voice.update(cx, |store, cx| store.set_pip(key, handle, cx));
+                    }
+                }),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("screen-fs-{key}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(36.))
+                .h(px(36.))
+                .rounded_full()
+                .bg(btn_bg)
+                .cursor_pointer()
+                .hover(move |s| s.bg(btn_hover))
+                .child(
+                    Icon::new(IconName::FullScreen)
+                        .size(px(18.))
+                        .text_color(gpui::rgb(0xffffff)),
+                )
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    fs_voice.update(cx, |store, cx| store.toggle_fullscreen_screen(key, cx));
+                }),
+        )
         .into_any_element()
 }
 

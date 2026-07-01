@@ -3,8 +3,9 @@ use std::ptr;
 
 use core_foundation::base::TCFType;
 use core_video::pixel_buffer::{
-    CVPixelBuffer, CVPixelBufferRef, kCVPixelBufferMetalCompatibilityKey,
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    CVPixelBuffer, CVPixelBufferRef, kCVPixelBufferHeightKey, kCVPixelBufferMetalCompatibilityKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 };
 use objc::rc::StrongPtr;
 use objc::runtime::{BOOL, NO, Object, YES};
@@ -32,6 +33,7 @@ unsafe impl objc::Encode for CmTime {
 const CM_TIME_FLAG_VALID: u32 = 1;
 const CM_TIME_FLAG_INDEFINITE: u32 = 1 << 4;
 const SEEK_TIMESCALE: i32 = 600;
+const AV_PLAYER_ITEM_STATUS_FAILED: isize = 2;
 
 fn cm_time_to_seconds(time: CmTime) -> f64 {
     if time.flags & CM_TIME_FLAG_VALID == 0
@@ -68,7 +70,7 @@ pub struct PlayerImpl {
 }
 
 impl PlayerImpl {
-    pub fn open(url: &str) -> Result<Self, PlayerError> {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let c_url = CString::new(url).map_err(|_| PlayerError::InvalidUrl)?;
         unsafe {
             let ns_string = class!(NSString);
@@ -100,7 +102,7 @@ impl PlayerImpl {
             }
             let item = StrongPtr::new(item);
 
-            let attributes = pixel_buffer_attributes()?;
+            let attributes = pixel_buffer_attributes(max_size)?;
             let output_class = class!(AVPlayerItemVideoOutput);
             let output_alloc: *mut Object = msg_send![output_class, alloc];
             let output: *mut Object =
@@ -230,7 +232,14 @@ impl PlayerImpl {
     }
 
     pub fn failed(&self) -> bool {
-        false
+        unsafe {
+            let item: *mut Object = msg_send![*self.player, currentItem];
+            if item.is_null() {
+                return false;
+            }
+            let status: isize = msg_send![item, status];
+            status == AV_PLAYER_ITEM_STATUS_FAILED
+        }
     }
 }
 
@@ -242,7 +251,7 @@ impl Drop for PlayerImpl {
     }
 }
 
-fn pixel_buffer_attributes() -> Result<StrongPtr, PlayerError> {
+fn pixel_buffer_attributes(max_size: Option<(u32, u32)>) -> Result<StrongPtr, PlayerError> {
     unsafe {
         let number_class = class!(NSNumber);
         let format = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
@@ -255,15 +264,31 @@ fn pixel_buffer_attributes() -> Result<StrongPtr, PlayerError> {
         let format_key = kCVPixelBufferPixelFormatTypeKey as *const c_void as *mut Object;
         let metal_key = kCVPixelBufferMetalCompatibilityKey as *const c_void as *mut Object;
 
-        let objects: [*mut Object; 2] = [format_number, metal_number];
-        let keys: [*mut Object; 2] = [format_key, metal_key];
+        let mut objects: Vec<*mut Object> = vec![format_number, metal_number];
+        let mut keys: Vec<*mut Object> = vec![format_key, metal_key];
 
+        if let Some((width, height)) = max_size
+            && width > 0
+            && height > 0
+        {
+            let width_number: *mut Object = msg_send![number_class, numberWithUnsignedInt: width];
+            let height_number: *mut Object = msg_send![number_class, numberWithUnsignedInt: height];
+            if width_number.is_null() || height_number.is_null() {
+                return Err(PlayerError::Open);
+            }
+            objects.push(width_number);
+            objects.push(height_number);
+            keys.push(kCVPixelBufferWidthKey as *const c_void as *mut Object);
+            keys.push(kCVPixelBufferHeightKey as *const c_void as *mut Object);
+        }
+
+        let count = objects.len();
         let dictionary_class = class!(NSDictionary);
         let dictionary: *mut Object = msg_send![
             dictionary_class,
             dictionaryWithObjects: objects.as_ptr()
             forKeys: keys.as_ptr()
-            count: 2usize
+            count: count
         ];
         if dictionary.is_null() {
             return Err(PlayerError::Open);

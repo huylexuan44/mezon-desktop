@@ -431,10 +431,7 @@ impl Toggleable for PinPopoverTrigger {
 }
 
 impl Clickable for PinPopoverTrigger {
-    fn on_click(
-        mut self,
-        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(handler));
         self
     }
@@ -446,13 +443,11 @@ impl Clickable for PinPopoverTrigger {
 
 impl RenderOnce for PinPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let mut button = Button::new("hdr-pin-trigger")
-            .with_size(Size::Small)
-            .icon(
-                Icon::new(IconName::PinRight)
-                    .size(px(20.))
-                    .text_color(self.icon_color),
-            );
+        let mut button = Button::new("hdr-pin-trigger").with_size(Size::Small).icon(
+            Icon::new(IconName::PinRight)
+                .size(px(20.))
+                .text_color(self.icon_color),
+        );
         button = if self.open {
             button.with_variant(ButtonVariant::Secondary)
         } else {

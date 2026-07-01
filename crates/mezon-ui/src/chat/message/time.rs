@@ -1,8 +1,6 @@
-//! Message timestamp formatting — parity with React `convertUnixSecondsToTimeString`
-//! and `convertDateStringI18n` in `@mezon/utils`.
-
-use chrono::{Datelike, Duration, Local};
-use mezon_store::message_time::{format_local_time_hhmm, local_datetime};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate};
+use gpui::SharedString;
+use mezon_store::message_time::local_datetime;
 
 const MONTH_KEYS: [&str; 12] = [
     "common.timeFormat.months.jan",
@@ -29,35 +27,41 @@ const WEEKDAY_KEYS: [&str; 7] = [
     "common.timeFormat.daysOfWeek.sat",
 ];
 
-/// Clock label beside the sender name (React `MessageHead` / `MessageLineSystem`).
-pub fn format_message_time(ts: i64, locale: &str) -> String {
-    let Some(dt) = local_datetime(ts) else {
-        return String::new();
+pub fn format_message_time(
+    time_hhmm: &SharedString,
+    local_date: Option<NaiveDate>,
+    locale: &str,
+    now: DateTime<Local>,
+) -> SharedString {
+    let Some(msg_date) = local_date else {
+        return SharedString::default();
     };
 
-    let now = Local::now();
     let today = now.date_naive();
     let yesterday = today - Duration::days(1);
-    let msg_date = dt.date_naive();
-    let time = format_local_time_hhmm(ts);
 
     if msg_date == today {
-        time
+        time_hhmm.clone()
     } else if msg_date == yesterday {
-        format!("{} {}", mezon_i18n::t(locale, "common.yesterdayAt"), time)
+        format!(
+            "{} {}",
+            mezon_i18n::t(locale, "common.yesterdayAt"),
+            time_hhmm
+        )
+        .into()
     } else {
         format!(
             "{:02}/{:02}/{}, {}",
-            dt.day(),
-            dt.month(),
-            dt.year(),
-            time
+            msg_date.day(),
+            msg_date.month(),
+            msg_date.year(),
+            time_hhmm
         )
+        .into()
     }
 }
 
-/// Date separator between message groups (React `MessageDateDivider`).
-pub fn format_date_divider(ts: i64, locale: &str) -> String {
+pub fn format_date_divider(ts: i64, locale: &str, now: DateTime<Local>) -> String {
     let Some(dt) = local_datetime(ts) else {
         return String::new();
     };
@@ -65,11 +69,14 @@ pub fn format_date_divider(ts: i64, locale: &str) -> String {
     let month = mezon_i18n::t(locale, MONTH_KEYS[dt.month0() as usize]);
     let formatted = format!("{:02} {} {}", dt.day(), month, dt.year());
 
-    let today = Local::now().date_naive();
+    let today = now.date_naive();
     if dt.date_naive() == today {
         format!("{}, {}", mezon_i18n::t(locale, "common.today"), formatted)
     } else {
-        let weekday = mezon_i18n::t(locale, WEEKDAY_KEYS[dt.weekday().num_days_from_sunday() as usize]);
+        let weekday = mezon_i18n::t(
+            locale,
+            WEEKDAY_KEYS[dt.weekday().num_days_from_sunday() as usize],
+        );
         format!("{weekday}, {formatted}")
     }
 }
@@ -82,18 +89,15 @@ mod tests {
     #[test]
     fn message_time_today_is_hhmm_only() {
         let now = Local::now();
-        let ts = now.timestamp();
-        let label = format_message_time(ts, "en");
-        assert_eq!(
-            label,
-            format!("{:02}:{:02}", now.hour(), now.minute())
-        );
+        let hhmm: SharedString = format!("{:02}:{:02}", now.hour(), now.minute()).into();
+        let label = format_message_time(&hhmm, Some(now.date_naive()), "en", now);
+        assert_eq!(label, hhmm);
     }
 
     #[test]
     fn date_divider_today_prefixes_common_today() {
         let now = Local::now();
-        let label = format_date_divider(now.timestamp(), "en");
+        let label = format_date_divider(now.timestamp(), "en", now);
         assert!(label.starts_with("Today,"));
     }
 }

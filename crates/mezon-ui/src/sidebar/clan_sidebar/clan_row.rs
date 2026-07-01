@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, Rgba, SharedString, Window,
-    div, img, prelude::*, px, rgb,
+    div, img, prelude::*, px,
 };
 use mezon_store::{ClanId, ClanList};
 
+use crate::components::primitives::mention_count_badge;
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 
@@ -73,14 +74,6 @@ pub(super) fn render_pill(
         .into_any_element()
 }
 
-fn badge_text(count: u32) -> SharedString {
-    if count >= 100 {
-        SharedString::from("99+")
-    } else {
-        SharedString::from(count.to_string())
-    }
-}
-
 pub(super) fn render_clan_row(
     rows: &[ClanRow],
     ix: usize,
@@ -142,27 +135,13 @@ pub(super) fn render_clan_row(
     };
 
     let avatar_with_badge = div().relative().child(avatar).when(show_badge, |el| {
-        let text = badge_text(badge_count);
-        let wide = badge_count >= 10;
         el.child(
-            div()
+            mention_count_badge(badge_count)
                 .absolute()
                 .bottom(px(-1.))
                 .right(px(-2.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(16.))
-                .when(wide, |s| s.w(px(22.)))
-                .when(!wide, |s| s.w(px(16.)))
-                .rounded_full()
-                .bg(rgb(0xDA373C))
                 .border_1()
-                .border_color(gpui::white())
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(gpui::white())
-                .child(text),
+                .border_color(gpui::white()),
         )
     });
 

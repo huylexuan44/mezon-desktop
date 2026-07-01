@@ -3,6 +3,9 @@ name = "mezon-store"
 version.workspace = true
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 mezon-client.workspace = true
 mezon-proto.workspace = true

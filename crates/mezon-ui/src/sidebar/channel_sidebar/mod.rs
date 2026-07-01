@@ -12,7 +12,9 @@ use gpui::{
 use mezon_store::{ChannelList, ClanId, ClanList, FAVOR_CATE_ID, Settings};
 
 use crate::components::compositions::channel_row::ChannelRow;
-use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
+use crate::components::primitives::{
+    Avatar, Icon, IconName, Sizable, Size, context_menu_at, mention_count_badge_on_channel_row,
+};
 use crate::theme::{ActiveTheme, Theme};
 
 mod items;
@@ -179,8 +181,12 @@ impl ChannelSidebar {
                 !self.loaded_clans.contains(clan_id)
             } else {
                 self.loaded_clans.insert(*clan_id);
+                let show_empty = channels.show_empty_categories();
                 for category in categories {
                     let is_favorites = category.id == FAVOR_CATE_ID;
+                    if !show_empty && !is_favorites && category.channels.is_empty() {
+                        continue;
+                    }
                     let collapsed = channels.is_category_collapsed(*clan_id, &category.id);
                     let name = if is_favorites {
                         mezon_i18n::t(&locale, "channelList.favoriteChannel").to_string()
@@ -234,7 +240,16 @@ impl ChannelSidebar {
                                 voice_members: ch
                                     .voice_members
                                     .iter()
-                                    .map(VoiceMemberSlot::from)
+                                    .map(|m| {
+                                        let mut slot = VoiceMemberSlot::from(m);
+                                        if !slot.avatar_url.is_empty() {
+                                            slot.avatar_url = crate::util::imgproxy::avatar_url(
+                                                cx,
+                                                &slot.avatar_url,
+                                            );
+                                        }
+                                        slot
+                                    })
                                     .collect(),
                             });
                         }
@@ -688,7 +703,6 @@ fn render_sidebar_item(
                 .items_center()
                 .w_full()
                 .px_2()
-                .py_1()
                 .cursor_pointer()
                 .text_color(theme.text_muted)
                 .text_sm()
@@ -727,7 +741,7 @@ fn render_sidebar_item(
             private,
             selected,
             badge_count,
-            badge_label,
+            badge_label: _badge_label,
             muted,
             is_thread,
             line_above,
@@ -739,8 +753,6 @@ fn render_sidebar_item(
             let clan_id_inner = active_clan_id_for_nav;
             let selected_bg = theme.bg_primary;
             let hover_bg = theme.bg_hover;
-            let brand = theme.brand;
-            let text_primary = theme.text_primary;
             let text_color = if *muted {
                 theme.text_muted
             } else if *selected {
@@ -749,6 +761,8 @@ fn render_sidebar_item(
                 theme.text_secondary
             };
 
+            let row_id = SharedString::from(format!("thread-row-{ch_id}"));
+            let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0 && !*muted;
             let row_content = if *is_thread {
                 let line_color = theme.text_muted;
                 let line_above_val = *line_above;
@@ -783,9 +797,11 @@ fn render_sidebar_item(
                 );
 
                 div()
-                    .id(SharedString::from(format!("thread-row-{ch_id}")))
+                    .id(row_id.clone())
                     .h(px(34.))
                     .w_full()
+                    .relative()
+                    .group(row_id.clone())
                     .flex()
                     .flex_row()
                     .items_stretch()
@@ -793,6 +809,12 @@ fn render_sidebar_item(
                     .when(*selected, move |el| el.bg(selected_bg))
                     .when(!*selected && !suppress_hover, move |el| {
                         el.hover(move |s| s.bg(hover_bg))
+                    })
+                    .when(show_badge, |el| {
+                        el.child(mention_count_badge_on_channel_row(
+                            *badge_count,
+                            row_id.clone(),
+                        ))
                     })
                     .child(div().flex_none().w(px(16.)))
                     .child(connector)
@@ -802,31 +824,13 @@ fn render_sidebar_item(
                             .flex()
                             .items_center()
                             .pr_2()
+                            .mr_6()
                             .text_sm()
                             .text_color(text_color)
                             .when(*unread && !*muted, |el| {
                                 el.font_weight(gpui::FontWeight::BOLD)
                             })
-                            .child(div().flex_1().child(name.clone()))
-                            .when(
-                                crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0 && !*muted,
-                                move |el| {
-                                    el.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .min_w(px(16.))
-                                            .h(px(16.))
-                                            .px_1()
-                                            .rounded_full()
-                                            .bg(brand)
-                                            .text_color(text_primary)
-                                            .text_xs()
-                                            .child(badge_label.clone()),
-                                    )
-                                },
-                            ),
+                            .child(div().flex_1().child(name.clone())),
                     )
                     .into_any_element()
             } else {
@@ -865,9 +869,8 @@ fn render_sidebar_item(
                             let avatar = if m.avatar_url.is_empty() {
                                 Avatar::new().name(name_text.clone())
                             } else {
-                                let proxied = crate::util::imgproxy::avatar_url(cx, &m.avatar_url);
                                 Avatar::new()
-                                    .src(SharedString::from(proxied))
+                                    .src(SharedString::from(m.avatar_url.clone()))
                                     .name(name_text.clone())
                             };
                             div()

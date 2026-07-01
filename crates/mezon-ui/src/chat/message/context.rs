@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use gpui::{Entity, WeakEntity};
+use gpui::{Entity, SharedString, WeakEntity};
 use mezon_store::{MessageId, ProfileContext, Settings};
 
 use super::channel_messages::ChannelMessages;
@@ -9,10 +9,43 @@ use super::video_player::VideoPlayerView;
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnboardingContext {
+    pub members_invited: bool,
+    pub sent_message: bool,
+    pub downloaded_app: bool,
+    pub created_channel: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WelcomeContext {
+    Channel {
+        name: SharedString,
+        private: bool,
+        is_stream: bool,
+    },
+    Thread {
+        name: SharedString,
+        private: bool,
+    },
+    Direct {
+        display_name: SharedString,
+        username: SharedString,
+        avatar: SharedString,
+    },
+    Group {
+        name: SharedString,
+        avatar: SharedString,
+    },
+}
+
 pub struct RowCtx<'a> {
     pub theme: &'a Theme,
     pub locale: &'a str,
     pub current_user_id: &'a str,
+    pub current_role_ids: &'a [i64],
+    pub welcome: Option<WelcomeContext>,
+    pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
     pub avatar_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
@@ -22,6 +55,7 @@ pub struct RowCtx<'a> {
     pub active_videos: &'a HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
     pub video_host: WeakEntity<ChannelMessages>,
+    pub now: chrono::DateTime<chrono::Local>,
 }
 
 pub const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17_ac_86;

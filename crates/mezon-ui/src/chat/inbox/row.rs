@@ -152,7 +152,7 @@ fn find_mention_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> Opt
     if let Some(channel) = list.find_channel_in_clan(clan_id, channel_id) {
         return Some(channel.clone());
     }
-    if let Some(channel) = list.find_channel(channel_id) {
+    if let Some(channel) = list.find_channel_in_active_clan(channel_id) {
         return Some(channel.clone());
     }
     list.clan_id_for_channel(channel_id)

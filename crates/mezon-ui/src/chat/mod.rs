@@ -11,6 +11,7 @@ pub mod mention_input;
 pub mod message;
 pub mod pinned_popover;
 pub mod screen_share_modal;
+pub mod screen_share_pip;
 pub mod user_profile_popover;
 pub mod voice;
 

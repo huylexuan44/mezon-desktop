@@ -41,7 +41,9 @@ sudo apt install -y build-essential pkg-config libgtk-3-dev libatk1.0-dev \
   libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-x11-dev \
   libxdo-dev libsecret-1-dev libssl-dev libvulkan-dev \
   libpipewire-0.3-dev libdbus-1-dev libxcb1-dev libxcb-randr0-dev \
-  libxcb-xfixes0-dev libxcb-xkb-dev libxcb-cursor-dev libx11-dev libx11-xcb-dev
+  libxcb-xfixes0-dev libxcb-xkb-dev libxcb-cursor-dev libx11-dev libx11-xcb-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 ```
 
 ## Quick Start

@@ -78,6 +78,11 @@ impl ChatArea {
         });
     }
 
+    pub fn bind_window(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
+        self.timeline
+            .update(cx, |timeline, cx| timeline.bind_window(window, cx));
+    }
+
     pub fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
         if self.input_state.is_none() {
             let locale = self.settings.read(cx).language.clone();

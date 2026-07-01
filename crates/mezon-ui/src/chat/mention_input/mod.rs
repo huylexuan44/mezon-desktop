@@ -3,13 +3,13 @@ mod text_field;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, KeyBinding,
-    PathPromptOptions, SharedString, Subscription, UniformListScrollHandle, Window, actions,
-    deferred, div, img, prelude::*, px, uniform_list,
+    PathPromptOptions, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
+    actions, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore,
-    MENTION_HERE_ID, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
-    OutgoingMention, Settings, StickerEvent, StickerStore,
+    ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore, MENTION_HERE_ID,
+    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, Settings,
+    StickerEvent, StickerStore,
 };
 
 use attachments::{PendingAttachment, acceptable, build_pending};
@@ -20,7 +20,6 @@ use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
 };
 use crate::theme::{ActiveTheme, Theme};
-use crate::util::imgproxy;
 use text_field::{
     MentionFieldEvent, MentionInputField, MentionInputState, MentionSpan, MentionSpanKind,
     byte_offset_to_utf16,
@@ -28,6 +27,8 @@ use text_field::{
 
 const KEY_CONTEXT: &str = "MezonMention";
 const MAX_SUGGESTIONS: usize = 50;
+const MENTION_ROW_PX: f32 = 36.;
+const MENTION_POPUP_MAX_PX: f32 = MENTION_ROW_PX * 6.;
 const PICKER_EMOJI_PX: f32 = 28.;
 const PICKER_CELL_PX: f32 = 34.;
 const PICKER_ROW_PX: f32 = 40.;
@@ -137,6 +138,7 @@ pub struct MentionInput {
     query_len: usize,
     suggestions: Vec<Suggestion>,
     selected: usize,
+    suggestion_scroll: UniformListScrollHandle,
     session_members: Vec<MentionMemberRaw>,
     session_channels: Vec<ChannelSuggestRaw>,
     session_emojis: Vec<EmojiSuggestRaw>,
@@ -208,6 +210,7 @@ impl MentionInput {
             query_len: 0,
             suggestions: Vec::new(),
             selected: 0,
+            suggestion_scroll: UniformListScrollHandle::new(),
             session_members: Vec::new(),
             session_channels: Vec::new(),
             session_emojis: Vec::new(),
@@ -512,8 +515,8 @@ impl MentionInput {
                     if out.len() >= MAX_SUGGESTIONS {
                         break;
                     }
-                    if member.display.to_lowercase().starts_with(&needle)
-                        || member.username.to_lowercase().starts_with(&needle)
+                    if member.display_lc.starts_with(&needle)
+                        || member.username_lc.starts_with(&needle)
                     {
                         out.push(Suggestion::Member(member.clone()));
                     }
@@ -542,6 +545,8 @@ impl MentionInput {
         }
         self.selected = 0;
         self.suggestions = out;
+        self.suggestion_scroll
+            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
     }
 
     fn accept(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -719,6 +724,8 @@ impl MentionInput {
     fn on_nav_up(&mut self, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.selected = self.selected.saturating_sub(1);
+            self.suggestion_scroll
+                .scroll_to_item(self.selected, ScrollStrategy::Nearest);
             cx.notify();
         } else {
             self.input
@@ -729,6 +736,8 @@ impl MentionInput {
     fn on_nav_down(&mut self, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.selected = (self.selected + 1).min(self.suggestions.len() - 1);
+            self.suggestion_scroll
+                .scroll_to_item(self.selected, ScrollStrategy::Nearest);
             cx.notify();
         } else {
             self.input
@@ -746,13 +755,14 @@ impl MentionInput {
         self.hide(cx);
     }
 
-    fn render_suggestion(
+    fn render_suggestion_row(
         &self,
+        theme: &Theme,
+        locale: &str,
         index: usize,
         suggestion: &Suggestion,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
+        entity: &Entity<MentionInput>,
+    ) -> AnyElement {
         let text_primary = theme.text_primary;
         let text_muted = theme.text_muted;
         let selected_bg = theme.bg_hover;
@@ -763,20 +773,17 @@ impl MentionInput {
                 Suggestion::Here => (
                     None,
                     "@here".into(),
-                    mezon_i18n::t(&self.locale(cx), "messageBox.suggestions.notifyEveryone").into(),
+                    mezon_i18n::t(locale, "messageBox.suggestions.notifyEveryone").into(),
                 ),
                 Suggestion::Member(member) => {
-                    let src = if member.avatar_raw.is_empty() {
-                        SharedString::default()
-                    } else {
-                        imgproxy::avatar_url(cx, &member.avatar_raw).into()
-                    };
                     let mut avatar = Avatar::new()
                         .name(member.display.clone())
                         .size_px(px(24.))
                         .image_cache(self.avatar_cache.clone());
-                    if !src.is_empty() {
-                        avatar = avatar.src(src).fallback_src(member.avatar_raw.clone());
+                    if !member.avatar_src.is_empty() {
+                        avatar = avatar
+                            .src(member.avatar_src.clone())
+                            .fallback_src(member.avatar_raw.clone());
                     }
                     (
                         Some(avatar.into_any_element()),
@@ -820,6 +827,7 @@ impl MentionInput {
 
         div()
             .id(("mention-suggestion", index))
+            .h(px(MENTION_ROW_PX))
             .flex()
             .flex_row()
             .items_center()
@@ -831,13 +839,25 @@ impl MentionInput {
             .rounded(px(6.))
             .cursor_pointer()
             .when(is_selected, |row| row.bg(selected_bg))
-            .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                if *hovered && this.selected != index {
-                    this.selected = index;
-                    cx.notify();
+            .on_hover({
+                let entity = entity.clone();
+                move |hovered: &bool, _window: &mut Window, cx: &mut App| {
+                    if *hovered {
+                        entity.update(cx, |this, cx| {
+                            if this.selected != index {
+                                this.selected = index;
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
-            }))
-            .on_click(cx.listener(move |this, _event, window, cx| this.accept(index, window, cx)))
+            })
+            .on_click({
+                let entity = entity.clone();
+                move |_event, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |this, cx| this.accept(index, window, cx));
+                }
+            })
             .child(
                 div()
                     .flex()
@@ -864,6 +884,7 @@ impl MentionInput {
                         .child(secondary),
                 )
             })
+            .into_any_element()
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1135,15 +1156,29 @@ impl Render for MentionInput {
         let has_pending = !self.pending_attachments.is_empty();
 
         let popup = open.then(|| {
-            let rows: Vec<_> = self
-                .suggestions
-                .iter()
-                .enumerate()
-                .map(|(index, suggestion)| {
-                    self.render_suggestion(index, suggestion, cx)
-                        .into_any_element()
-                })
-                .collect();
+            let entity = cx.entity();
+            let count = self.suggestions.len();
+            let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
+            let locale = self.locale(cx);
+            let list = uniform_list(
+                "mention-suggestion-list",
+                count,
+                move |range, _window, cx| {
+                    let theme = cx.theme().clone();
+                    let this = entity.read(cx);
+                    range
+                        .map(|ix| match this.suggestions.get(ix) {
+                            Some(suggestion) => {
+                                this.render_suggestion_row(&theme, &locale, ix, suggestion, &entity)
+                            }
+                            None => div().h(px(MENTION_ROW_PX)).into_any_element(),
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .track_scroll(&self.suggestion_scroll)
+            .h(px(list_h))
+            .w_full();
             deferred(
                 div()
                     .id("mention-popup")
@@ -1152,8 +1187,6 @@ impl Render for MentionInput {
                     .left_0()
                     .right_0()
                     .mb(px(8.))
-                    .max_h(px(216.))
-                    .overflow_y_scroll()
                     .p(px(4.))
                     .rounded(px(8.))
                     .border_1()
@@ -1162,7 +1195,7 @@ impl Render for MentionInput {
                     .shadow_lg()
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
-                    .children(rows),
+                    .child(list),
             )
         });
 
