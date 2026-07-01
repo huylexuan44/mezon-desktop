@@ -58,7 +58,7 @@ pub use direct::{DirectChannel, DirectEvent, DirectKind, DirectMessageStore};
 pub use emoji::{Emoji, EmojiEvent, EmojiStore};
 pub use gallery::{
     ChannelAttachment, GalleryEvent, GalleryStore, LoadDirection, MediaFilter, UploaderInfo,
-    enrich_uploader, fetch_channel_attachments,
+    enrich_uploader, fetch_channel_attachments, resolve_attachment_uploader,
 };
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};

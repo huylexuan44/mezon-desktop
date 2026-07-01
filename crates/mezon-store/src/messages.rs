@@ -553,6 +553,17 @@ impl MessagesStore {
         self.messages()
     }
 
+    pub fn message_in_channel(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> Option<&Message> {
+        self.cache
+            .get(&channel_id)?
+            .messages
+            .get_by_id(message_id)
+    }
+
     /// Emit the splice for a single row appended at the bottom, accounting for
     /// any front-trim that dropped the oldest rows to keep the buffer within the
     /// cap. `old_len` is the buffer length before the push.

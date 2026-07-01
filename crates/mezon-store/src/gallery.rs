@@ -1,9 +1,3 @@
-//! Channel attachment domain model + gallery store — the native counterpart of
-//! React's `gallery.slice` and `attachment.slice`. `ChannelAttachment` is the
-//! richer media entity returned by `ListChannelAttachment` (distinct from the
-//! inline `MessageAttachment`), carrying the uploader, originating message, and
-//! creation timestamp used for date grouping and pagination cursors.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,8 +6,13 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString}
 use mezon_client::AppApi;
 use mezon_client::transport::ApiChannelAttachment;
 
+use crate::account::AccountStore;
+use crate::badge::BadgeService;
+use crate::clan_members::ClanMembersStore;
 use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use crate::messages::MessagesStore;
+use crate::user_profile::{ProfileContext, resolve_user_profile};
 
 /// Gallery server cache TTL (React `GALLERY_CACHED_TIME` = 1 hour).
 pub const GALLERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
@@ -69,6 +68,8 @@ pub struct ChannelAttachment {
     pub uploader_name: SharedString,
     /// Resolved uploader avatar url (filled by [`enrich_uploader`]).
     pub uploader_avatar: SharedString,
+    /// Unproxied avatar url for [`Avatar`] fallback when imgproxy fails.
+    pub uploader_avatar_raw: SharedString,
 }
 
 impl ChannelAttachment {
@@ -111,6 +112,7 @@ impl ChannelAttachment {
             day_index,
             uploader_name: SharedString::default(),
             uploader_avatar: SharedString::default(),
+            uploader_avatar_raw: SharedString::default(),
         }
     }
 
@@ -119,9 +121,6 @@ impl ChannelAttachment {
     }
 }
 
-/// Fetch and map a page of channel attachments to domain types. Keeps DTO
-/// decoding inside the store so views (e.g. the image viewer) consume only
-/// [`ChannelAttachment`]. `before`/`after` are unix-second cursors (0 = unset).
 pub async fn fetch_channel_attachments(
     api: Arc<AppApi>,
     cfg: AppConfig,
@@ -146,23 +145,135 @@ pub async fn fetch_channel_attachments(
 pub struct UploaderInfo {
     pub name: String,
     pub avatar: String,
+    pub avatar_raw: String,
 }
 
-/// Fill each attachment's uploader name/avatar via `resolve` (the native analog
-/// of React `getAttachmentDataForWindow`). Falls back to "Anonymous" when the
-/// uploader cannot be resolved.
+fn uploader_urls(raw: &str, cfg: Option<&AppConfig>) -> (String, String) {
+    if raw.is_empty() {
+        return (String::new(), String::new());
+    }
+    let avatar = match cfg {
+        Some(cfg) => cfg.avatar_proxy(raw),
+        None => raw.to_string(),
+    };
+    (avatar, raw.to_string())
+}
+
+pub fn resolve_attachment_uploader(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    uid: UserId,
+    message_id: MessageId,
+    cfg: Option<&AppConfig>,
+    cx: &App,
+) -> UploaderInfo {
+    let context = if clan_id.0 == 0 {
+        ProfileContext::Direct(channel_id)
+    } else {
+        ProfileContext::Clan(clan_id)
+    };
+    if let Some(profile) = resolve_user_profile(uid, context, cx) {
+        if !profile.display_name.is_empty() {
+            let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
+            return UploaderInfo {
+                name: profile.display_name,
+                avatar,
+                avatar_raw,
+            };
+        }
+    }
+    if let Some(info) = uploader_from_message(channel_id, message_id, cfg, cx) {
+        return info;
+    }
+    if clan_id.0 != 0 {
+        if let Some(member) = ClanMembersStore::try_global(cx).and_then(|store| {
+            store.read(cx).member(clan_id, uid)
+        }) {
+            let name = member.name().to_string();
+            if !name.is_empty() {
+                let (avatar, avatar_raw) = uploader_urls(member.avatar(), cfg);
+                return UploaderInfo {
+                    name,
+                    avatar,
+                    avatar_raw,
+                };
+            }
+        }
+    }
+    let is_self = BadgeService::global(cx)
+        .read(cx)
+        .current_user_id(cx)
+        .is_some_and(|id| id == uid);
+    if is_self {
+        let store = AccountStore::global(cx).read(cx);
+        if let Some(acct) = &store.account {
+            let name = if !acct.display_name.is_empty() {
+                acct.display_name.clone()
+            } else {
+                acct.username.clone()
+            };
+            if !name.is_empty() {
+                let raw = acct
+                    .avatar_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or_default()
+                    .to_string();
+                let (avatar, avatar_raw) = uploader_urls(&raw, cfg);
+                return UploaderInfo {
+                    name,
+                    avatar,
+                    avatar_raw,
+                };
+            }
+        }
+    }
+    UploaderInfo::default()
+}
+
+fn uploader_from_message(
+    channel_id: ChannelId,
+    message_id: MessageId,
+    cfg: Option<&AppConfig>,
+    cx: &App,
+) -> Option<UploaderInfo> {
+    if message_id.is_zero() {
+        return None;
+    }
+    let store = MessagesStore::try_global(cx)?;
+    let msg = store.read(cx).message_in_channel(channel_id, message_id)?;
+    let name = msg.sender_name.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let raw = msg.avatar_url.to_string();
+    let avatar = if !msg.avatar_proxied.is_empty() {
+        msg.avatar_proxied.to_string()
+    } else {
+        uploader_urls(&raw, cfg).0
+    };
+    Some(UploaderInfo {
+        name,
+        avatar,
+        avatar_raw: raw,
+    })
+}
+
 pub fn enrich_uploader<F>(attachments: &mut [ChannelAttachment], resolve: F)
 where
-    F: Fn(UserId) -> Option<UploaderInfo>,
+    F: Fn(&ChannelAttachment) -> Option<UploaderInfo>,
 {
     for att in attachments.iter_mut() {
-        match resolve(att.uploader_id) {
+        match resolve(att) {
             Some(info) if !info.name.is_empty() => {
                 att.uploader_name = info.name.into();
                 att.uploader_avatar = info.avatar.into();
+                att.uploader_avatar_raw = info.avatar_raw.into();
             }
             _ => {
                 att.uploader_name = "Anonymous".into();
+                att.uploader_avatar = SharedString::default();
+                att.uploader_avatar_raw = SharedString::default();
             }
         }
     }
@@ -240,9 +351,6 @@ pub enum GalleryEvent {
     Changed(ChannelId),
 }
 
-/// Per-channel gallery attachment lists with bidirectional pagination. Unlike
-/// realtime stores this is fetched on demand (when the gallery opens) and not
-/// subscribed to the broadcast.
 pub struct GalleryStore {
     by_channel: HashMap<ChannelId, GalleryChannel>,
     api: Arc<AppApi>,
@@ -271,8 +379,6 @@ impl GalleryStore {
         cx.try_global::<GlobalGalleryStore>().map(|g| g.0.clone())
     }
 
-    /// Shared API handle for callers (e.g. the image viewer) that need to fetch
-    /// channel attachments outside the gallery's per-channel list.
     pub fn api(&self) -> Arc<AppApi> {
         self.api.clone()
     }
@@ -516,9 +622,6 @@ impl GalleryStore {
     }
 }
 
-/// Merge `incoming` into `existing`, de-duplicating by attachment id and keeping
-/// the list sorted newest-first. Returns the number of newly added items (0 =
-/// duplicate page, used to stop pagination). `reset` replaces the list.
 fn merge_attachments(
     existing: &mut Vec<ChannelAttachment>,
     incoming: Vec<ChannelAttachment>,
@@ -564,6 +667,7 @@ mod tests {
             day_index: 0,
             uploader_name: SharedString::default(),
             uploader_avatar: SharedString::default(),
+            uploader_avatar_raw: SharedString::default(),
         }
     }
 

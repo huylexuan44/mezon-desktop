@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use futures::AsyncReadExt as _;
 use gpui::{
-    App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, ImageCache,
+    App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, FontWeight,
+    ImageCache,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, RenderImage,
     Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
     UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas,
@@ -12,12 +13,15 @@ use gpui::{
 use gpui::http_client::HttpClient;
 use gpui::Size as GpuiSize;
 use mezon_store::{
-    AppConfig, ChannelAttachment, ChannelId, ClanId, ClanMembersStore, GalleryStore, PlatformStore,
-    Settings, UserId, fetch_channel_attachments,
+    AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore,
+    GalleryStore, PlatformStore, Settings, UploaderInfo, fetch_channel_attachments,
+    resolve_attachment_uploader,
 };
 
 use crate::app::main_window::activate_main_window;
-use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinner};
+use crate::app::title_bar::TitleBar;
+use crate::app::window_controls::{self, APP_NAME};
+use crate::components::primitives::{Avatar, Icon, IconName, Spinner};
 use crate::components::primitives::{ContextMenu, context_menu_at};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
@@ -55,34 +59,50 @@ fn clear_image_viewer_global(cx: &mut App) {
     }
 }
 
-/// Open the image viewer, reusing the existing window if one is already open
-pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
-    let mut pending = Some(request);
-    if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
-        let updated = handle
-            .update(cx, |viewer, window, cx| {
-                if let Some(req) = pending.take() {
-                    viewer.set_request(req, window, cx);
-                }
-                window.activate_window();
-            })
-            .is_ok();
-        if updated {
-            return;
-        }
-        clear_image_viewer_global(cx);
-    }
-    let Some(request) = pending else {
-        return;
-    };
+fn close_image_viewer_window(handle: WindowHandle<ImageViewer>, cx: &mut App) {
+    let _ = handle.update(cx, |_, window, _| window.remove_window());
+    clear_image_viewer_global(cx);
+}
 
-    let bounds = Bounds::centered(None, size(px(1100.0), px(740.0)), cx);
+fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
+    let handle = cx.try_global::<GlobalImageViewer>().map(|g| g.0)?;
+    match handle.update(cx, |_, window, _| window.window_bounds()) {
+        Ok(WindowBounds::Windowed(bounds)) => Some(bounds),
+        _ => None,
+    }
+}
+
+/// Open the image viewer, replacing any existing viewer window.
+pub fn open_image_viewer(request: OpenViewerRequest, cx: &mut App) {
+    cx.defer(move |cx| open_image_viewer_now(request, cx));
+}
+
+fn open_image_viewer_now(request: OpenViewerRequest, cx: &mut App) {
+    let prior_bounds = prior_viewer_bounds(cx);
+    if let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) {
+        close_image_viewer_window(handle, cx);
+        cx.defer(move |cx| spawn_image_viewer_window(request, prior_bounds, cx));
+        return;
+    }
+    spawn_image_viewer_window(request, prior_bounds, cx);
+}
+
+fn spawn_image_viewer_window(
+    request: OpenViewerRequest,
+    prior_bounds: Option<Bounds<Pixels>>,
+    cx: &mut App,
+) {
+    let bounds = prior_bounds.unwrap_or_else(|| {
+        Bounds::centered(None, size(px(1100.0), px(740.0)), cx)
+    });
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(640.0), px(480.0))),
         kind: WindowKind::Normal,
         focus: true,
         show: true,
+        titlebar: Some(window_controls::window_title_options()),
+        window_decorations: window_controls::main_window_decorations(),
         ..Default::default()
     };
 
@@ -98,6 +118,8 @@ pub struct ImageViewer {
     focus_handle: FocusHandle,
     clan_id: ClanId,
     channel_id: ChannelId,
+    channel_label: SharedString,
+    title_bar: Entity<TitleBar>,
     settings: Entity<Settings>,
     attachments: Vec<ChannelAttachment>,
     index: usize,
@@ -125,10 +147,19 @@ impl ImageViewer {
             true
         });
         let image_cache = cx.new(|cx| LruImageCache::new(64, 384 * 1024 * 1024, cx));
+        let channel_label = resolve_channel_label(
+            request.clan_id,
+            request.channel_id,
+            request.channel_label.clone(),
+            cx,
+        );
+        let title_bar = cx.new(|cx| TitleBar::new(request.settings.clone(), cx));
         let mut this = Self {
             focus_handle,
             clan_id: request.clan_id,
             channel_id: request.channel_id,
+            channel_label,
+            title_bar,
             settings: request.settings.clone(),
             attachments: Vec::new(),
             index: 0,
@@ -157,6 +188,12 @@ impl ImageViewer {
     ) {
         self.clan_id = request.clan_id;
         self.channel_id = request.channel_id;
+        self.channel_label = resolve_channel_label(
+            request.clan_id,
+            request.channel_id,
+            request.channel_label,
+            cx,
+        );
         self.settings = request.settings;
         self.zoom = MIN_ZOOM;
         self.pan = point(px(0.), px(0.));
@@ -182,6 +219,13 @@ impl ImageViewer {
         if self.attachments.is_empty() {
             self.loading = true;
             self.fetch_initial(request.anchor_before, request.selected_url, cx);
+        } else {
+            resolve_uploaders(
+                &mut self.attachments,
+                self.clan_id,
+                self.channel_id,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -223,7 +267,7 @@ impl ImageViewer {
                 this.loading = false;
                 match result {
                     Ok(mut mapped) => {
-                        resolve_uploaders(&mut mapped, clan, cx);
+                        resolve_uploaders(&mut mapped, clan, channel, cx);
                         this.attachments = mapped;
                         this.has_more_before = this.attachments.len() as i32 >= VIEWER_FETCH_LIMIT;
                         if let Some(url) = &select_url {
@@ -268,7 +312,7 @@ impl ImageViewer {
                 this.loading = false;
                 match result {
                     Ok(mut mapped) => {
-                        resolve_uploaders(&mut mapped, clan, cx);
+                        resolve_uploaders(&mut mapped, clan, channel, cx);
                         let existing: std::collections::HashSet<i64> =
                             this.attachments.iter().map(|a| a.id).collect();
                         let before_len = this.attachments.len();
@@ -288,6 +332,31 @@ impl ImageViewer {
         .detach();
     }
 
+    fn refresh_uploader_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(att) = self.attachments.get(index) else {
+            return;
+        };
+        if !att.uploader_avatar.is_empty() {
+            return;
+        }
+        let clan = self.clan_id;
+        let channel = self.channel_id;
+        let uploader_id = att.uploader_id;
+        let message_id = att.message_id;
+        let cfg = AppConfig::try_global(cx);
+        let info = resolve_attachment_uploader(
+            clan,
+            channel,
+            uploader_id,
+            message_id,
+            cfg,
+            cx,
+        );
+        if let Some(att) = self.attachments.get_mut(index) {
+            apply_uploader_info(att, info);
+        }
+    }
+
     fn go_to(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.attachments.len() {
             return;
@@ -299,6 +368,7 @@ impl ImageViewer {
         self.rotated_image = None;
         self.rotation_loading = false;
         self.context_menu = None;
+        self.refresh_uploader_at(index, cx);
         if self.index + LOAD_MORE_THRESHOLD >= self.attachments.len() {
             self.fetch_older(cx);
         }
@@ -455,39 +525,81 @@ impl ImageViewer {
     }
 }
 
-fn resolve_uploaders(attachments: &mut [ChannelAttachment], clan: ClanId, cx: &App) {
-    let Some(members) = ClanMembersStore::try_global(cx) else {
-        return;
-    };
-    let cfg = AppConfig::try_global(cx);
-    let members = members.read(cx);
-    for att in attachments.iter_mut() {
-        match member_display(members, clan, att.uploader_id, cfg) {
-            Some((name, avatar)) => {
-                att.uploader_name = name.into();
-                att.uploader_avatar = avatar.into();
-            }
-            None => att.uploader_name = "Anonymous".into(),
-        }
+fn apply_uploader_info(att: &mut ChannelAttachment, info: UploaderInfo) {
+    if info.name.is_empty() {
+        att.uploader_name = "Anonymous".into();
+        att.uploader_avatar = SharedString::default();
+        att.uploader_avatar_raw = SharedString::default();
+    } else {
+        att.uploader_name = info.name.into();
+        att.uploader_avatar = info.avatar.into();
+        att.uploader_avatar_raw = info.avatar_raw.into();
     }
 }
 
-fn member_display(
-    members: &ClanMembersStore,
+fn resolve_uploaders(
+    attachments: &mut [ChannelAttachment],
     clan: ClanId,
-    uid: UserId,
-    cfg: Option<&AppConfig>,
-) -> Option<(String, String)> {
-    let member = members.member(clan, uid)?;
-    let name = member.name().to_string();
-    if name.is_empty() {
-        return None;
+    channel: ChannelId,
+    cx: &App,
+) {
+    let cfg = AppConfig::try_global(cx);
+    for att in attachments.iter_mut() {
+        let info =
+            resolve_attachment_uploader(clan, channel, att.uploader_id, att.message_id, cfg, cx);
+        apply_uploader_info(att, info);
     }
-    let avatar = match cfg {
-        Some(cfg) => cfg.avatar_proxy(member.avatar()),
-        None => member.avatar().to_string(),
-    };
-    Some((name, avatar))
+}
+
+pub fn resolve_channel_label(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    hint: SharedString,
+    cx: &App,
+) -> SharedString {
+    if !hint.is_empty() {
+        return hint;
+    }
+    if clan_id.0 != 0 {
+        ChannelList::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .channel(clan_id, channel_id)
+                    .map(|ch| ch.name.clone())
+            })
+            .map(SharedString::from)
+            .unwrap_or_default()
+    } else {
+        DirectMessageStore::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .find(channel_id)
+                    .map(|dm| dm.label.clone())
+            })
+            .map(SharedString::from)
+            .unwrap_or_default()
+    }
+}
+
+fn format_viewer_timestamp(ts: u32) -> SharedString {
+    use chrono::{Datelike, Timelike};
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local))
+        .map(|local| {
+            format!(
+                "{:02}:{:02}:{:02} {}/{}/{}",
+                local.hour(),
+                local.minute(),
+                local.second(),
+                local.day(),
+                local.month(),
+                local.year()
+            )
+            .into()
+        })
+        .unwrap_or_default()
 }
 
 impl Focusable for ImageViewer {
@@ -502,6 +614,7 @@ impl Render for ImageViewer {
         let locale = self.locale(cx);
 
         div()
+            .relative()
             .track_focus(&self.focus_handle)
             .key_context("ImageViewer")
             .size_full()
@@ -510,6 +623,15 @@ impl Render for ImageViewer {
             .bg(theme.bg_tertiary)
             .text_color(theme.text_primary)
             .on_key_down(cx.listener(Self::on_key_down))
+            .when(window_controls::HAS_CUSTOM_TITLE_BAR, |el| {
+                el.child(self.title_bar.clone())
+            })
+            .when(!window_controls::HAS_CUSTOM_TITLE_BAR, |el| {
+                el.child(self.render_app_title_strip(&theme))
+            })
+            .when(!self.channel_label.is_empty(), |el| {
+                el.child(self.render_channel_header(&theme))
+            })
             .child(
                 div()
                     .flex_1()
@@ -525,10 +647,45 @@ impl Render for ImageViewer {
             .when_some(self.context_menu, |el, pos| {
                 el.child(context_menu_at(pos, self.build_context_menu(&locale, cx)))
             })
+            .when(window_controls::is_edge_resizable(), |el| {
+                el.child(window_controls::render_resize_edges(window))
+            })
     }
 }
 
 impl ImageViewer {
+    fn render_app_title_strip(&self, theme: &Theme) -> impl IntoElement {
+        div()
+            .flex_shrink_0()
+            .h_8()
+            .w_full()
+            .flex()
+            .items_center()
+            .bg(theme.title_bar_bg)
+            .child(
+                div()
+                    .px_3()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .child(APP_NAME),
+            )
+    }
+
+    fn render_channel_header(&self, theme: &Theme) -> impl IntoElement {
+        div()
+            .flex_shrink_0()
+            .h(px(30.))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.bg_secondary)
+            .text_color(theme.text_primary)
+            .text_size(px(13.))
+            .child(self.channel_label.clone())
+    }
+
     fn render_main_area(
         &self,
         theme: &Theme,
@@ -800,8 +957,30 @@ impl ImageViewer {
     ) -> impl IntoElement {
         let att = self.current();
         let uploader = att.map(|a| a.uploader_name.clone()).unwrap_or_default();
-        let avatar = att.map(|a| a.uploader_avatar.clone()).unwrap_or_default();
-        let day = att.map(|a| a.day_label.clone()).unwrap_or_default();
+        let avatar_widget = {
+            let mut avatar = Avatar::new()
+                .name(uploader.clone())
+                .size_px(px(32.))
+                .image_cache(self.image_cache.clone());
+            if let Some(att) = att {
+                let proxied = att.uploader_avatar.clone();
+                let raw = att.uploader_avatar_raw.clone();
+                if !proxied.is_empty() {
+                    let use_fallback =
+                        !raw.is_empty() && raw.as_ref() != proxied.as_ref();
+                    avatar = avatar.src(proxied);
+                    if use_fallback {
+                        avatar = avatar.fallback_src(raw);
+                    }
+                } else if !raw.is_empty() {
+                    avatar = avatar.src(raw);
+                }
+            }
+            avatar
+        };
+        let timestamp = att
+            .map(|a| format_viewer_timestamp(a.create_time_seconds))
+            .unwrap_or_default();
         let counter = if self.attachments.is_empty() {
             SharedString::default()
         } else {
@@ -817,13 +996,7 @@ impl ImageViewer {
             .items_center()
             .gap_2()
             .min_w_0()
-            .child(
-                Avatar::new()
-                    .name(uploader.clone())
-                    .src(avatar)
-                    .with_size(Size::Small)
-                    .image_cache(self.image_cache.clone()),
-            )
+            .child(avatar_widget)
             .child(
                 div()
                     .flex()
@@ -834,7 +1007,7 @@ impl ImageViewer {
                         div()
                             .text_size(px(11.))
                             .text_color(theme.text_muted)
-                            .child(day),
+                            .child(timestamp),
                     ),
             );
 

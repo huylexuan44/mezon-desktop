@@ -5,8 +5,8 @@ use gpui::{
     Window, div, img, list, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelAttachment, ChannelId, ClanId, ClanMembersStore, GalleryStore, LoadDirection,
-    MediaFilter, Settings, UploaderInfo, UserId, enrich_uploader,
+    AppConfig, ChannelAttachment, ChannelId, ClanId, GalleryStore, LoadDirection,
+    MediaFilter, Settings, UserId, enrich_uploader, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -265,7 +265,7 @@ impl GalleryModal {
         let Some(index) = playlist.iter().position(|a| a.id == attachment_id) else {
             return;
         };
-        enrich_playlist(&mut playlist, self.clan_id, cx);
+        enrich_playlist(&mut playlist, self.clan_id, self.channel_id, cx);
         open_image_viewer(
             OpenViewerRequest {
                 clan_id: self.clan_id,
@@ -300,20 +300,18 @@ fn flush_bucket(rows: &mut Vec<GalleryRow>, bucket: &mut Vec<ChannelAttachment>)
     }
 }
 
-fn enrich_playlist(playlist: &mut [ChannelAttachment], clan: ClanId, cx: &App) {
-    let Some(members) = ClanMembersStore::try_global(cx) else {
-        return;
-    };
+fn enrich_playlist(playlist: &mut [ChannelAttachment], clan: ClanId, channel_id: ChannelId, cx: &App) {
     let cfg = AppConfig::try_global(cx);
-    let members = members.read(cx);
-    enrich_uploader(playlist, |uid: UserId| {
-        members.member(clan, uid).map(|m| UploaderInfo {
-            name: m.name().to_string(),
-            avatar: match cfg {
-                Some(cfg) => cfg.avatar_proxy(m.avatar()),
-                None => m.avatar().to_string(),
-            },
-        })
+    enrich_uploader(playlist, |att| {
+        let info = resolve_attachment_uploader(
+            clan,
+            channel_id,
+            att.uploader_id,
+            att.message_id,
+            cfg,
+            cx,
+        );
+        (!info.name.is_empty()).then_some(info)
     });
 }
 

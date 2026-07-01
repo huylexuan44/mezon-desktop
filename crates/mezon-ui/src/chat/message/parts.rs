@@ -555,7 +555,7 @@ fn open_viewer_from_message(
     anchor_before: u32,
     cx: &mut gpui::App,
 ) {
-    use crate::image_viewer::{OpenViewerRequest, open_image_viewer};
+    use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
     use crate::router::{Route, Router};
     use mezon_store::ClanId;
 
@@ -582,7 +582,7 @@ fn open_viewer_from_message(
         OpenViewerRequest {
             clan_id,
             channel_id,
-            channel_label: SharedString::default(),
+            channel_label: resolve_channel_label(clan_id, channel_id, SharedString::default(), cx),
             settings: settings.clone(),
             attachments: Vec::new(),
             selected_index: 0,
