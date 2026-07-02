@@ -142,6 +142,7 @@ pub struct ChannelList {
     cache: KeyedCache<ClanId, Vec<Category>>,
     app_channels_cache: HashMap<ClanId, Vec<AppChannel>>,
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
+    pending_channel_badges: HashMap<ChannelId, u32>,
     loading: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
@@ -243,6 +244,7 @@ impl ChannelList {
             cache: KeyedCache::new(None),
             app_channels_cache: HashMap::new(),
             topic_parent_badges: HashMap::new(),
+            pending_channel_badges: HashMap::new(),
             loading: HashSet::new(),
             active_clan_id: None,
             active_channel_id: None,
@@ -269,6 +271,10 @@ impl ChannelList {
         self.channel_index
             .borrow_mut()
             .location(clan_id, categories, channel_id)
+    }
+
+    fn merge_pending_badges(&mut self, categories: &mut [Category]) {
+        merge_pending_badges_into(&mut self.pending_channel_badges, categories);
     }
 
     fn register_realtime(cx: &mut Context<Self>) {
@@ -332,10 +338,11 @@ impl ChannelList {
         cx.spawn(async move |this, cx| {
             let result = Self::fetch_clan_data(&api, clan_id).await;
             match result {
-                Ok((categories, app_channels, last_messages)) => {
+                Ok((mut categories, app_channels, last_messages)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
+                        this.merge_pending_badges(&mut categories);
                         this.cache.insert(clan_id, categories, None);
                         this.invalidate_channel_index(clan_id);
                         if let Some(store) = MessagesStore::try_global(cx) {
@@ -559,6 +566,7 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let mut visible_changed = false;
+        let mut found = false;
         if let Some((cat_idx, ch_idx)) = self.channel_location(clan_id, channel_id)
             && let Some(ch) = self
                 .cache
@@ -566,6 +574,7 @@ impl ChannelList {
                 .and_then(|cats| cats.get_mut(cat_idx))
                 .and_then(|cat| cat.channels.get_mut(ch_idx))
         {
+            found = true;
             let was_unread = ch.is_unread();
             let was_badge = ch.badge_count;
             if ts > 0 {
@@ -584,6 +593,9 @@ impl ChannelList {
                 ch.badge_count = ch.badge_count.saturating_add(1);
             }
             visible_changed = was_unread != ch.is_unread() || was_badge != ch.badge_count;
+        }
+        if !found && is_mention && !seen {
+            *self.pending_channel_badges.entry(channel_id).or_default() += 1;
         }
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
@@ -612,17 +624,23 @@ impl ChannelList {
     pub fn apply_read(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
         let mut cleared_badge = 0;
         let mut should_notify = false;
+        let mut found = false;
         if let Some(categories) = self.cache.get_mut(&clan_id)
             && let Some(ch) = categories
                 .iter_mut()
                 .flat_map(|c| &mut c.channels)
                 .find(|ch| ch.id == channel_id)
         {
+            found = true;
             cleared_badge = ch.badge_count;
             should_notify = ch.is_unread() || cleared_badge > 0;
             ch.badge_count = 0;
             ch.last_seen_timestamp = ch.last_sent_timestamp;
             ch.last_seen_message_id = ch.last_sent_message_id;
+        }
+        let overlaid = self.pending_channel_badges.remove(&channel_id);
+        if !found {
+            cleared_badge = overlaid.unwrap_or(0);
         }
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
         if should_notify {
@@ -680,7 +698,10 @@ impl ChannelList {
     ) {
         let changed = match self.cache.get_mut(&clan_id) {
             Some(categories) => add_channel_badge(categories, parent_id),
-            None => false,
+            None => {
+                *self.pending_channel_badges.entry(parent_id).or_default() += 1;
+                false
+            }
         };
         if changed {
             record_topic_parent_badge(&mut self.topic_parent_badges, clan_id, parent_id, topic_id);
@@ -1435,6 +1456,19 @@ fn update_channel(
     found
 }
 
+fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: &mut [Category]) {
+    if pending.is_empty() {
+        return;
+    }
+    for category in categories.iter_mut() {
+        for ch in category.channels.iter_mut() {
+            if let Some(overlay) = pending.remove(&ch.id) {
+                ch.badge_count = ch.badge_count.max(overlay);
+            }
+        }
+    }
+}
+
 fn add_channel_badge(categories: &mut [Category], channel_id: ChannelId) -> bool {
     if let Some(ch) = categories
         .iter_mut()
@@ -2146,6 +2180,49 @@ mod tests {
         let tracked = &topic_badges[&TOPIC];
         assert_eq!(tracked.parent_id, PARENT_CHANNEL);
         assert_eq!(tracked.count, 1);
+    }
+
+    #[test]
+    fn overlay_merge_applies_when_server_badge_zero() {
+        let mut categories = categories();
+        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(10), 1)]);
+        merge_pending_badges_into(&mut pending, &mut categories);
+        assert_eq!(categories[0].channels[0].badge_count, 1);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn overlay_merge_takes_max_of_server_and_overlay() {
+        let mut categories = categories();
+        categories[0].channels[0].badge_count = 2;
+        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(10), 1)]);
+        merge_pending_badges_into(&mut pending, &mut categories);
+        assert_eq!(categories[0].channels[0].badge_count, 2);
+
+        categories[0].channels[1].badge_count = 1;
+        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(11), 3)]);
+        merge_pending_badges_into(&mut pending, &mut categories);
+        assert_eq!(categories[0].channels[1].badge_count, 3);
+    }
+
+    #[test]
+    fn overlay_merge_consumes_entry_so_refetch_does_not_readd() {
+        let mut categories = categories();
+        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(10), 1)]);
+        merge_pending_badges_into(&mut pending, &mut categories);
+        assert_eq!(categories[0].channels[0].badge_count, 1);
+
+        categories[0].channels[0].badge_count = 0;
+        merge_pending_badges_into(&mut pending, &mut categories);
+        assert_eq!(categories[0].channels[0].badge_count, 0);
+    }
+
+    #[test]
+    fn overlay_merge_keeps_entries_for_channels_in_another_clan() {
+        let mut categories = categories();
+        let mut pending: HashMap<ChannelId, u32> = HashMap::from([(ChannelId(999), 4)]);
+        merge_pending_badges_into(&mut pending, &mut categories);
+        assert_eq!(pending.get(&ChannelId(999)), Some(&4));
     }
 
     #[test]

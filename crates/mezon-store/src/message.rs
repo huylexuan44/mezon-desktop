@@ -9,6 +9,7 @@ use gpui::SharedString;
 use mezon_client::transport::{ApiMessageContent, ApiMessageReaction, ContentToken};
 
 use crate::album_layout::AlbumLayout;
+use crate::config::AppConfig;
 use crate::ids::{MessageId, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
@@ -169,15 +170,82 @@ pub struct MessageReference {
     pub has_attachment: bool,
 }
 
+/// A single reacting user and how many times they reacted with an emoji
+/// (cf. React `SenderInfoOptionals`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReactionSender {
+    pub sender_id: String,
+    pub count: u32,
+}
+
 /// An aggregated emoji reaction (grouped by emoji across all reacting users).
+/// `emoji_proxied`/`count`/`count_label` are derived fields refreshed via
+/// `refresh` on every mutation so the render path does no per-frame work.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {
     /// Aggregation key (emoji id when present, else shortname).
     pub key: String,
-    pub emoji: String,
-    pub emoji_id: String,
+    pub emoji: SharedString,
+    pub emoji_id: SharedString,
+    pub emoji_proxied: SharedString,
     pub count: u32,
-    pub sender_ids: Vec<String>,
+    pub count_label: SharedString,
+    pub senders: Vec<ReactionSender>,
+}
+
+impl Reaction {
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    pub fn has_sender(&self, sender_id: &str) -> bool {
+        self.senders
+            .iter()
+            .any(|s| s.sender_id == sender_id && s.count > 0)
+    }
+
+    fn refresh(&mut self, cfg: Option<&AppConfig>) {
+        self.count = self.senders.iter().map(|s| s.count).sum();
+        self.count_label = format_reaction_count(self.count).into();
+        self.emoji_proxied = cfg
+            .map(|c| c.emoji_src(&self.emoji_id))
+            .unwrap_or_default()
+            .into();
+    }
+}
+
+pub fn format_reaction_count(count: u32) -> String {
+    if count < 1000 {
+        return count.to_string();
+    }
+    const UNITS: [&str; 5] = ["", "K", "M", "G", "T"];
+    let unit_index = (((count as f64).log10() / 3.0).floor() as usize).min(UNITS.len() - 1);
+    let value = count as f64 / 1000f64.powi(unit_index as i32);
+    format!("{:.1}{}", value, UNITS[unit_index])
+}
+
+pub fn reaction_key<'a>(emoji_id: &'a str, emoji: &'a str) -> &'a str {
+    if !emoji_id.is_empty() && emoji_id != "0" {
+        emoji_id
+    } else {
+        emoji
+    }
+}
+
+fn upsert_sender(senders: &mut Vec<ReactionSender>, sender_id: &str, count: u32, set: bool) {
+    match senders.iter_mut().find(|s| s.sender_id == sender_id) {
+        Some(s) => {
+            s.count = if set {
+                count
+            } else {
+                s.count.saturating_add(count)
+            };
+        }
+        None => senders.push(ReactionSender {
+            sender_id: sender_id.to_string(),
+            count,
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -369,39 +437,33 @@ fn mention_user_id_targets_viewer(uid: &str, viewer_id: UserId) -> bool {
 
 /// Aggregate raw per-user reaction entries into per-emoji totals (cf. React
 /// `combineMessageReactions`).
-pub fn aggregate_reactions(raw: &[ApiMessageReaction]) -> Vec<Reaction> {
+pub fn aggregate_reactions(raw: &[ApiMessageReaction], cfg: Option<&AppConfig>) -> Vec<Reaction> {
     let mut out: Vec<Reaction> = Vec::new();
     for r in raw {
         if r.action {
             continue;
         }
-        let key = if !r.emoji_id.is_empty() && r.emoji_id != "0" {
-            r.emoji_id.clone()
-        } else {
-            r.emoji.clone()
-        };
+        let key = reaction_key(&r.emoji_id, &r.emoji);
         if key.is_empty() {
             continue;
         }
-        let add = if r.count == 0 { 1 } else { r.count };
-        if let Some(slot) = out.iter_mut().find(|x| x.key == key) {
-            slot.count = slot.count.saturating_add(add);
-            if !r.sender_id.is_empty() && !slot.sender_ids.contains(&r.sender_id) {
-                slot.sender_ids.push(r.sender_id.clone());
+        let count = if r.count == 0 { 1 } else { r.count };
+        let idx = match out.iter().position(|x| x.key == key) {
+            Some(i) => i,
+            None => {
+                out.push(Reaction {
+                    key: key.to_string(),
+                    emoji: r.emoji.clone().into(),
+                    emoji_id: r.emoji_id.clone().into(),
+                    ..Default::default()
+                });
+                out.len() - 1
             }
-        } else {
-            out.push(Reaction {
-                key,
-                emoji: r.emoji.clone(),
-                emoji_id: r.emoji_id.clone(),
-                count: add,
-                sender_ids: if r.sender_id.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![r.sender_id.clone()]
-                },
-            });
-        }
+        };
+        upsert_sender(&mut out[idx].senders, &r.sender_id, count, true);
+    }
+    for r in out.iter_mut() {
+        r.refresh(cfg);
     }
     out.retain(|r| r.count > 0);
     out
@@ -416,43 +478,67 @@ pub fn apply_reaction_event(
     emoji: &str,
     sender_id: &str,
     removed: bool,
+    cfg: Option<&AppConfig>,
 ) {
-    let key = if !emoji_id.is_empty() && emoji_id != "0" {
-        emoji_id
-    } else {
-        emoji
-    };
+    let key = reaction_key(emoji_id, emoji);
     if key.is_empty() {
         return;
     }
     if removed {
         if let Some(pos) = reactions.iter().position(|x| x.key == key) {
-            let rec = &mut reactions[pos];
-            rec.sender_ids.retain(|s| s != sender_id);
-            rec.count = rec.count.saturating_sub(1);
-            if rec.count == 0 || rec.sender_ids.is_empty() {
+            reactions[pos].senders.retain(|s| s.sender_id != sender_id);
+            reactions[pos].refresh(cfg);
+            if reactions[pos].count == 0 {
                 reactions.remove(pos);
             }
         }
     } else if let Some(rec) = reactions.iter_mut().find(|x| x.key == key) {
-        if sender_id.is_empty() {
-            rec.count += 1;
-        } else if !rec.sender_ids.iter().any(|s| s == sender_id) {
-            rec.sender_ids.push(sender_id.to_string());
-            rec.count += 1;
-        }
+        upsert_sender(&mut rec.senders, sender_id, 1, false);
+        rec.refresh(cfg);
     } else {
-        reactions.push(Reaction {
+        let mut rec = Reaction {
             key: key.to_string(),
-            emoji: emoji.to_string(),
-            emoji_id: emoji_id.to_string(),
-            count: 1,
-            sender_ids: if sender_id.is_empty() {
-                Vec::new()
-            } else {
-                vec![sender_id.to_string()]
-            },
-        });
+            emoji: emoji.into(),
+            emoji_id: emoji_id.into(),
+            senders: vec![ReactionSender {
+                sender_id: sender_id.to_string(),
+                count: 1,
+            }],
+            ..Default::default()
+        };
+        rec.refresh(cfg);
+        reactions.push(rec);
+    }
+}
+
+/// Undo one optimistic reaction after a failed send (cf. `send_message` rollback).
+pub fn rollback_reaction(
+    reactions: &mut Vec<Reaction>,
+    emoji_id: &str,
+    emoji: &str,
+    sender_id: &str,
+    was_remove: bool,
+    cfg: Option<&AppConfig>,
+) {
+    if was_remove {
+        apply_reaction_event(reactions, emoji_id, emoji, sender_id, false, cfg);
+        return;
+    }
+    let key = reaction_key(emoji_id, emoji);
+    let Some(pos) = reactions.iter().position(|x| x.key == key) else {
+        return;
+    };
+    if let Some(s) = reactions[pos]
+        .senders
+        .iter_mut()
+        .find(|s| s.sender_id == sender_id)
+    {
+        s.count = s.count.saturating_sub(1);
+    }
+    reactions[pos].senders.retain(|s| s.count > 0);
+    reactions[pos].refresh(cfg);
+    if reactions[pos].count == 0 {
+        reactions.remove(pos);
     }
 }
 
@@ -883,11 +969,63 @@ mod tests {
                 action: true,
             },
         ];
-        let agg = aggregate_reactions(&raw);
+        let agg = aggregate_reactions(&raw, None);
         assert_eq!(agg.len(), 1);
         assert_eq!(agg[0].key, "10");
-        assert_eq!(agg[0].count, 2);
-        assert_eq!(agg[0].sender_ids, vec!["u1".to_string(), "u2".to_string()]);
+        assert_eq!(agg[0].count(), 2);
+        assert_eq!(agg[0].count_label, "2");
+        let senders: Vec<&str> = agg[0]
+            .senders
+            .iter()
+            .map(|s| s.sender_id.as_str())
+            .collect();
+        assert_eq!(senders, vec!["u1", "u2"]);
+    }
+
+    #[test]
+    fn apply_reaction_add_increments_same_sender_count() {
+        let mut reactions = vec![Reaction {
+            key: "10".into(),
+            emoji: ":a:".into(),
+            emoji_id: "10".into(),
+            count: 1,
+            senders: vec![ReactionSender {
+                sender_id: "u1".into(),
+                count: 1,
+            }],
+            ..Default::default()
+        }];
+        apply_reaction_event(&mut reactions, "10", ":a:", "u2", false, None);
+        assert_eq!(reactions[0].count(), 2);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        assert_eq!(reactions[0].count(), 3);
+        assert!(reactions[0].has_sender("u1"));
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", true, None);
+        assert_eq!(reactions[0].count(), 1);
+        assert!(!reactions[0].has_sender("u1"));
+        apply_reaction_event(&mut reactions, "10", ":a:", "u2", true, None);
+        assert!(reactions.is_empty());
+    }
+
+    #[test]
+    fn rollback_reaction_undoes_optimistic_add() {
+        let mut reactions = Vec::new();
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        apply_reaction_event(&mut reactions, "10", ":a:", "u1", false, None);
+        assert_eq!(reactions[0].count(), 2);
+        rollback_reaction(&mut reactions, "10", ":a:", "u1", false, None);
+        assert_eq!(reactions[0].count(), 1);
+        rollback_reaction(&mut reactions, "10", ":a:", "u1", false, None);
+        assert!(reactions.is_empty());
+    }
+
+    #[test]
+    fn format_reaction_count_matches_react() {
+        assert_eq!(format_reaction_count(0), "0");
+        assert_eq!(format_reaction_count(999), "999");
+        assert_eq!(format_reaction_count(1000), "1.0K");
+        assert_eq!(format_reaction_count(1500), "1.5K");
+        assert_eq!(format_reaction_count(1_000_000), "1.0M");
     }
 
     #[test]

@@ -198,7 +198,6 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
-                tracing::warn!("DBG RootView render authed route={route:?}");
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile

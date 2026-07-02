@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use gpui::{Entity, SharedString, WeakEntity};
-use mezon_store::{MessageId, ProfileContext, Settings};
+use gpui::{App, Entity, SharedString, WeakEntity};
+use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings};
 
 use super::channel_messages::ChannelMessages;
 use super::gif_video::GifVideoView;
 use super::video_player::VideoPlayerView;
+use crate::components::primitives::InputState;
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -40,6 +41,7 @@ pub enum WelcomeContext {
 }
 
 pub struct RowCtx<'a> {
+    pub app: &'a App,
     pub theme: &'a Theme,
     pub locale: &'a str,
     pub current_user_id: &'a str,
@@ -56,6 +58,20 @@ pub struct RowCtx<'a> {
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
+    /// Active clan of the currently open channel (permission-substitute + Topic gating).
+    pub clan_id: Option<ClanId>,
+    pub channel_type: Option<ChannelType>,
+    /// The open channel is not itself a thread (`parent_id.is_none()`).
+    pub channel_top_level: bool,
+    /// Reduced substitute for React's role-permission checks: clan creator only.
+    pub is_clan_owner: bool,
+    /// Message currently being edited inline, if any (shared across all rows).
+    pub editing_id: Option<MessageId>,
+    pub edit_input: Option<Entity<InputState>>,
+    /// Up to 3 most-recently-used emoji for the hover toolbar's quick-react pills.
+    pub emoji_recent: &'a [Emoji],
+    /// `common.comingSoon`, resolved once per render pass (not per row).
+    pub coming_soon: SharedString,
 }
 
 pub const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17_ac_86;

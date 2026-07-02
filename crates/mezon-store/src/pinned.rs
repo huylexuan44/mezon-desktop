@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, Global, SharedString, Subscription};
 use mezon_client::AppApi;
-use mezon_client::transport::ApiPinMessage;
 use mezon_client::RealtimeEvent;
+use mezon_client::transport::ApiPinMessage;
 use mezon_proto::realtime::LastPinMessageEvent;
 
 use crate::AppConfig;
@@ -193,15 +193,12 @@ impl PinnedMessagesStore {
             return;
         }
         let message_id = pin.message_id.to_string();
-        if self
-            .messages
-            .iter()
-            .any(|m| m.message_id == message_id)
-        {
+        if self.messages.iter().any(|m| m.message_id == message_id) {
             return;
         }
         let cfg = AppConfig::try_global(cx);
-        self.messages.insert(0, pinned_from_last_pin_event(pin, cfg));
+        self.messages
+            .insert(0, pinned_from_last_pin_event(pin, cfg));
         cx.notify();
     }
 
@@ -219,12 +216,44 @@ impl PinnedMessagesStore {
         let message_id = ev.message_id.to_string();
         let pin_id = ev.id.to_string();
         let before = self.messages.len();
-        self.messages.retain(|m| {
-            m.message_id != message_id && m.id != pin_id && m.id != message_id
-        });
+        self.messages
+            .retain(|m| m.message_id != message_id && m.id != pin_id && m.id != message_id);
         if self.messages.len() != before {
             cx.notify();
         }
+    }
+
+    pub fn is_pinned(&self, message_id: &str) -> bool {
+        self.messages.iter().any(|m| m.message_id == message_id)
+    }
+
+    /// Pin a message. No optimistic local insert — the realtime `LastPinMessage`
+    /// echo carries the full sender/content/time metadata and idempotently inserts
+    /// the row (see `handle_last_pin`).
+    pub fn pin(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.channel_id.clone() else {
+            return;
+        };
+        let Some(clan_id) = self.clan_id.clone() else {
+            return;
+        };
+        let (Ok(message_id), Ok(channel_id), Ok(clan_id)) = (
+            message_id.parse::<i64>(),
+            channel_id.parse::<i64>(),
+            clan_id.parse::<i64>(),
+        ) else {
+            return;
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .create_pin_message(message_id, channel_id, clan_id)
+                .await
+            {
+                tracing::error!("create_pin_message failed: {e}");
+            }
+        })
+        .detach();
     }
 
     pub fn unpin(&mut self, pin_id: &str, message_id: &str, cx: &mut Context<Self>) {

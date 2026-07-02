@@ -76,6 +76,21 @@ impl ContextMenu {
         self
     }
 
+    pub fn danger_item_icon(
+        mut self,
+        label: impl Into<SharedString>,
+        icon: IconName,
+        on_click: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.items.push(Item::Entry {
+            label: label.into(),
+            icon: Some(icon),
+            danger: true,
+            on_click: Rc::new(on_click),
+        });
+        self
+    }
+
     pub fn separator(mut self) -> Self {
         self.items.push(Item::Separator);
         self
@@ -90,7 +105,7 @@ impl ContextMenu {
 impl RenderOnce for ContextMenu {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let bg = theme.bg_floating;
+        let bg = theme.tokens.bg_theme_contexify;
         let border = theme.border;
         let text = theme.text_primary;
         let muted = theme.text_secondary;

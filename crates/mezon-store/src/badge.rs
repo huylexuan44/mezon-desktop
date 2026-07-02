@@ -229,11 +229,12 @@ impl BadgeService {
                 let message_id = MessageId(m.message_id);
 
                 if is_dm_message(m) {
-                    let increment_unread =
-                        should_increment_dm_unread(cx, channel_id, from_me) && !is_content_mutation(m);
-                    DirectMessageStore::global(cx).update(cx, |dm, cx| {
-                        dm.note_message(channel_id, ts, from_me, increment_unread, cx);
-                    });
+                    if !is_content_mutation(m) {
+                        let increment_unread = should_increment_dm_unread(cx, channel_id, from_me);
+                        DirectMessageStore::global(cx).update(cx, |dm, cx| {
+                            dm.note_message(channel_id, ts, from_me, increment_unread, cx);
+                        });
+                    }
                 } else {
                     let clan_id = ClanId(m.clan_id);
                     let is_new_message = !is_content_mutation(m);
@@ -421,6 +422,13 @@ impl BadgeService {
         }
         let (message_id_raw, content_time) =
             mezon_client::transport::parse_notification_content(&notif.content);
+        tracing::debug!(
+            message_id = message_id_raw,
+            content_time,
+            content_len = notif.content.len(),
+            content_first_byte = notif.content.first().copied(),
+            "badge: parsed notification content"
+        );
         let message_id = MessageId(message_id_raw);
         if message_id.is_zero() {
             tracing::debug!(
