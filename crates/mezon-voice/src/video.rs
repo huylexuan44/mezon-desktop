@@ -43,6 +43,23 @@ impl VideoFrameStore {
         self.frames.lock().get(&key).cloned()
     }
 
+    pub fn publish_seq(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
+    }
+
+    pub fn take_new(&self, key: u64, since: Option<u64>) -> Option<VideoFrameData> {
+        let mut frames = self.frames.lock();
+        let is_new = match frames.get(&key) {
+            Some(frame) => Some(frame.seq) != since,
+            None => false,
+        };
+        if !is_new {
+            return None;
+        }
+        let frame = frames.remove(&key)?;
+        Some(Arc::try_unwrap(frame).unwrap_or_else(|frame| (*frame).clone()))
+    }
+
     pub fn remove(&self, key: u64) {
         self.frames.lock().remove(&key);
     }
@@ -263,5 +280,60 @@ pub fn yuyv422_to_i420(
                 v_plane[cy * stride_v + cx] = yuyv[p + 3];
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_new_moves_frame_out_and_clears() {
+        let store = VideoFrameStore::default();
+        store.publish(7, 2, 2, vec![1, 2, 3, 4]);
+        assert_eq!(store.publish_seq(), 1);
+
+        let frame = store.take_new(7, None).expect("frame present");
+        assert_eq!((frame.width, frame.height), (2, 2));
+        assert_eq!(frame.bgra, vec![1, 2, 3, 4]);
+
+        assert!(store.take_new(7, None).is_none());
+        assert!(store.get(7).is_none());
+    }
+
+    #[test]
+    fn take_new_skips_when_seq_unchanged() {
+        let store = VideoFrameStore::default();
+        store.publish(1, 1, 1, vec![0, 0, 0, 0]);
+        let seq = store.get(1).unwrap().seq;
+
+        assert!(store.take_new(1, Some(seq)).is_none());
+        assert!(store.take_new(1, Some(seq + 1)).is_some());
+    }
+
+    #[test]
+    fn take_new_round_trip_publish_take_republish_take() {
+        let store = VideoFrameStore::default();
+        let key = 42;
+
+        store.publish(key, 1, 1, vec![1]);
+        let first = store.take_new(key, None).expect("first frame");
+        let first_seq = first.seq;
+        assert_eq!(first.bgra, vec![1]);
+
+        store.publish(key, 1, 1, vec![2]);
+        let second = store
+            .take_new(key, Some(first_seq))
+            .expect("frame after republish");
+        assert_eq!(second.bgra, vec![2]);
+        assert_ne!(second.seq, first_seq);
+
+        store.publish(key, 1, 1, vec![3]);
+        let current_seq = store.get(key).unwrap().seq;
+        assert!(store.take_new(key, Some(current_seq)).is_none());
+        let third = store
+            .take_new(key, Some(current_seq.wrapping_sub(1)))
+            .expect("inequality not ordering");
+        assert_eq!(third.bgra, vec![3]);
     }
 }

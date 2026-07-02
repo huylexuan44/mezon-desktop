@@ -137,19 +137,7 @@ impl VoiceStore {
     }
 
     fn current_max_frame_seq(&self) -> Option<u64> {
-        let store = self.frame_store.as_ref()?;
-        let mut max_seq = None;
-        for participant in &self.participants {
-            for key in [participant.camera, participant.screenshare]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(frame) = store.get(key) {
-                    max_seq = Some(max_seq.map_or(frame.seq, |m: u64| m.max(frame.seq)));
-                }
-            }
-        }
-        max_seq
+        Some(self.frame_store.as_ref()?.publish_seq())
     }
 
     fn cached_token_for(&self, channel_id: &str) -> Option<String> {
@@ -232,25 +220,26 @@ impl VoiceStore {
 
     pub fn render_image(&self, key: u64) -> Option<Arc<RenderImage>> {
         let store = self.frame_store.as_ref()?;
-        let frame = store.get(key)?;
-        let mut cache = self.render_cache.lock();
-        if let Some(entry) = cache.get(&key)
-            && entry.seq == frame.seq
-        {
-            return Some(entry.image.clone());
-        }
-        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
+        let cached_seq = self.render_cache.lock().get(&key).map(|entry| entry.seq);
+        let Some(frame) = store.take_new(key, cached_seq) else {
+            return self
+                .render_cache
+                .lock()
+                .get(&key)
+                .map(|entry| entry.image.clone());
+        };
+        let seq = frame.seq;
+        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
         let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
             buffer,
         )]));
-        let previous = cache.insert(
+        let previous = self.render_cache.lock().insert(
             key,
             CachedRenderImage {
-                seq: frame.seq,
+                seq,
                 image: image.clone(),
             },
         );
-        drop(cache);
         if let Some(previous) = previous {
             self.pending_texture_drops.lock().push(previous.image);
         }

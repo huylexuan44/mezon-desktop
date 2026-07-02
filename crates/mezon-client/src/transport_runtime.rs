@@ -273,6 +273,14 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn emoji_recent_list(&self) -> Result<mezon_proto::api::EmojiRecentList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.emoji_recent_list().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_stickers_by_user_id(
         &self,
     ) -> Result<mezon_proto::api::StickerListedResponse> {
@@ -461,6 +469,25 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    /// Pin a message.
+    pub async fn create_pin_message(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::ChannelMessageHeader> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_pin_message(message_id, channel_id, clan_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Unpin (delete) a pinned message.
     pub async fn delete_pin_message(
         &self,
@@ -515,6 +542,81 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .join_chat(clan_id, channel_id, channel_type, is_public)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn react_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        emoji_id: i64,
+        emoji: &str,
+        count: i32,
+        message_sender_id: i64,
+        mode: i32,
+        is_public: bool,
+        remove: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let emoji = emoji.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .react_channel_message(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        emoji_id,
+                        &emoji,
+                        count,
+                        message_sender_id,
+                        mode,
+                        is_public,
+                        remove,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Update a channel message's content.
+    pub async fn update_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_channel_message(clan_id, channel_id, message_id, &content)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Delete a channel message.
+    pub async fn delete_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .delete_channel_message(clan_id, channel_id, message_id)
                     .await
             })
             .await

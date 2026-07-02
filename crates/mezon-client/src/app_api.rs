@@ -265,6 +265,41 @@ impl AppApi {
             .await
     }
 
+    pub async fn create_pin_message(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .create_pin_message(message_id, channel_id, clan_id)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+    ) -> Result<()> {
+        self.transport
+            .update_channel_message(clan_id, channel_id, message_id, content)
+            .await
+    }
+
+    pub async fn delete_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+    ) -> Result<()> {
+        self.transport
+            .delete_channel_message(clan_id, channel_id, message_id)
+            .await
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
@@ -279,6 +314,36 @@ impl AppApi {
 
     pub async fn join_clan_chat(&self, clan_id: i64) -> Result<()> {
         self.transport.join_clan_chat(clan_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn react_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        emoji_id: i64,
+        emoji: &str,
+        count: i32,
+        message_sender_id: i64,
+        mode: i32,
+        is_public: bool,
+        remove: bool,
+    ) -> Result<()> {
+        self.transport
+            .react_channel_message(
+                clan_id,
+                channel_id,
+                message_id,
+                emoji_id,
+                emoji,
+                count,
+                message_sender_id,
+                mode,
+                is_public,
+                remove,
+            )
+            .await
     }
 
     pub async fn write_last_seen_message(
@@ -352,6 +417,11 @@ impl AppApi {
     pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
         let resp = self.transport.list_emojis_by_user_id().await?;
         Ok(resp.emoji_list)
+    }
+
+    pub async fn emoji_recent_list(&self) -> Result<Vec<mezon_proto::api::EmojiRecent>> {
+        let resp = self.transport.emoji_recent_list().await?;
+        Ok(resp.emoji_recents)
     }
 
     pub async fn list_roles(

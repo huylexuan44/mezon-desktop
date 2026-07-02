@@ -629,6 +629,14 @@ fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
 }
 
 pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
+    if content.is_empty() {
+        return (0, 0);
+    }
+    if !matches!(content.first().copied(), Some(b'{') | Some(b'['))
+        && let Ok(fcm) = api::DirectFcmProto::decode(content)
+    {
+        return (fcm.message_id, i64::from(fcm.create_time_seconds));
+    }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
         return (0, 0);
     };
@@ -5651,6 +5659,7 @@ impl MezonTransport {
     }
 
     /// React channel message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn react_channel_message(
         &self,
         clan_id: i64,
@@ -5659,6 +5668,10 @@ impl MezonTransport {
         emoji_id: i64,
         emoji: &str,
         count: i32,
+        message_sender_id: i64,
+        mode: i32,
+        is_public: bool,
+        remove: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MessageReaction {
@@ -5668,6 +5681,10 @@ impl MezonTransport {
             emoji_id,
             emoji: emoji.to_string(),
             count,
+            message_sender_id,
+            mode,
+            is_public,
+            action: remove,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6426,6 +6443,18 @@ mod tests {
     fn notification_content_malformed_is_zero() {
         assert_eq!(parse_notification_content(&[0xff, 0x00, 0x12]), (0, 0));
         assert_eq!(parse_notification_content(&[]), (0, 0));
+    }
+
+    #[test]
+    fn notification_content_decodes_direct_fcm_protobuf() {
+        let fcm = api::DirectFcmProto {
+            message_id: 987654321,
+            create_time_seconds: 1700000000,
+            content: "hi @bob".into(),
+            ..Default::default()
+        };
+        let bytes = fcm.encode_to_vec();
+        assert_eq!(parse_notification_content(&bytes), (987654321, 1700000000));
     }
 
     #[test]

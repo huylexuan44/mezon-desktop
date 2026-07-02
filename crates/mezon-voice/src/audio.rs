@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -14,16 +15,36 @@ fn flush_capture(
     apm: &SharedApm,
     rate: i32,
     channels: i32,
+    delay_ms: i32,
     tx: &flume::Sender<Vec<i16>>,
 ) {
     if frame == 0 {
         return;
     }
+    let mut guard = apm.lock();
+    let _ = guard.set_stream_delay_ms(delay_ms);
     while acc.len() >= frame {
         let mut chunk: Vec<i16> = acc.drain(..frame).collect();
-        let _ = apm.lock().process_stream(&mut chunk, rate, channels);
+        let _ = guard.process_stream(&mut chunk, rate, channels);
         let _ = tx.try_send(chunk);
     }
+}
+
+fn update_out_latency(info: &cpal::OutputCallbackInfo, out_latency_ms: &AtomicU32) {
+    let ts = info.timestamp();
+    if let Some(d) = ts.playback.duration_since(&ts.callback) {
+        out_latency_ms.store(d.as_millis().min(500) as u32, Ordering::Relaxed);
+    }
+}
+
+fn capture_delay_ms(info: &cpal::InputCallbackInfo, out_latency_ms: &AtomicU32) -> i32 {
+    let ts = info.timestamp();
+    let in_latency = ts
+        .callback
+        .duration_since(&ts.capture)
+        .map(|d| d.as_millis().min(500) as u32)
+        .unwrap_or(0);
+    (out_latency_ms.load(Ordering::Relaxed) + in_latency).min(500) as i32
 }
 
 fn flush_reverse(acc: &mut Vec<i16>, frame: usize, apm: &SharedApm, rate: i32, channels: i32) {
@@ -114,8 +135,13 @@ impl AudioIo {
             .spawn(move || {
                 let apm: SharedApm =
                     Arc::new(Mutex::new(AudioProcessingModule::new(true, true, true, true)));
-                let prepared =
-                    prepare_output(output_device_id.as_deref(), mixer_for_thread, apm.clone());
+                let out_latency_ms = Arc::new(AtomicU32::new(0));
+                let prepared = prepare_output(
+                    output_device_id.as_deref(),
+                    mixer_for_thread,
+                    apm.clone(),
+                    out_latency_ms.clone(),
+                );
                 match prepared {
                     Ok((out_stream, out_fmt)) => {
                         let _ = out_fmt_tx.send(Ok(out_fmt));
@@ -131,6 +157,7 @@ impl AudioIo {
                                             input_device_id.as_deref(),
                                             mic_tx.clone(),
                                             apm.clone(),
+                                            out_latency_ms.clone(),
                                         ) {
                                             Ok((stream, in_fmt)) => {
                                                 let _ = in_fmt_tx.try_send(in_fmt);
@@ -266,6 +293,7 @@ fn prepare_output(
     output_device_id: Option<&str>,
     mixer: Arc<PlaybackMixer>,
     apm: SharedApm,
+    out_latency_ms: Arc<AtomicU32>,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let host = cpal::default_host();
     let output = select_output(&host, output_device_id)?;
@@ -274,7 +302,7 @@ fn prepare_output(
         sample_rate: out_supported.sample_rate(),
         channels: out_supported.channels() as u32,
     };
-    let out_stream = build_output(&output, &out_supported, mixer, apm)?;
+    let out_stream = build_output(&output, &out_supported, mixer, apm, out_latency_ms)?;
     out_stream.play()?;
     Ok((out_stream, out_fmt))
 }
@@ -306,6 +334,7 @@ fn build_input(
     id: Option<&str>,
     mic_tx: flume::Sender<Vec<i16>>,
     apm: SharedApm,
+    out_latency_ms: Arc<AtomicU32>,
 ) -> Result<(cpal::Stream, AudioFormat)> {
     let device = select_input(host, id)?;
     let supported = device.default_input_config()?;
@@ -324,9 +353,10 @@ fn build_input(
             let mut acc: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                move |data: &[f32], info: &cpal::InputCallbackInfo| {
+                    let delay = capture_delay_ms(info, &out_latency_ms);
                     acc.extend(data.iter().copied().map(f32_to_i16));
-                    flush_capture(&mut acc, frame, &apm, rate, channels, &tx);
+                    flush_capture(&mut acc, frame, &apm, rate, channels, delay, &tx);
                 },
                 err_fn,
                 None,
@@ -338,9 +368,10 @@ fn build_input(
             let mut acc: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                move |data: &[i16], info: &cpal::InputCallbackInfo| {
+                    let delay = capture_delay_ms(info, &out_latency_ms);
                     acc.extend_from_slice(data);
-                    flush_capture(&mut acc, frame, &apm, rate, channels, &tx);
+                    flush_capture(&mut acc, frame, &apm, rate, channels, delay, &tx);
                 },
                 err_fn,
                 None,
@@ -352,9 +383,10 @@ fn build_input(
             let mut acc: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
-                move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                move |data: &[u16], info: &cpal::InputCallbackInfo| {
+                    let delay = capture_delay_ms(info, &out_latency_ms);
                     acc.extend(data.iter().map(|&u| (u as i32 - 32768) as i16));
-                    flush_capture(&mut acc, frame, &apm, rate, channels, &tx);
+                    flush_capture(&mut acc, frame, &apm, rate, channels, delay, &tx);
                 },
                 err_fn,
                 None,
@@ -370,6 +402,7 @@ fn build_output(
     supported: &cpal::SupportedStreamConfig,
     mixer: Arc<PlaybackMixer>,
     apm: SharedApm,
+    out_latency_ms: Arc<AtomicU32>,
 ) -> Result<cpal::Stream> {
     let config: cpal::StreamConfig = supported.config();
     let rate = supported.sample_rate() as i32;
@@ -382,7 +415,8 @@ fn build_output(
             let apm = apm;
             device.build_output_stream(
                 &config,
-                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    update_out_latency(info, &out_latency_ms);
                     tmp.clear();
                     tmp.resize(out.len(), 0);
                     mixer.mix_into(&mut tmp);
@@ -401,7 +435,8 @@ fn build_output(
             let apm = apm;
             device.build_output_stream(
                 &config,
-                move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    update_out_latency(info, &out_latency_ms);
                     mixer.mix_into(out);
                     rev.extend_from_slice(out);
                     flush_reverse(&mut rev, frame, &apm, rate, channels);
@@ -416,7 +451,8 @@ fn build_output(
             let apm = apm;
             device.build_output_stream(
                 &config,
-                move |out: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                move |out: &mut [u16], info: &cpal::OutputCallbackInfo| {
+                    update_out_latency(info, &out_latency_ms);
                     tmp.clear();
                     tmp.resize(out.len(), 0);
                     mixer.mix_into(&mut tmp);

@@ -140,6 +140,15 @@ impl InputState {
         self
     }
 
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     pub fn height(mut self, height: Pixels) -> Self {
         self.height = Some(height);
         self

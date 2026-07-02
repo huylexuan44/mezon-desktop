@@ -3,26 +3,29 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, Context, DismissEvent, Entity, ListAlignment, ListState, Pixels,
-    Point, SharedString, Subscription, Task, Window, anchored, deferred, div, ease_in_out, list,
-    prelude::*, px,
+    Anchor, Animation, AnimationExt as _, Context, DismissEvent, Entity, Focusable, ListAlignment,
+    ListState, Pixels, Point, SharedString, Subscription, Task, Window, anchored, deferred, div,
+    ease_in_out, list, prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectMessageStore,
-    MessageCode, MessageId, MessagesEvent, MessagesStore, ProfileContext, Settings, UserId,
-    message::Message,
+    Emoji, EmojiStore, MessageCode, MessageId, MessagesEvent, MessagesStore, ProfileContext,
+    Settings, UserId, message::Message,
 };
 
 use super::context::{OnboardingContext, RowCtx, WelcomeContext};
 use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
+use super::message_context_menu;
+use super::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use super::skeleton::message_skeleton;
 use super::system_row::{build_onboarding_context, build_welcome_context};
 use super::video_player::{VideoActivation, VideoPlayerView};
+use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{Icon, IconName, InputEvent, InputState, context_menu_at};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
     MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
@@ -188,10 +191,19 @@ pub struct ChannelMessages {
     _window_activation: Option<Subscription>,
     mention_popover: Option<(Entity<UserProfilePopover>, Point<Pixels>)>,
     _mention_popover_sub: Option<Subscription>,
+    reaction_picker: Option<(Entity<ReactionPicker>, Point<Pixels>)>,
+    _reaction_picker_sub: Option<Subscription>,
+    _reaction_picker_dismiss_sub: Option<Subscription>,
     cached_locale: SharedString,
     cached_current_user_id: SharedString,
     cached_role_ids: Rc<Vec<i64>>,
+    cached_is_clan_owner: bool,
     identity_inputs: (Option<ClanId>, Option<UserId>),
+    edit_input: Option<(MessageId, Entity<InputState>)>,
+    _edit_input_sub: Option<Subscription>,
+    context_menu_target: Option<(MessageId, Point<Pixels>)>,
+    emoji_recent: Rc<Vec<Emoji>>,
+    _emoji_observe: Subscription,
 }
 
 impl ChannelMessages {
@@ -225,8 +237,20 @@ impl ChannelMessages {
 
         let store = MessagesStore::global(cx);
         cx.subscribe(&store, |this, _store, event, cx| {
+            let structural = matches!(
+                event,
+                MessagesEvent::Reset { .. } | MessagesEvent::Shifted { .. }
+            );
             match event {
                 MessagesEvent::Reset { count } => {
+                    this.reaction_picker = None;
+                    this._reaction_picker_sub = None;
+                    this._reaction_picker_dismiss_sub = None;
+                    this.mention_popover = None;
+                    this._mention_popover_sub = None;
+                    this.context_menu_target = None;
+                    this.edit_input = None;
+                    this._edit_input_sub = None;
                     this.active_videos.clear();
                     this.gif_videos.clear();
                     this.list_state.reset(*count);
@@ -333,7 +357,7 @@ impl ChannelMessages {
                         });
                     }
                 }
-                MessagesEvent::Updated => {}
+                MessagesEvent::Updated { .. } => {}
                 MessagesEvent::JumpTo { message_id } => {
                     this.pending_jump = Some(*message_id);
                     this.highlight_id = Some(*message_id);
@@ -348,15 +372,17 @@ impl ChannelMessages {
                     }));
                 }
             }
-            {
-                let (is_empty, has_more_top, is_dm, dm_channel, conversation_loading) = {
-                    let s = _store.read(cx);
-                    Self::read_store_inputs(s)
-                };
-                this.sync_header(is_empty, has_more_top);
-                this.sync_skeleton(is_dm, dm_channel, conversation_loading, is_empty, cx);
+            if structural {
+                {
+                    let (is_empty, has_more_top, is_dm, dm_channel, conversation_loading) = {
+                        let s = _store.read(cx);
+                        Self::read_store_inputs(s)
+                    };
+                    this.sync_header(is_empty, has_more_top);
+                    this.sync_skeleton(is_dm, dm_channel, conversation_loading, is_empty, cx);
+                }
+                this.refresh_derived_state(cx);
             }
-            this.refresh_derived_state(cx);
             cx.notify();
         })
         .detach();
@@ -373,6 +399,15 @@ impl ChannelMessages {
             let _ = timeline.update(cx, |this, cx| {
                 this.at_bottom = at_bottom;
                 this.last_visible_start = visible_start;
+
+                if this.context_menu_target.take().is_some() {
+                    cx.notify();
+                }
+                if this.reaction_picker.take().is_some() {
+                    this._reaction_picker_sub = None;
+                    this._reaction_picker_dismiss_sub = None;
+                    cx.notify();
+                }
 
                 let store_entity = MessagesStore::global(cx);
                 if let Some(channel_id) = store_entity.read(cx).active_channel_id() {
@@ -467,7 +502,30 @@ impl ChannelMessages {
         let (welcome, onboarding) = Self::compute_indicator_contexts(cx);
         let cached_unread_boundary = unread_boundary(&MessagesStore::global(cx), None, cx);
         let cached_locale: SharedString = settings.read(cx).language.clone().into();
-        let (identity_inputs, cached_current_user_id, cached_role_ids) = Self::compute_identity(cx);
+        let (identity_inputs, cached_current_user_id, cached_role_ids, cached_is_clan_owner) =
+            Self::compute_identity(cx);
+        let emoji_store = EmojiStore::global(cx);
+        let emoji_recent: Rc<Vec<Emoji>> = Rc::new(
+            emoji_store
+                .read(cx)
+                .recent(3)
+                .into_iter()
+                .cloned()
+                .collect(),
+        );
+        let emoji_observe = cx.observe(&emoji_store, |this, store, cx| {
+            let next: Vec<Emoji> = store.read(cx).recent(3).into_iter().cloned().collect();
+            let changed = this.emoji_recent.len() != next.len()
+                || this
+                    .emoji_recent
+                    .iter()
+                    .zip(&next)
+                    .any(|(a, b)| a.id != b.id);
+            if changed {
+                this.emoji_recent = Rc::new(next);
+                cx.notify();
+            }
+        });
         Self {
             list_state,
             settings,
@@ -505,10 +563,19 @@ impl ChannelMessages {
             _window_activation: None,
             mention_popover: None,
             _mention_popover_sub: None,
+            reaction_picker: None,
+            _reaction_picker_sub: None,
+            _reaction_picker_dismiss_sub: None,
             cached_locale,
             cached_current_user_id,
             cached_role_ids,
+            cached_is_clan_owner,
             identity_inputs,
+            edit_input: None,
+            _edit_input_sub: None,
+            context_menu_target: None,
+            emoji_recent,
+            _emoji_observe: emoji_observe,
         }
     }
 
@@ -526,6 +593,129 @@ impl ChannelMessages {
             }));
         self.mention_popover = Some((popover, position));
         cx.notify();
+    }
+
+    pub(crate) fn open_reaction_picker(
+        &mut self,
+        message_id: MessageId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picker = cx.new(|cx| ReactionPicker::new(window, cx));
+        let focus_handle = picker.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        self._reaction_picker_sub = Some(cx.subscribe(&picker, move |this, _picker, event, cx| {
+            let ReactionPickerEvent::Picked { emoji_id, emoji } = event;
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.add_reaction(message_id, emoji_id.clone(), emoji.clone(), cx);
+            });
+            this.reaction_picker = None;
+            this._reaction_picker_sub = None;
+            this._reaction_picker_dismiss_sub = None;
+            cx.notify();
+        }));
+        self._reaction_picker_dismiss_sub = Some(cx.subscribe(
+            &picker,
+            |this, _picker, _: &DismissEvent, cx| {
+                this.reaction_picker = None;
+                this._reaction_picker_sub = None;
+                this._reaction_picker_dismiss_sub = None;
+                cx.notify();
+            },
+        ));
+        self.reaction_picker = Some((picker, position));
+        cx.notify();
+    }
+
+    /// Enter inline-edit mode for a message (Discord-style: in the row, not the composer).
+    pub(crate) fn begin_edit(
+        &mut self,
+        message_id: MessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_content = MessagesStore::global(cx)
+            .read(cx)
+            .viewport_messages()
+            .iter()
+            .find(|m| m.id == message_id)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(initial_content, window, cx);
+            state
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        self._edit_input_sub =
+            Some(
+                cx.subscribe_in(&input, window, move |this, _input, event, window, cx| {
+                    if matches!(event, InputEvent::PressEnter) {
+                        this.save_edit(window, cx);
+                    }
+                }),
+            );
+        self.edit_input = Some((message_id, input));
+        MessagesStore::global(cx).update(cx, |store, cx| store.start_edit(message_id, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_input = None;
+        self._edit_input_sub = None;
+        MessagesStore::global(cx).update(cx, |store, cx| store.cancel_edit(cx));
+        cx.notify();
+    }
+
+    pub(crate) fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((message_id, input)) = self.edit_input.take() else {
+            return;
+        };
+        self._edit_input_sub = None;
+        let content = input.read(cx).value().to_string();
+        let store = MessagesStore::global(cx);
+        let original = store
+            .read(cx)
+            .viewport_messages()
+            .iter()
+            .find(|m| m.id == message_id)
+            .map(|m| m.content.clone());
+
+        if content.trim().is_empty() {
+            store.update(cx, |store, cx| store.cancel_edit(cx));
+            let locale = self.cached_locale.clone();
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.confirm_delete_message(message_id, &locale, window, cx);
+            });
+            cx.notify();
+            return;
+        }
+
+        if original.as_deref() == Some(content.as_str()) {
+            store.update(cx, |store, cx| store.cancel_edit(cx));
+            cx.notify();
+            return;
+        }
+
+        store.update(cx, |store, cx| store.edit_message(message_id, content, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn open_context_menu(
+        &mut self,
+        message_id: MessageId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu_target = Some((message_id, position));
+        cx.notify();
+    }
+
+    pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu_target.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub fn bind_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -574,7 +764,12 @@ impl ChannelMessages {
 
     fn compute_identity(
         cx: &gpui::App,
-    ) -> ((Option<ClanId>, Option<UserId>), SharedString, Rc<Vec<i64>>) {
+    ) -> (
+        (Option<ClanId>, Option<UserId>),
+        SharedString,
+        Rc<Vec<i64>>,
+        bool,
+    ) {
         let active_clan = ClanList::global(cx).read(cx).active_clan_id;
         let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
         let current_user_id: SharedString = current_user
@@ -591,21 +786,33 @@ impl ChannelMessages {
                 })
             })
             .unwrap_or_default();
+        let is_clan_owner = ClanList::global(cx)
+            .read(cx)
+            .active_clan()
+            .zip(current_user)
+            .is_some_and(|(clan, uid)| clan.creator_id == uid);
         (
             (active_clan, current_user),
             current_user_id,
             Rc::new(role_ids),
+            is_clan_owner,
         )
     }
 
     fn store_identity(
         &mut self,
-        identity: ((Option<ClanId>, Option<UserId>), SharedString, Rc<Vec<i64>>),
+        identity: (
+            (Option<ClanId>, Option<UserId>),
+            SharedString,
+            Rc<Vec<i64>>,
+            bool,
+        ),
     ) {
-        let (inputs, current_user_id, role_ids) = identity;
+        let (inputs, current_user_id, role_ids, is_clan_owner) = identity;
         self.identity_inputs = inputs;
         self.cached_current_user_id = current_user_id;
         self.cached_role_ids = role_ids;
+        self.cached_is_clan_owner = is_clan_owner;
     }
 
     fn sync_render_identity(&mut self, cx: &gpui::App) {
@@ -1095,6 +1302,17 @@ impl Render for ChannelMessages {
             let s = store.read(cx);
             (s.is_dm(), s.active_channel_id())
         };
+        let (channel_type, channel_top_level) = ChannelList::global(cx)
+            .read(cx)
+            .active_channel()
+            .map(|c| (Some(c.channel_type), c.parent_id.is_none()))
+            .unwrap_or((None, true));
+        let is_clan_owner = self.cached_is_clan_owner;
+        let emoji_recent = self.emoji_recent.clone();
+        let (editing_id, edit_input) = match &self.edit_input {
+            Some((id, input)) => (Some(*id), Some(input.clone())),
+            None => (None, None),
+        };
         let skeleton_overlay = self.skeleton_overlay(cx.theme());
         let header_shown = self.header_shown;
 
@@ -1110,6 +1328,9 @@ impl Render for ChannelMessages {
         }
 
         let locale = self.cached_locale.clone();
+        let coming_soon: SharedString = mezon_i18n::t(&locale, "common.comingSoon")
+            .to_string()
+            .into();
         let frame_now = chrono::Local::now();
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
@@ -1149,6 +1370,7 @@ impl Render for ChannelMessages {
                     }
                     let msg_ix = ix - usize::from(header_shown);
                     let ctx = RowCtx {
+                        app: cx,
                         theme: cx.theme(),
                         locale: &locale,
                         current_user_id: &current_user_id,
@@ -1165,6 +1387,14 @@ impl Render for ChannelMessages {
                         gif_videos: &gif_videos,
                         video_host: video_host.clone(),
                         now: frame_now,
+                        clan_id: active_clan,
+                        channel_type,
+                        channel_top_level,
+                        is_clan_owner,
+                        editing_id,
+                        edit_input: edit_input.clone(),
+                        emoji_recent: &emoji_recent,
+                        coming_soon: coming_soon.clone(),
                     };
                     render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
                 })
@@ -1187,6 +1417,45 @@ impl Render for ChannelMessages {
                             .child(popover),
                     ),
                 ))
+            })
+            .when_some(self.reaction_picker.clone(), |el, (picker, position)| {
+                el.child(deferred(
+                    anchored()
+                        .position(position)
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window()
+                        .child(
+                            div()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.reaction_picker = None;
+                                    this._reaction_picker_sub = None;
+                                    this._reaction_picker_dismiss_sub = None;
+                                    cx.notify();
+                                }))
+                                .child(picker),
+                        ),
+                ))
+            })
+            .when_some(self.context_menu_target, |el, (message_id, position)| {
+                let store = MessagesStore::global(cx);
+                let store_ref = store.read(cx);
+                let Some(target_msg) = store_ref
+                    .viewport_messages()
+                    .iter()
+                    .find(|m| m.id == message_id)
+                else {
+                    return el;
+                };
+                let menu = message_context_menu::build(
+                    target_msg,
+                    &self.cached_current_user_id,
+                    self.cached_is_clan_owner,
+                    &self.cached_locale,
+                    cx.entity().downgrade(),
+                    cx,
+                );
+                el.child(context_menu_at(position, menu))
             })
             .custom_scrollbars(
                 Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),

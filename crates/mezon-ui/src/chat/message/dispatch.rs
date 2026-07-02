@@ -32,7 +32,7 @@ pub fn render_message_item(
             col.child(render_welcome(msg, ctx)).into_any_element()
         }
         code if code.is_system() => render_system_message(msg, ctx),
-        _ => render_user_message(msg, combined, ctx, cx),
+        _ => render_user_message(msg, combined, show_separator, ctx, cx),
     };
 
     if !show_separator && !show_unread_break {
