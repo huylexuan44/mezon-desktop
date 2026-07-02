@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::NaiveDate;
 use gpui::{
     App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -13,10 +11,11 @@ use mezon_store::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{DatePicker, DatePickerEvent, Icon, IconName};
-use crate::image_cache::LruImageCache;
+use crate::image_cache::{
+    GALLERY_IMAGE_CACHE_BYTES, GALLERY_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::image_viewer::{OpenViewerRequest, open_image_viewer};
 use crate::theme::{ActiveTheme, Theme};
-use crate::video_thumbnail::VideoThumbnail;
 
 const TILE: f32 = 144.0;
 const COLUMNS: usize = 3;
@@ -46,7 +45,6 @@ pub struct GalleryModal {
     rows: Vec<GalleryRow>,
     list_state: ListState,
     image_cache: Entity<LruImageCache>,
-    video_thumbs: HashMap<i64, Entity<VideoThumbnail>>,
     _subscription: Subscription,
     _release: Subscription,
     _from_picker_sub: Subscription,
@@ -63,7 +61,15 @@ impl GalleryModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let image_cache = cx.new(|cx| LruImageCache::new(256, 128 * 1024 * 1024, cx));
+        let image_cache = cx.new(|cx| {
+            LruImageCache::labeled(
+                "gallery",
+                GALLERY_IMAGE_CACHE_CAPACITY,
+                GALLERY_IMAGE_CACHE_BYTES,
+                crate::image_cache::SHARED_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         let gallery = GalleryStore::global(cx);
         let subscription = cx.observe(&gallery, |this, _, cx| {
             this.rebuild_rows(cx);
@@ -93,7 +99,6 @@ impl GalleryModal {
             rows: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(400.)),
             image_cache,
-            video_thumbs: HashMap::new(),
             _subscription: subscription,
             _release: release,
             _from_picker_sub: Subscription::new(|| ()),
@@ -316,7 +321,14 @@ impl GalleryModal {
         self.applied_from_date.is_some() || self.applied_to_date.is_some()
     }
 
-    fn open_attachment(&mut self, attachment_id: i64, cx: &mut Context<Self>) {
+    fn open_attachment(
+        &mut self,
+        attachment_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_cache
+            .update(cx, |cache, cx| cache.shrink_to(0, window, cx));
         let store = GalleryStore::global(cx);
         let mut playlist = store.read(cx).filtered(self.channel_id, self.active_filter);
         let Some(index) = playlist.iter().position(|a| a.id == attachment_id) else {
@@ -338,27 +350,16 @@ impl GalleryModal {
         );
     }
 
-    fn dismiss(&mut self, cx: &mut Context<Self>) {
-        self.video_thumbs.clear();
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.image_cache
+            .update(cx, |cache, cx| cache.clear(window, cx));
+        self.rows.clear();
+        self.list_state.reset(0);
         GalleryStore::global(cx).update(cx, |store, _| {
             store.reset_channel_attachments(self.channel_id);
         });
+        crate::image_viewer::trim_process_memory();
         cx.emit(DismissEvent);
-    }
-
-    fn video_thumb_for(
-        &mut self,
-        id: i64,
-        url: &str,
-        size: f32,
-        cx: &mut Context<Self>,
-    ) -> Entity<VideoThumbnail> {
-        if let Some(entity) = self.video_thumbs.get(&id) {
-            return entity.clone();
-        }
-        let entity = cx.new(|cx| VideoThumbnail::new(url, size, size, cx));
-        self.video_thumbs.insert(id, entity.clone());
-        entity
     }
 
     fn locale(&self, cx: &App) -> String {
@@ -397,6 +398,8 @@ impl EventEmitter<DismissEvent> for GalleryModal {}
 
 impl Render for GalleryModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.image_cache
+            .update(cx, |cache, cx| cache.sweep(window, cx));
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
         let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
@@ -446,7 +449,7 @@ impl Render for GalleryModal {
                             }
                         });
                         if let Some(atts) = atts {
-                            return render_image_row(&atts, &theme_for_list, &entity, cx);
+                            return render_image_row(&atts, &theme_for_list, &entity);
                         }
                         div().into_any_element()
                     })
@@ -465,17 +468,17 @@ impl Render for GalleryModal {
         div()
             .key_context("menu")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &::menu::Cancel, window, cx| {
                 if this.any_calendar_open(cx) {
                     this.close_calendar_pickers(cx);
                 } else if this.date_filter_open {
                     this.close_date_filter_panel(cx);
                 } else {
-                    this.dismiss(cx);
+                    this.dismiss(window, cx);
                 }
             }))
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                this.dismiss(cx);
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.dismiss(window, cx);
             }))
             .occlude()
             .relative()
@@ -601,8 +604,8 @@ fn render_modal_header(
                 )
                 .on_mouse_down(
                     MouseButton::Left,
-                    move |_: &MouseDownEvent, _window, cx: &mut App| {
-                        entity.update(cx, |this, cx| this.dismiss(cx));
+                    move |_: &MouseDownEvent, window, cx| {
+                        entity.update(cx, |this, cx| this.dismiss(window, cx));
                     },
                 ),
         )
@@ -849,27 +852,17 @@ fn render_image_row(
     atts: &[ChannelAttachment],
     theme: &Theme,
     entity: &Entity<GalleryModal>,
-    cx: &mut App,
 ) -> gpui::AnyElement {
     let mut row = div().flex().flex_row().gap_3().pb_3();
     for att in atts {
         let id = att.id;
         let entity = entity.clone();
         let is_video = att.is_video;
-        let media = if is_video {
-            let thumb = entity.update(cx, |this, cx| {
-                this.video_thumb_for(id, &att.url, TILE, cx)
-            });
-            div()
-                .size_full()
-                .child(thumb)
-                .into_any_element()
-        } else {
-            img(att.thumb_src.clone())
-                .size_full()
-                .object_fit(gpui::ObjectFit::Cover)
-                .into_any_element()
-        };
+        let thumb_src = att.thumb_src.clone();
+        let media = img(thumb_src)
+            .size_full()
+            .object_fit(gpui::ObjectFit::Cover)
+            .into_any_element();
         row = row.child(
             div()
                 .id(("gallery-tile", id as usize))
@@ -906,8 +899,8 @@ fn render_image_row(
                 })
                 .on_mouse_down(
                     MouseButton::Left,
-                    move |_: &MouseDownEvent, _window, cx: &mut App| {
-                        entity.update(cx, |this, cx| this.open_attachment(id, cx));
+                    move |_: &MouseDownEvent, window, cx| {
+                        entity.update(cx, |this, cx| this.open_attachment(id, window, cx));
                     },
                 ),
         );

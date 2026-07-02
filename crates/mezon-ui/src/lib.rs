@@ -12,7 +12,6 @@ pub mod settings;
 pub mod sidebar;
 pub mod theme;
 pub mod util;
-pub mod video_thumbnail;
 
 pub use app::root::RootView;
 pub use app::shell::Shell;

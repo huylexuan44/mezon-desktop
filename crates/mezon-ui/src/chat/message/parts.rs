@@ -397,6 +397,7 @@ fn render_video_poster(
                 height,
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
+                decode_max_size: None,
             };
             let _ = host.update(cx, |host, cx| {
                 host.activate_video((msg_id, index), activation, window, cx);

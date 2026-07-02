@@ -69,6 +69,7 @@ pub struct VideoActivation {
     pub height: f32,
     pub fullscreen_mode: VideoFullscreenMode,
     pub layout: VideoLayout,
+    pub decode_max_size: Option<(u32, u32)>,
 }
 
 #[derive(Default)]
@@ -117,8 +118,11 @@ impl VideoPlayerView {
             height,
             fullscreen_mode,
             layout,
+            decode_max_size,
         } = activation;
-        let player = VideoPlayer::open(url.as_ref(), None).ok().map(Rc::new);
+        let player = VideoPlayer::open(url.as_ref(), decode_max_size)
+            .ok()
+            .map(Rc::new);
         if let Some(player) = player.as_ref() {
             player.play();
         }
@@ -171,7 +175,7 @@ impl VideoPlayerView {
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
     }
 
-    fn poll_frame(&mut self, cx: &mut Context<Self>) {
+    fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -202,7 +206,7 @@ impl VideoPlayerView {
             shared.muted = muted;
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
-        Self::release_frame(previous, cx);
+        Self::release_frame(previous, Some(window), cx);
         self.refresh_time_label(playing, current_time, duration);
         if was_playing && !playing {
             cx.notify();
@@ -219,6 +223,67 @@ impl VideoPlayerView {
                 format_seconds(display_time),
                 format_seconds(duration)
             ));
+        }
+    }
+
+    pub fn reopen(
+        &mut self,
+        activation: VideoActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.url.as_ref() == activation.url.as_ref() {
+            return;
+        }
+        self.shutdown(Some(window), cx);
+        let VideoActivation {
+            url,
+            poster,
+            width,
+            height,
+            fullscreen_mode,
+            layout,
+            decode_max_size,
+        } = activation;
+        self.url = url;
+        self.poster = poster;
+        self.width = width;
+        self.height = height;
+        self.fullscreen_mode = fullscreen_mode;
+        self.layout = layout;
+        self.theater = false;
+        self.track_bounds = Bounds::default();
+        self.time_label = SharedString::new_static("00:00 / 00:00");
+        self.last_label_seconds = (0, 0);
+        self.player = VideoPlayer::open(self.url.as_ref(), decode_max_size)
+            .ok()
+            .map(Rc::new);
+        if let Some(player) = self.player.as_ref() {
+            player.play();
+        }
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.playing = self.player.is_some();
+            shared.failed = false;
+            shared.current_time = 0.0;
+            shared.duration = 0.0;
+        }
+        cx.notify();
+    }
+
+    pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        if let Some(player) = self.player.take() {
+            player.pause();
+            drop(player);
+        }
+        let frame = self.shared.borrow_mut().frame.take();
+        Self::release_frame(frame, window, cx);
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.playing = false;
+            shared.failed = false;
+            shared.current_time = 0.0;
+            shared.duration = 0.0;
         }
     }
 
@@ -349,12 +414,21 @@ impl VideoPlayerView {
     }
 
     #[cfg(target_os = "macos")]
-    fn release_frame(_previous: Option<VideoFrame>, _cx: &mut Context<Self>) {}
+    fn release_frame(
+        _previous: Option<VideoFrame>,
+        _window: Option<&mut Window>,
+        _cx: &mut Context<Self>,
+    ) {
+    }
 
     #[cfg(not(target_os = "macos"))]
-    fn release_frame(previous: Option<VideoFrame>, cx: &mut Context<Self>) {
+    fn release_frame(
+        previous: Option<VideoFrame>,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(previous) = previous {
-            cx.drop_image(previous, None);
+            cx.drop_image(previous, window);
         }
     }
 
@@ -541,7 +615,7 @@ impl VideoPlayerView {
 
 impl Render for VideoPlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.poll_frame(cx);
+        self.poll_frame(window, cx);
         let theme = cx.theme();
         let has_frame = self.has_frame();
         let (playing, failed) = {

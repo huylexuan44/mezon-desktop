@@ -5572,6 +5572,7 @@ dependencies = [
  "icons",
  "image",
  "indexmap",
+ "libc",
  "menu",
  "mezon-i18n",
  "mezon-store",

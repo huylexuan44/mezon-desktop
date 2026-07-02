@@ -82,7 +82,10 @@ impl ChannelAttachment {
         let is_video = is_video_type(&api.filetype, &api.url);
         let is_image = !is_video && is_image_type(&api.filetype, &api.url);
         let (thumb_src, viewer_src) = if is_video {
-            (SharedString::default(), SharedString::default())
+            (
+                cfg.gallery_thumb_proxy(&api.url).into(),
+                api.url.clone().into(),
+            )
         } else {
             (
                 cfg.gallery_thumb_proxy(&api.url).into(),
