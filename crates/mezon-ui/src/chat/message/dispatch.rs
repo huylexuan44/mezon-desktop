@@ -1,4 +1,4 @@
-use gpui::{AnyElement, div, prelude::*};
+use gpui::{AnyElement, App, div, prelude::*};
 use mezon_store::{Message, MessageCode};
 
 use super::context::RowCtx;
@@ -9,7 +9,12 @@ use super::system_row::{
 use super::time::format_date_divider;
 use super::user_row::render_user_message;
 
-pub fn render_message_item(messages: &[Message], ix: usize, ctx: &RowCtx) -> AnyElement {
+pub fn render_message_item(
+    messages: &[Message],
+    ix: usize,
+    ctx: &RowCtx,
+    cx: &App,
+) -> AnyElement {
     let Some(msg) = messages.get(ix) else {
         return div().into_any_element();
     };
@@ -27,7 +32,7 @@ pub fn render_message_item(messages: &[Message], ix: usize, ctx: &RowCtx) -> Any
             col.child(render_welcome(msg, ctx)).into_any_element()
         }
         code if code.is_system() => render_system_message(msg, ctx),
-        _ => render_user_message(msg, combined, show_separator, ctx),
+        _ => render_user_message(msg, combined, show_separator, ctx, cx),
     };
 
     if !show_separator && !show_unread_break {

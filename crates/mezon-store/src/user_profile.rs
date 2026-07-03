@@ -1,5 +1,8 @@
 use gpui::App;
+use mezon_client::transport::prioritize_avatar;
 
+use crate::account::AccountStore;
+use crate::clan::ClanList;
 use crate::clan_members::{ClanMember, ClanMembersStore, User};
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
 use crate::group_members::{GroupMember, GroupMembersStore};
@@ -82,6 +85,29 @@ impl UserProfileView {
             online: online || channel.online,
         }
     }
+}
+
+/// Avatar for the signed-in user in the active clan context (clan profile avatar, then account avatar).
+pub fn current_user_clan_avatar(cx: &App, clan_id: Option<ClanId>) -> String {
+    let store = AccountStore::global(cx).read(cx);
+    let clan = store
+        .clan_profile
+        .as_ref()
+        .filter(|profile| clan_id.is_none_or(|id| profile.clan_id == id));
+    let clan_av = clan
+        .and_then(|profile| profile.avatar_url.as_deref())
+        .unwrap_or("");
+    let user_av = store
+        .account
+        .as_ref()
+        .and_then(|acct| acct.avatar_url.as_deref())
+        .unwrap_or("");
+    prioritize_avatar(clan_av, user_av)
+}
+
+/// Active clan id when the user is in a clan channel view.
+pub fn active_clan_id(cx: &App) -> Option<ClanId> {
+    ClanList::global(cx).read(cx).active_clan_id
 }
 
 /// Resolve a single user's profile for the popover, mirroring React's `useUserById`: a clan
