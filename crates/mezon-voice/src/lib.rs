@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use livekit::options::{TrackPublishOptions, VideoEncoding};
 use livekit::prelude::*;
 use livekit::track::{
@@ -23,6 +22,7 @@ use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::peer_connection_factory::IceServer;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource, VideoBuffer};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
+use parking_lot::Mutex;
 
 pub use audio::AudioFormat;
 

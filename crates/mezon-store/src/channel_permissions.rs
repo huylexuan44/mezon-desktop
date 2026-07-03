@@ -82,12 +82,7 @@ impl ChannelPermissionsStore {
         self.cache.mark_all_stale();
     }
 
-    pub fn has_permission(
-        &self,
-        slug: &str,
-        clan_id: ClanId,
-        channel_id: ChannelId,
-    ) -> bool {
+    pub fn has_permission(&self, slug: &str, clan_id: ClanId, channel_id: ChannelId) -> bool {
         let key = ChannelPermissionKey {
             clan_id,
             channel_id,
@@ -98,7 +93,12 @@ impl ChannelPermissionsStore {
             .unwrap_or(false)
     }
 
-    pub fn ensure_loaded(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+    pub fn ensure_loaded(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
         let key = ChannelPermissionKey {
             clan_id,
             channel_id,
@@ -147,7 +147,9 @@ impl ChannelPermissionsStore {
     }
 }
 
-fn permissions_from_response(resp: &api::UserPermissionInChannelListResponse) -> HashMap<String, bool> {
+fn permissions_from_response(
+    resp: &api::UserPermissionInChannelListResponse,
+) -> HashMap<String, bool> {
     let mut map = HashMap::new();
     if let Some(list) = &resp.permissions {
         for perm in &list.permissions {

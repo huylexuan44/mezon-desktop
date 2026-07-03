@@ -50,11 +50,7 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
     put_bytes_to_content_type(url, data, "application/octet-stream").await
 }
 
-pub async fn put_bytes_to_content_type(
-    url: &str,
-    data: Vec<u8>,
-    content_type: &str,
-) -> Result<()> {
+pub async fn put_bytes_to_content_type(url: &str, data: Vec<u8>, content_type: &str) -> Result<()> {
     tracing::debug!("put_bytes_to_content_type: PUTting {} bytes", data.len());
     let url = url.to_string();
     let content_type = content_type.to_string();
@@ -789,7 +785,11 @@ impl TransportClient {
     ) -> Result<mezon_proto::api::RoleList> {
         let transport = self.inner.clone();
         runtime()
-            .spawn(async move { transport.get_role_of_user_in_clan(clan_id, channel_id).await })
+            .spawn(async move {
+                transport
+                    .get_role_of_user_in_clan(clan_id, channel_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

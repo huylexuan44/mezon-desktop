@@ -6,7 +6,7 @@ use gpui::{
 };
 use mezon_store::{
     AlbumLayout, ChannelType, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
-    MessagesStore, Reaction, ViewerMedia, resolve_user_profile,
+    MessagesStore, Reaction, ViewerMedia, resolve_avatar_url,
 };
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
@@ -42,14 +42,11 @@ fn resolve_message_avatar_urls(
 ) -> (String, Option<SharedString>) {
     if let Some(context) = ctx.profile_context
         && let Some(user_id) = msg.sender_user_id
-        && let Some(profile) = resolve_user_profile(user_id, context, cx)
-        && !profile.avatar_url.is_empty()
+        && let Some(avatar_url) = resolve_avatar_url(user_id, context, cx)
+        && !avatar_url.is_empty()
     {
-        let proxied = crate::util::imgproxy::avatar_url(cx, &profile.avatar_url);
-        return (
-            profile.avatar_url,
-            Some(SharedString::from(proxied)),
-        );
+        let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_url);
+        return (avatar_url, Some(SharedString::from(proxied)));
     }
 
     let proxied = msg.avatar_proxied.clone();

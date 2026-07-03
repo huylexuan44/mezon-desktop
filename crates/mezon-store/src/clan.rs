@@ -12,7 +12,6 @@ use mezon_proto::api::{SystemMessage, SystemMessageRequest, UpdateClanDescReques
 
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-
 pub const MAX_CLAN_LOGO_BYTES: u64 = 1_000_000;
 pub const MAX_CLAN_BANNER_BYTES: u64 = 10_000_000;
 
@@ -120,7 +119,9 @@ impl ClanOverviewDraft {
             logo: Some(self.logo.clone()),
             banner: Some(self.banner.clone()),
             prevent_anonymous: self.prevent_anonymous,
-            welcome_channel_id: proto_channel_id(self.welcome_channel_id.or(clan.welcome_channel_id)),
+            welcome_channel_id: proto_channel_id(
+                self.welcome_channel_id.or(clan.welcome_channel_id),
+            ),
             ..Default::default()
         }
     }
@@ -998,6 +999,10 @@ mod tests {
             logo: String::new(),
             banner: String::new(),
             welcome_channel_id: 0,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         };
         assert_eq!(Clan::from(desc).creator_id, UserId(7));
     }

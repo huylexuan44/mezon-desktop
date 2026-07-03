@@ -1,4 +1,6 @@
-use gpui::{Anchor, AnyElement, App, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui::{
+    Anchor, AnyElement, App, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px,
+};
 use mezon_store::{Message, MessageCode};
 
 use super::content::render_message_content;

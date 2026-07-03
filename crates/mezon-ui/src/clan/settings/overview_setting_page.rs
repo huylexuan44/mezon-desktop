@@ -86,7 +86,7 @@ fn is_valid_clan_name(s: &str) -> bool {
     s.chars().all(|c| is_valid_clan_name_char(c) && c != '\'')
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ChannelOption {
     id: ChannelId,
     channel_label: SharedString,
@@ -114,9 +114,11 @@ pub struct OverviewSettingPage {
     _name_sub: Option<Subscription>,
     _channel_sub: Subscription,
     _fetch_task: Option<Task<()>>,
-    _upload_task: Option<Task<()>>,
+    _logo_upload_task: Option<Task<()>>,
+    _banner_upload_task: Option<Task<()>>,
 }
 
+#[derive(Clone, Copy)]
 enum ImageUploadKind {
     Logo,
     Banner,
@@ -161,7 +163,8 @@ impl OverviewSettingPage {
                 this.rebuild_channel_options(cx);
             }),
             _fetch_task: None,
-            _upload_task: None,
+            _logo_upload_task: None,
+            _banner_upload_task: None,
         };
         this.fetch_system_message(cx);
         this
@@ -169,7 +172,8 @@ impl OverviewSettingPage {
 
     pub fn release(&mut self) {
         self._fetch_task.take();
-        self._upload_task.take();
+        self._logo_upload_task.take();
+        self._banner_upload_task.take();
         self._name_sub.take();
         self.name_input = None;
     }
@@ -231,6 +235,9 @@ impl OverviewSettingPage {
             .map(|m| m.channel_id)
             .filter(|id| id.get() != 0)
             .and_then(|channel_id| options.iter().position(|o| o.id == channel_id));
+        if options == self.channel_options && selected_channel == self.selected_channel_index {
+            return;
+        }
         self.channel_options = options;
         self.selected_channel_index = selected_channel;
         cx.notify();
@@ -267,8 +274,7 @@ impl OverviewSettingPage {
             .map(|input| input.read(cx).value().trim().to_string())
             .unwrap_or_default();
         self.draft.clan_name = value.clone();
-        self.name_valid = is_valid_clan_name(&value)
-            || value == self.saved_draft.clan_name.trim();
+        self.name_valid = is_valid_clan_name(&value) || value == self.saved_draft.clan_name.trim();
         cx.notify();
     }
 
@@ -399,7 +405,7 @@ impl OverviewSettingPage {
 
         let clan_task = has_clan.then(|| {
             self.clan_list.update(cx, |store, cx| {
-                store.save_clan_overview(clan_id, draft, cx)
+                store.save_clan_overview(clan_id, draft.clone(), cx)
             })
         });
         let system_task = (has_system && system_draft.is_some()).then(|| {
@@ -413,7 +419,8 @@ impl OverviewSettingPage {
                 match task.await {
                     Ok(()) => {}
                     Err(_) => {
-                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError").to_string();
+                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
+                            .to_string();
                         let _ = this.update(cx, |this, cx| {
                             this.saving = false;
                             cx.notify();
@@ -431,9 +438,8 @@ impl OverviewSettingPage {
                     Ok(()) => {}
                     Err(err) => {
                         tracing::error!("save system message failed: {err}");
-                        let message =
-                            mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
-                                .to_string();
+                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
+                            .to_string();
                         let _ = this.update(cx, |this, cx| {
                             this.saving = false;
                             cx.notify();
@@ -447,9 +453,9 @@ impl OverviewSettingPage {
             }
 
             let _ = this.update(cx, |this, cx| {
-                this.saved_draft = this.draft.clone();
+                this.saved_draft = draft;
                 if has_system {
-                    this.saved_system_message = this.system_message.clone();
+                    this.saved_system_message = system_draft;
                 }
                 this.saving = false;
                 cx.notify();
@@ -485,15 +491,16 @@ impl OverviewSettingPage {
             multiple: false,
             prompt: Some(prompt),
         });
-        self._upload_task.take();
-        self._upload_task = Some(cx.spawn(async move |this, cx| {
-            let clear_uploading = |this: &mut OverviewSettingPage| match kind {
-                ImageUploadKind::Logo => this.logo_uploading = false,
-                ImageUploadKind::Banner => this.banner_uploading = false,
-            };
-            let finish = |this: &mut OverviewSettingPage| {
-                clear_uploading(this);
-                this._upload_task = None;
+        let task = cx.spawn(async move |this, cx| {
+            let finish = |this: &mut OverviewSettingPage| match kind {
+                ImageUploadKind::Logo => {
+                    this.logo_uploading = false;
+                    this._logo_upload_task = None;
+                }
+                ImageUploadKind::Banner => {
+                    this.banner_uploading = false;
+                    this._banner_upload_task = None;
+                }
             };
             let show_error = |cx: &mut AsyncApp, message: String| {
                 cx.update(|cx| {
@@ -541,9 +548,7 @@ impl OverviewSettingPage {
             }
             let path_buf = path.clone();
             let file_size = match cx
-                .background_spawn(async move {
-                    std::fs::metadata(&path_buf).ok().map(|m| m.len())
-                })
+                .background_spawn(async move { std::fs::metadata(&path_buf).ok().map(|m| m.len()) })
                 .await
             {
                 Some(size) => size,
@@ -567,9 +572,8 @@ impl OverviewSettingPage {
             }
             let upload = this
                 .update(cx, |this, cx| {
-                    this.clan_list.update(cx, |store, cx| {
-                        store.upload_clan_image(&path, max_size, cx)
-                    })
+                    this.clan_list
+                        .update(cx, |store, cx| store.upload_clan_image(&path, max_size, cx))
                 })
                 .ok();
             let Some(task) = upload else {
@@ -598,7 +602,11 @@ impl OverviewSettingPage {
                     show_error(cx, message);
                 }
             }
-        }));
+        });
+        match kind {
+            ImageUploadKind::Logo => self._logo_upload_task = Some(task),
+            ImageUploadKind::Banner => self._banner_upload_task = Some(task),
+        }
     }
 
     fn toggle_system_flag(
@@ -751,10 +759,7 @@ impl OverviewSettingPage {
                     ))
                     .child(
                         Button::new("clan-logo-upload")
-                            .label(mezon_i18n::t(
-                                locale,
-                                "clanSettings.clanLogo.uploadImage",
-                            ))
+                            .label(mezon_i18n::t(locale, "clanSettings.clanLogo.uploadImage"))
                             .primary()
                             .with_size(Size::Large)
                             .on_click(cx.listener(|this, _, _, cx| this.pick_clan_logo(cx))),
@@ -779,22 +784,18 @@ impl OverviewSettingPage {
             .overflow_hidden()
             .when(has_banner, |el| {
                 el.child(
-                    div().absolute().inset_0().child(
-                        img(banner)
-                            .size_full()
-                            .object_fit(gpui::ObjectFit::Cover),
-                    ),
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(img(banner).size_full().object_fit(gpui::ObjectFit::Cover)),
                 )
             })
             .when(!has_banner, |el| {
-                el.flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Icon::new(IconName::UploadImage)
-                            .size(px(32.0))
-                            .text_color(theme.text_secondary),
-                    )
+                el.flex().items_center().justify_center().child(
+                    Icon::new(IconName::UploadImage)
+                        .size(px(32.0))
+                        .text_color(theme.text_secondary),
+                )
             })
             .child(
                 div()
@@ -870,7 +871,6 @@ impl OverviewSettingPage {
             .and_then(|index| self.channel_options.get(index));
         let open = self.channel_menu_open;
         let selected_index = self.selected_channel_index;
-        let menu_options = open.then(|| self.channel_options.clone());
 
         let mut trigger = h_flex()
             .id("clan-system-channel")
@@ -894,9 +894,7 @@ impl OverviewSettingPage {
                         el.child(Self::render_channel_row_label(option, theme))
                     })
                     .when(selected.is_none(), |el| {
-                        el.text_sm()
-                            .text_color(theme.text_muted)
-                            .child("Select…")
+                        el.text_sm().text_color(theme.text_muted).child("Select…")
                     }),
             )
             .child(
@@ -905,45 +903,43 @@ impl OverviewSettingPage {
                     .flex_shrink_0()
                     .text_color(theme.text_muted),
             );
-        trigger.interactivity().on_click(cx.listener(|this, _, _, cx| {
-            this.channel_menu_open = !this.channel_menu_open;
-            cx.notify();
-        }));
+        trigger
+            .interactivity()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.channel_menu_open = !this.channel_menu_open;
+                cx.notify();
+            }));
 
-        div()
-            .relative()
-            .w_full()
-            .child(trigger)
-            .when(open, |menu| {
-                let options = menu_options.unwrap_or_default();
-                menu.child(deferred(
-                    div()
-                        .absolute()
-                        .top_full()
-                        .left_0()
-                        .right_0()
-                        .mt(px(4.0))
-                        .max_h(px(200.0))
-                        .p(px(4.0))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.tokens.bg_theme_input_primary)
-                        .shadow_lg()
-                        .occlude()
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            if this.channel_menu_open {
-                                this.channel_menu_open = false;
-                                cx.notify();
-                            }
-                        }))
-                        .child(
-                            div()
-                                .id("clan-system-channel-menu")
-                                .overflow_y_scroll()
-                                .max_h(px(192.0))
-                                .child(v_flex().children(
-                                    options.into_iter().enumerate().map(|(index, option)| {
+        div().relative().w_full().child(trigger).when(open, |menu| {
+            menu.child(deferred(
+                div()
+                    .absolute()
+                    .top_full()
+                    .left_0()
+                    .right_0()
+                    .mt(px(4.0))
+                    .max_h(px(200.0))
+                    .p(px(4.0))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.tokens.bg_theme_input_primary)
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        if this.channel_menu_open {
+                            this.channel_menu_open = false;
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id("clan-system-channel-menu")
+                            .overflow_y_scroll()
+                            .max_h(px(192.0))
+                            .child(
+                                v_flex().children(self.channel_options.iter().enumerate().map(
+                                    |(index, option)| {
                                         let is_selected = selected_index == Some(index);
                                         let mut row = h_flex()
                                             .id(("clan-system-channel-item", index))
@@ -955,7 +951,7 @@ impl OverviewSettingPage {
                                             .text_sm()
                                             .cursor_pointer()
                                             .hover(|s| s.bg(theme.bg_hover))
-                                            .child(Self::render_channel_row_label(&option, theme));
+                                            .child(Self::render_channel_row_label(option, theme));
                                         if !is_selected {
                                             row.interactivity().on_click(cx.listener(
                                                 move |this, _, _, cx| {
@@ -964,11 +960,12 @@ impl OverviewSettingPage {
                                             ));
                                         }
                                         row
-                                    }),
+                                    },
                                 )),
-                        ),
-                ))
-            })
+                            ),
+                    ),
+            ))
+        })
     }
 
     fn render_toggle_row(
@@ -1026,12 +1023,10 @@ impl Render for OverviewSettingPage {
                                     mezon_i18n::t(&locale, "clanSettings.clanLogo.clanName"),
                                     &theme,
                                 ))
-                                .child(
-                                    self.name_input.as_ref().map_or_else(
-                                        || div().into_any_element(),
-                                        |input| Input::new(input).w_full().into_any_element(),
-                                    ),
-                                )
+                                .child(self.name_input.as_ref().map_or_else(
+                                    || div().into_any_element(),
+                                    |input| Input::new(input).w_full().into_any_element(),
+                                ))
                                 .when_some(name_error, |el, err| {
                                     el.child(
                                         div()
@@ -1046,154 +1041,141 @@ impl Render for OverviewSettingPage {
                         ),
                     ),
             )
-            .child(section_divider(div(), &theme).child(
-                h_flex()
-                    .gap(px(20.0))
-                    .items_start()
-                    .w_full()
-                    .child(
-                        half_column().child(
-                            v_flex()
-                                .w_full()
-                                .child(section_heading_xs(
-                                mezon_i18n::t(&locale, "clanSettings.clanBanner.title"),
+            .child(
+                section_divider(div(), &theme).child(
+                    h_flex()
+                        .gap(px(20.0))
+                        .items_start()
+                        .w_full()
+                        .child(
+                            half_column().child(
+                                v_flex()
+                                    .w_full()
+                                    .child(section_heading_xs(
+                                        mezon_i18n::t(&locale, "clanSettings.clanBanner.title"),
+                                        &theme,
+                                    ))
+                                    .child(
+                                        body_text(
+                                            mezon_i18n::t(
+                                                &locale,
+                                                "clanSettings.clanBanner.description",
+                                            ),
+                                            &theme,
+                                        )
+                                        .mb(px(8.0)),
+                                    )
+                                    .child(body_text(
+                                        mezon_i18n::t(
+                                            &locale,
+                                            "clanSettings.clanBanner.recommendedSize",
+                                        ),
+                                        &theme,
+                                    ))
+                                    .child(
+                                        div().mt(px(16.0)).child(
+                                            Button::new("clan-banner-upload")
+                                                .label(mezon_i18n::t(
+                                                    &locale,
+                                                    "clanSettings.clanBanner.uploadBackground",
+                                                ))
+                                                .primary()
+                                                .with_size(Size::Large)
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.pick_clan_banner(cx);
+                                                })),
+                                        ),
+                                    ),
+                            ),
+                        )
+                        .child(
+                            half_column().child(
+                                div()
+                                    .w_full()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.tokens.theme_setting_nav)
+                                    .overflow_hidden()
+                                    .child(self.render_banner_preview(&locale, &theme, cx)),
+                            ),
+                        ),
+                ),
+            )
+            .when(!self.system_loading && system.is_some(), |el| {
+                let system = system.unwrap();
+                el.child(
+                    section_divider(div(), &theme).child(
+                        v_flex()
+                            .gap_0()
+                            .child(section_heading_sm(
+                                mezon_i18n::t(&locale, "clanSettings.systemMessages.title"),
                                 &theme,
                             ))
+                            .child(self.render_channel_picker(&theme, cx))
                             .child(
                                 body_text(
                                     mezon_i18n::t(
                                         &locale,
-                                        "clanSettings.clanBanner.description",
+                                        "clanSettings.systemMessages.description",
                                     ),
                                     &theme,
                                 )
-                                .mb(px(8.0)),
+                                .py(px(8.0)),
                             )
-                            .child(body_text(
-                                mezon_i18n::t(
-                                    &locale,
-                                    "clanSettings.clanBanner.recommendedSize",
-                                ),
+                            .child(Self::render_toggle_row(
+                                mezon_i18n::t(&locale, "clanSettings.systemMessages.welcomeRandom")
+                                    .into(),
+                                system.welcome_random,
+                                "system-welcome-random",
                                 &theme,
+                                cx.listener(|this, next: &bool, _, cx| {
+                                    this.toggle_system_flag(|s| s.welcome_random = *next, cx);
+                                }),
                             ))
-                            .child(
-                                div().mt(px(16.0)).child(
-                                    Button::new("clan-banner-upload")
-                                        .label(mezon_i18n::t(
-                                            &locale,
-                                            "clanSettings.clanBanner.uploadBackground",
-                                        ))
-                                        .primary()
-                                        .with_size(Size::Large)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.pick_clan_banner(cx);
-                                        })),
-                                ),
-                            ),
-                        ),
-                    )
-                    .child(
-                        half_column().child(
-                            div()
-                                .w_full()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.tokens.theme_setting_nav)
-                                .overflow_hidden()
-                                .child(self.render_banner_preview(&locale, &theme, cx)),
-                        ),
+                            .child(Self::render_toggle_row(
+                                mezon_i18n::t(&locale, "clanSettings.systemMessages.setupTips")
+                                    .into(),
+                                system.setup_tips,
+                                "system-setup-tips",
+                                &theme,
+                                cx.listener(|this, next: &bool, _, cx| {
+                                    this.toggle_system_flag(|s| s.setup_tips = *next, cx);
+                                }),
+                            ))
+                            .child(Self::render_toggle_row(
+                                mezon_i18n::t(&locale, "clanSettings.systemMessages.auditLog")
+                                    .into(),
+                                !system.hide_audit_log,
+                                "system-audit-log",
+                                &theme,
+                                cx.listener(|this, next: &bool, _, cx| {
+                                    this.toggle_system_flag(|s| s.hide_audit_log = !*next, cx);
+                                }),
+                            )),
                     ),
-            ))
-            .when(!self.system_loading && system.is_some(), |el| {
-                let system = system.unwrap();
-                el.child(section_divider(div(), &theme).child(
+                )
+            })
+            .child(
+                section_divider(div(), &theme).child(
                     v_flex()
                         .gap_0()
                         .child(section_heading_sm(
-                            mezon_i18n::t(&locale, "clanSettings.systemMessages.title"),
+                            mezon_i18n::t(&locale, "clanSettings.systemMessages.anoTitle"),
                             &theme,
                         ))
-                        .child(self.render_channel_picker(&theme, cx))
-                        .child(
-                            body_text(
-                                mezon_i18n::t(
-                                    &locale,
-                                    "clanSettings.systemMessages.description",
-                                ),
-                                &theme,
-                            )
-                            .py(px(8.0)),
-                        )
                         .child(Self::render_toggle_row(
-                                    mezon_i18n::t(
-                                        &locale,
-                                        "clanSettings.systemMessages.welcomeRandom",
-                                    )
-                                    .into(),
-                                    system.welcome_random,
-                                    "system-welcome-random",
-                                    &theme,
-                                    cx.listener(|this, next: &bool, _, cx| {
-                                        this.toggle_system_flag(
-                                            |s| s.welcome_random = *next,
-                                            cx,
-                                        );
-                                    }),
-                        ))
-                        .child(Self::render_toggle_row(
-                            mezon_i18n::t(
-                                &locale,
-                                "clanSettings.systemMessages.setupTips",
-                            )
-                            .into(),
-                            system.setup_tips,
-                            "system-setup-tips",
+                            mezon_i18n::t(&locale, "clanSettings.systemMessages.anoDesc").into(),
+                            self.draft.prevent_anonymous,
+                            "prevent-anonymous",
                             &theme,
                             cx.listener(|this, next: &bool, _, cx| {
-                                this.toggle_system_flag(|s| s.setup_tips = *next, cx);
-                            }),
-                        ))
-                        .child(Self::render_toggle_row(
-                            mezon_i18n::t(
-                                &locale,
-                                "clanSettings.systemMessages.auditLog",
-                            )
-                            .into(),
-                            !system.hide_audit_log,
-                            "system-audit-log",
-                            &theme,
-                            cx.listener(|this, next: &bool, _, cx| {
-                                this.toggle_system_flag(
-                                    |s| s.hide_audit_log = !*next,
-                                    cx,
-                                );
+                                this.draft.prevent_anonymous = *next;
+                                cx.notify();
                             }),
                         )),
-                ))
-            })
-            .child(section_divider(div(), &theme).child(
-                v_flex()
-                    .gap_0()
-                    .child(section_heading_sm(
-                        mezon_i18n::t(&locale, "clanSettings.systemMessages.anoTitle"),
-                        &theme,
-                    ))
-                    .child(Self::render_toggle_row(
-                        mezon_i18n::t(
-                            &locale,
-                            "clanSettings.systemMessages.anoDesc",
-                        )
-                        .into(),
-                        self.draft.prevent_anonymous,
-                        "prevent-anonymous",
-                        &theme,
-                        cx.listener(|this, next: &bool, _, cx| {
-                            this.draft.prevent_anonymous = *next;
-                            cx.notify();
-                        }),
-                    )),
-            ))
+                ),
+            )
     }
 }
 

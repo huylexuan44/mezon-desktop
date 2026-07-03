@@ -414,7 +414,9 @@ impl VoiceStore {
 
     pub fn close_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
-            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            let _ = prev
+                .handle
+                .update(cx, |_, window, _| window.remove_window());
             self.sync_screen_full_res();
             cx.notify();
         }
