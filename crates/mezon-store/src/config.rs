@@ -383,6 +383,15 @@ impl AppConfig {
         self.imgproxy_url(source, 300, 300, "fit")
     }
 
+    /// CDN URL for a custom emoji by id (parity with web `getSrcEmoji`).
+    pub fn emoji_src(&self, emoji_id: &str) -> String {
+        if emoji_id.is_empty() || emoji_id == "0" {
+            return String::new();
+        }
+        let base = self.base_img_url.trim_end_matches('/');
+        format!("{base}/emojis/{emoji_id}.webp")
+    }
+
     pub fn attachment_proxy(
         &self,
         source: &str,
