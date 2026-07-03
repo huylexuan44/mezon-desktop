@@ -16,7 +16,7 @@ const USER_MENTIONED: i32 = -9;
 const USER_REPLIED: i32 = -11;
 const CHAT_UPDATE: i32 = 1;
 const CHAT_REMOVE: i32 = 2;
-const ID_MENTION_HERE: i64 = 177_573_111_102_011_1321;
+const ID_MENTION_HERE: i64 = 1_775_731_111_020_111_321;
 const MAX_PROCESSED_KEYS: usize = 500;
 
 #[derive(Debug, Clone)]
@@ -54,6 +54,18 @@ impl TopicBadgeStore {
         cx.global::<GlobalTopicBadgeStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalTopicBadgeStore>()
+            .map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.topic_parent_map.clear();
+        self.processed_keys.clear();
+        cx.emit(TopicBadgeEvent::Updated);
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
         Self {
@@ -76,6 +88,7 @@ impl TopicBadgeStore {
             dispatch.on(RealtimeKind::MarkAsRead, &entity, |this, event, cx| {
                 this.handle_event(event, cx);
             });
+            dispatch.on_lagged(&entity, |this, cx| this.reset(cx));
         });
     }
 
@@ -135,12 +148,13 @@ impl TopicBadgeStore {
         if !is_message_mention_or_reply(&topic_message, user_id, cx) {
             return false;
         }
+        let dedupe_key = format!("{parent_channel_id}_{}", m.message_id);
         self.increment_topic_for_message(
             &clan_id,
             &parent_channel_id,
             &topic_id,
             Some(m.message_id.to_string()),
-            &format!("{topic_id}_{}", m.message_id),
+            &dedupe_key,
         )
     }
 
@@ -355,7 +369,7 @@ fn parse_message_mentions(bytes: &[u8]) -> Vec<ParsedMention> {
     if let Ok(values) = serde_json::from_slice::<Vec<serde_json::Value>>(bytes) {
         return values
             .into_iter()
-            .filter_map(|value| {
+            .map(|value| {
                 let user_id = value
                     .get("user_id")
                     .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
@@ -364,7 +378,7 @@ fn parse_message_mentions(bytes: &[u8]) -> Vec<ParsedMention> {
                     .get("role_id")
                     .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
                     .and_then(|s| if s.is_empty() { None } else { s.parse().ok() });
-                Some(ParsedMention { user_id, role_id })
+                ParsedMention { user_id, role_id }
             })
             .collect();
     }

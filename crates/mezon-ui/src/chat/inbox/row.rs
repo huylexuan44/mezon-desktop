@@ -1,5 +1,5 @@
 use chrono::{Local, TimeZone};
-use gpui::{App, FontWeight, SharedString, div, img, prelude::*, px, rgb};
+use gpui::{App, Entity, FontWeight, SharedString, div, img, prelude::*, px, rgb};
 use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, InboxCategory,
     InboxMentionSpan, InboxNotification, ProfileContext, TopicDiscussion, UserId,
@@ -8,6 +8,7 @@ use mezon_store::{
 };
 
 use crate::components::primitives::{Avatar, Sizable, Size, h_flex, v_flex};
+use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
 const DISPLAY_NAME_COLOR: u32 = 0x17ac86;
@@ -17,19 +18,22 @@ pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
 pub const TOPIC_ROW_HEIGHT: f32 = 96.;
 pub const ROW_HEIGHT: f32 = MENTION_ROW_HEIGHT;
 
-struct MentionBreadcrumb {
+#[derive(Clone)]
+pub(crate) struct MentionBreadcrumb {
     clan_name: SharedString,
     category_name: SharedString,
     channel_label: SharedString,
     thread_label: Option<SharedString>,
 }
 
-struct ForYouLine {
+#[derive(Clone)]
+pub(crate) struct ForYouLine {
     display_name: SharedString,
     subject_suffix: SharedString,
 }
 
-struct NotificationRowView {
+#[derive(Clone)]
+pub(crate) struct NotificationRowView {
     sender_name: SharedString,
     avatar_url: Option<SharedString>,
     time_label: SharedString,
@@ -45,7 +49,8 @@ struct NotificationRowView {
     has_more_attachment: bool,
 }
 
-struct TopicRowView {
+#[derive(Clone)]
+pub(crate) struct TopicRowView {
     avatar_name: SharedString,
     avatar_url: Option<SharedString>,
     reply_preview: SharedString,
@@ -264,7 +269,7 @@ fn build_mention_breadcrumb(
     })
 }
 
-fn resolve_notification_row(
+pub(crate) fn build_notification_row_view(
     notification: &InboxNotification,
     locale: &SharedString,
     cx: &App,
@@ -376,7 +381,7 @@ fn resolve_notification_row(
     }
 }
 
-fn resolve_topic_row(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
+pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
     let clan_id = topic.clan_id.parse::<ClanId>().ok();
     let sender_id = if topic.last_sender_id.is_empty() {
         topic.creator_id.as_str()
@@ -400,8 +405,16 @@ fn resolve_topic_row(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
     }
 }
 
-fn render_avatar(name: &SharedString, url: Option<&SharedString>, size: Size) -> impl IntoElement {
-    let mut avatar = Avatar::new().name(name.clone()).with_size(size);
+fn render_avatar(
+    name: &SharedString,
+    url: Option<&SharedString>,
+    size: Size,
+    avatar_cache: Entity<LruImageCache>,
+) -> impl IntoElement {
+    let mut avatar = Avatar::new()
+        .name(name.clone())
+        .with_size(size)
+        .image_cache(avatar_cache);
     if let Some(src) = url.filter(|s| !s.is_empty()) {
         avatar = avatar.src(src.clone());
     }
@@ -539,6 +552,7 @@ fn render_attachment_preview(
     link: &str,
     filetype: &str,
     has_more: bool,
+    image_cache: Entity<LruImageCache>,
 ) -> impl IntoElement {
     let more_files = mezon_i18n::t(locale, "channelTopbar.moreFiles");
     v_flex()
@@ -551,6 +565,7 @@ fn render_attachment_preview(
                 .rounded(px(8.))
                 .child(
                     img(link)
+                        .image_cache(&image_cache)
                         .w_full()
                         .h_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -618,9 +633,11 @@ pub fn render_notification_body(
     theme: &Theme,
     locale: &SharedString,
     notification: InboxNotification,
-    cx: &App,
+    view: &NotificationRowView,
+    avatar_cache: Entity<LruImageCache>,
+    image_cache: Entity<LruImageCache>,
+    _cx: &App,
 ) -> impl IntoElement {
-    let view = resolve_notification_row(&notification, locale, cx);
     let is_for_you = notification.category == InboxCategory::ForYou;
     let is_mentions = notification.category == InboxCategory::Mentions;
     let is_messages = notification.category == InboxCategory::Messages;
@@ -635,6 +652,7 @@ pub fn render_notification_body(
             &view.sender_name,
             view.avatar_url.as_ref(),
             Size::Small,
+            avatar_cache.clone(),
         ))
         .child(
             v_flex()
@@ -718,6 +736,7 @@ pub fn render_notification_body(
                             &view.attachment_link,
                             &view.attachment_type,
                             view.has_more_attachment,
+                            image_cache.clone(),
                         ))
                     })
                 }),
@@ -727,10 +746,11 @@ pub fn render_notification_body(
 pub fn render_topic_body(
     theme: &Theme,
     locale: &SharedString,
-    topic: &TopicDiscussion,
-    cx: &App,
+    _topic: &TopicDiscussion,
+    view: &TopicRowView,
+    avatar_cache: Entity<LruImageCache>,
+    _cx: &App,
 ) -> impl IntoElement {
-    let view = resolve_topic_row(topic, cx);
     let topic_title = mezon_i18n::t(locale, "notification.topicAndYou");
     let replied_label = mezon_i18n::t(locale, "notification.repliedTo");
     let attachment_label: SharedString =
@@ -752,6 +772,7 @@ pub fn render_topic_body(
             &view.avatar_name,
             view.avatar_url.as_ref(),
             Size::Medium,
+            avatar_cache,
         ))
         .child(
             v_flex()

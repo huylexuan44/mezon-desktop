@@ -45,6 +45,20 @@ impl TopicsStore {
         cx.global::<GlobalTopicsStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalTopicsStore>().map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.topics.clear();
+        self.clan_id = None;
+        self.loading = false;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.fetched_at = None;
+        cx.emit(TopicsEvent::Updated);
+        cx.notify();
+    }
+
     pub fn topics(&self) -> &[TopicDiscussion] {
         &self.topics
     }

@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{
-    AppApi, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory, InboxNotification,
-    RealtimeEvent, inbox_notification_from_api,
+    AppApi, ConnectionStatus, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
+    InboxNotification, RealtimeEvent, inbox_notification_from_api,
 };
 
 use crate::CACHE_TTL;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+const REALTIME_BUCKET_CAP: usize = (INBOX_PAGE_LIMIT as usize) * 4;
 
 #[derive(Debug, Clone)]
 pub enum InboxEvent {
@@ -50,6 +52,7 @@ pub struct InboxStore {
     active_clan_id: Option<String>,
     active_channel_id: Option<String>,
     api: Arc<AppApi>,
+    _conn_watch: Task<()>,
 }
 
 struct GlobalInboxStore(Entity<InboxStore>);
@@ -68,13 +71,27 @@ impl InboxStore {
         cx.global::<GlobalInboxStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalInboxStore>().map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.buckets.clear();
+        self.active_clan_id = None;
+        self.active_channel_id = None;
+        cx.emit(InboxEvent::Updated);
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
+        let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
             buckets: HashMap::new(),
             active_clan_id: None,
             active_channel_id: None,
             api,
+            _conn_watch: conn_watch,
         }
     }
 
@@ -84,7 +101,29 @@ impl InboxStore {
             dispatch.on(RealtimeKind::Notifications, &entity, |this, event, cx| {
                 this.handle_event(event, cx);
             });
+            dispatch.on_lagged(&entity, |this, cx| this.refresh_active(cx));
         });
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this.update(cx, |this, cx| this.refresh_active(cx)).is_err() {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
+                }
+            }
+        })
     }
 
     pub fn set_active_context(
@@ -300,17 +339,38 @@ impl InboxStore {
             if self.should_skip_realtime(&notification) {
                 continue;
             }
-            let bucket = self.bucket_mut(&notification.clan_id, notification.category);
+            let Some(clan_id) = self.realtime_bucket_clan_id(&notification) else {
+                continue;
+            };
+            let key = BucketKey {
+                clan_id,
+                category: notification.category,
+            };
+            let Some(bucket) = self.buckets.get_mut(&key) else {
+                continue;
+            };
+            if bucket.fetched_at.is_none() {
+                continue;
+            }
             if bucket.items.iter().any(|n| n.id == notification.id) {
                 continue;
             }
             bucket.items.insert(0, notification);
+            if bucket.items.len() > REALTIME_BUCKET_CAP {
+                bucket.items.truncate(REALTIME_BUCKET_CAP);
+            }
             changed = true;
         }
         if changed {
             cx.emit(InboxEvent::Updated);
             cx.notify();
         }
+    }
+
+    fn realtime_bucket_clan_id(&self, notification: &InboxNotification) -> Option<String> {
+        notification
+            .effective_clan_id()
+            .or_else(|| self.active_clan_id.clone())
     }
 
     fn should_skip_realtime(&self, notification: &InboxNotification) -> bool {
@@ -321,6 +381,21 @@ impl InboxStore {
             active_channel == notification.channel_id
         } else {
             false
+        }
+    }
+
+    fn refresh_active(&mut self, cx: &mut Context<Self>) {
+        let Some(active_clan_id) = self.active_clan_id.clone() else {
+            return;
+        };
+        let categories: Vec<InboxCategory> = self
+            .buckets
+            .keys()
+            .filter(|key| key.clan_id == active_clan_id)
+            .map(|key| key.category)
+            .collect();
+        for category in categories {
+            self.fetch_page(&active_clan_id, category, None, cx);
         }
     }
 }

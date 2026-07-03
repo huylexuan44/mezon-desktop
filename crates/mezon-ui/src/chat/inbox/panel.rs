@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClipboardItem, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
+    App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, ListAlignment, ListState, MouseButton, MouseDownEvent, Render,
     SharedString, Subscription, Window, div, list, prelude::*, px, rgb, svg,
 };
@@ -14,11 +14,16 @@ use mezon_store::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{h_flex, v_flex};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+    MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+};
 
 use crate::chat::inbox::row::{
+    NotificationRowView, TopicRowView, build_notification_row_view, build_topic_row_view,
     notification_copy_text, render_notification_body, render_topic_body,
 };
-use crate::chat::inbox::{InboxTab, MESSAGE_ROW_HEIGHT, row_height_for_tab};
+use crate::chat::inbox::{InboxTab, MESSAGE_ROW_HEIGHT};
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
 use crate::theme::{ActiveTheme, Theme};
@@ -37,6 +42,8 @@ pub struct InboxPopoverPanel {
     list_state: ListState,
     focus_handle: FocusHandle,
     cached_items: Rc<Vec<ListRow>>,
+    avatar_image_cache: Entity<LruImageCache>,
+    message_image_cache: Entity<LruImageCache>,
     _inbox_sub: Subscription,
     _topics_sub: Subscription,
     _members_sub: Subscription,
@@ -57,6 +64,24 @@ impl InboxPopoverPanel {
             ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
         let weak = cx.weak_entity();
         Self::attach_list_scroll_handler(&list_state, weak);
+        let avatar_image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "inbox-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        let message_image_cache = cx.new(|cx| {
+            LruImageCache::message(
+                "inbox-image",
+                MESSAGE_IMAGE_CACHE_CAPACITY,
+                MESSAGE_IMAGE_CACHE_BYTES,
+                MESSAGE_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
 
         let focus_handle = cx.focus_handle();
         cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
@@ -132,6 +157,8 @@ impl InboxPopoverPanel {
             list_state,
             focus_handle,
             cached_items: Rc::new(Vec::new()),
+            avatar_image_cache,
+            message_image_cache,
             _inbox_sub,
             _topics_sub,
             _members_sub,
@@ -191,14 +218,22 @@ impl InboxPopoverPanel {
     }
 
     fn sync_from_store(&mut self, cx: &App) {
-        self.cached_items = Self::build_items(self.tab, &self.clan_id, cx);
+        self.cached_items = Self::build_items(self.tab, &self.clan_id, &self.locale, cx);
         self.sync_list_state(false);
     }
 
-    fn build_items(tab: InboxTab, clan_id: &str, cx: &App) -> Rc<Vec<ListRow>> {
+    fn build_items(tab: InboxTab, clan_id: &str, locale: &SharedString, cx: &App) -> Rc<Vec<ListRow>> {
         if tab == InboxTab::Topics {
             let topics = TopicsStore::global(cx).read(cx).topics().to_vec();
-            return Rc::new(topics.into_iter().map(ListRow::Topic).collect());
+            return Rc::new(
+                topics
+                    .into_iter()
+                    .map(|topic| {
+                        let view = build_topic_row_view(&topic, cx);
+                        ListRow::Topic { topic, view }
+                    })
+                    .collect(),
+            );
         }
         let Some(category) = tab.category() else {
             return Rc::new(Vec::new());
@@ -207,7 +242,15 @@ impl InboxPopoverPanel {
             .read(cx)
             .items(clan_id, category)
             .to_vec();
-        Rc::new(items.into_iter().map(ListRow::Notification).collect())
+        Rc::new(
+            items
+                .into_iter()
+                .map(|notification| {
+                    let view = build_notification_row_view(&notification, locale, cx);
+                    ListRow::Notification { notification, view }
+                })
+                .collect(),
+        )
     }
 
     fn select_tab(&mut self, tab: InboxTab, cx: &mut Context<Self>) {
@@ -251,8 +294,14 @@ impl InboxPopoverPanel {
 
 #[derive(Clone)]
 enum ListRow {
-    Notification(InboxNotification),
-    Topic(TopicDiscussion),
+    Notification {
+        notification: InboxNotification,
+        view: NotificationRowView,
+    },
+    Topic {
+        topic: TopicDiscussion,
+        view: TopicRowView,
+    },
 }
 
 impl EventEmitter<DismissEvent> for InboxPopoverPanel {}
@@ -287,6 +336,8 @@ impl Render for InboxPopoverPanel {
         };
 
         let list_state = self.list_state.clone();
+        let avatar_cache = self.avatar_image_cache.clone();
+        let message_cache = self.message_image_cache.clone();
         let this = cx.weak_entity();
 
         let list_body: gpui::AnyElement = if items.is_empty() && is_loading {
@@ -307,13 +358,13 @@ impl Render for InboxPopoverPanel {
                         let Some(row) = items_for_list.get(ix).cloned() else {
                             return div().into_any_element();
                         };
-                        let row_height = row_height_for_item(active_tab, &row);
                         render_row(
                             theme_for_list.as_ref(),
                             &locale_for_list,
                             row,
                             active_tab,
-                            row_height,
+                            avatar_cache.clone(),
+                            message_cache.clone(),
                             panel_weak.clone(),
                             inbox_handle_for_list.clone(),
                             cx,
@@ -629,24 +680,27 @@ fn render_row(
     locale: &SharedString,
     row: ListRow,
     tab: InboxTab,
-    row_height: f32,
+    avatar_cache: Entity<LruImageCache>,
+    message_cache: Entity<LruImageCache>,
     this: gpui::WeakEntity<InboxPopoverPanel>,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
     match row {
-        ListRow::Notification(notification) => render_notification_item(
+        ListRow::Notification { notification, view } => render_notification_item(
             theme,
             locale,
             notification,
+            view,
             tab,
-            row_height,
+            avatar_cache,
+            message_cache,
             this,
             inbox_handle,
             cx,
         ),
-        ListRow::Topic(topic) => {
-            render_topic_item(theme, locale, topic, row_height, inbox_handle, cx)
+        ListRow::Topic { topic, view } => {
+            render_topic_item(theme, locale, topic, view, avatar_cache, inbox_handle, cx)
         }
     }
 }
@@ -749,28 +803,14 @@ fn schedule_topic_jump(
     );
 }
 
-fn row_height_for_item(tab: InboxTab, row: &ListRow) -> f32 {
-    match (tab, row) {
-        (InboxTab::Messages, ListRow::Notification(notification)) => {
-            if notification
-                .message
-                .as_ref()
-                .is_some_and(|m| !m.attachment_link.is_empty())
-            {
-                return MESSAGE_ROW_HEIGHT + 40.;
-            }
-            row_height_for_tab(tab)
-        }
-        _ => row_height_for_tab(tab),
-    }
-}
-
 fn render_notification_item(
     theme: &Theme,
     locale: &SharedString,
     notification: InboxNotification,
+    view: NotificationRowView,
     tab: InboxTab,
-    row_height: f32,
+    avatar_cache: Entity<LruImageCache>,
+    message_cache: Entity<LruImageCache>,
     this: gpui::WeakEntity<InboxPopoverPanel>,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     cx: &App,
@@ -789,8 +829,6 @@ fn render_notification_item(
     let outer_py = if tab == InboxTab::ForYou { px(4.) } else { px(8.) };
 
     div()
-        .h(px(row_height))
-        .overflow_hidden()
         .flex()
         .flex_col()
         .px_3()
@@ -798,12 +836,10 @@ fn render_notification_item(
         .w_full()
         .child(
             div()
-                .flex_1()
-                .min_h_0()
                 .w_full()
                 .relative()
                 .group("inbox-item")
-                .p(if tab == InboxTab::ForYou { px(8.) } else { px(8.) })
+                .p(px(8.))
                 .rounded(px(8.))
                 .bg(theme.bg_secondary)
                 .child(
@@ -906,7 +942,15 @@ fn render_notification_item(
                     div()
                         .pr(if show_copy { px(52.) } else { px(28.) })
                         .when(show_jump, |content| content.pb(px(28.)))
-                        .child(render_notification_body(theme, locale, notification, cx)),
+                        .child(render_notification_body(
+                            theme,
+                            locale,
+                            notification,
+                            &view,
+                            avatar_cache,
+                            message_cache,
+                            cx,
+                        )),
                 ),
         )
         .into_any_element()
@@ -916,7 +960,8 @@ fn render_topic_item(
     theme: &Theme,
     locale: &SharedString,
     topic: TopicDiscussion,
-    row_height: f32,
+    view: TopicRowView,
+    avatar_cache: Entity<LruImageCache>,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -925,8 +970,6 @@ fn render_topic_item(
     let jump_label = mezon_i18n::t(locale, "channelTopbar.tooltips.jump");
 
     div()
-        .h(px(row_height))
-        .overflow_hidden()
         .flex()
         .flex_col()
         .px_3()
@@ -934,8 +977,6 @@ fn render_topic_item(
         .w_full()
         .child(
             div()
-                .flex_1()
-                .min_h_0()
                 .w_full()
                 .relative()
                 .group("inbox-topic")
@@ -970,7 +1011,7 @@ fn render_topic_item(
                             }
                         }),
                 )
-                .child(render_topic_body(theme, locale, &topic, cx)),
+                .child(render_topic_body(theme, locale, &topic, &view, avatar_cache, cx)),
         )
         .into_any_element()
 }

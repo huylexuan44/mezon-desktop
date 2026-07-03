@@ -227,7 +227,12 @@ fn render_body(
 
     let viewport_h = f32::from(window.viewport_size().height);
     let max_body = (viewport_h * MAX_VH - HEADER_HEIGHT).max(MIN_BODY_HEIGHT);
-    let body_h = px(LIST_BODY_HEIGHT.min(max_body));
+    let estimated_content_h = if cards.is_empty() {
+        MIN_BODY_HEIGHT
+    } else {
+        (cards.len() as f32 * 88.) + 16.
+    };
+    let body_h = px(estimated_content_h.min(LIST_BODY_HEIGHT).min(max_body));
 
     let body: gpui::AnyElement = if cards.is_empty() {
         let inner = if loading {

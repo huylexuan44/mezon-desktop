@@ -378,28 +378,15 @@ impl InboxNotification {
 
 impl TopicDiscussion {
     pub fn reply_preview_text(&self) -> String {
-        let raw = if self.last_message_preview.is_empty() {
-            self.content.as_str()
-        } else {
-            self.last_message_preview.as_str()
-        };
+        let raw = self.content.as_str();
         if message_content_is_attachment(raw) {
             return String::new();
         }
-        let text = display_text_from_message_content(raw);
-        if !text.is_empty() {
-            return text;
-        }
-        display_text_from_message_content(&self.content)
+        display_text_from_message_content(raw)
     }
 
     pub fn reply_is_attachment(&self) -> bool {
-        let raw = if self.last_message_preview.is_empty() {
-            self.content.as_str()
-        } else {
-            self.last_message_preview.as_str()
-        };
-        message_content_is_attachment(raw)
+        message_content_is_attachment(&self.content)
     }
 }
 
@@ -467,10 +454,11 @@ pub fn inbox_notification_from_api(n: api::Notification) -> Result<InboxNotifica
 pub fn inbox_notifications_from_list(
     list: api::NotificationList,
 ) -> Result<Vec<InboxNotification>> {
-    list.notifications
+    Ok(list
+        .notifications
         .into_iter()
-        .map(inbox_notification_from_api)
-        .collect()
+        .filter_map(|n| inbox_notification_from_api(n).ok())
+        .collect())
 }
 
 pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
