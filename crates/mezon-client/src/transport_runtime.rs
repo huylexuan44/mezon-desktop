@@ -15,7 +15,7 @@ use tokio::runtime::Runtime;
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
 
-const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const HTTP_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(crate) fn http_client() -> &'static ReqwestClient {
     HTTP_CLIENT.get_or_init(new_http_client)
@@ -50,11 +50,7 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
     put_bytes_to_content_type(url, data, "application/octet-stream").await
 }
 
-pub async fn put_bytes_to_content_type(
-    url: &str,
-    data: Vec<u8>,
-    content_type: &str,
-) -> Result<()> {
+pub async fn put_bytes_to_content_type(url: &str, data: Vec<u8>, content_type: &str) -> Result<()> {
     tracing::debug!("put_bytes_to_content_type: PUTting {} bytes", data.len());
     let url = url.to_string();
     let content_type = content_type.to_string();
@@ -65,15 +61,18 @@ pub async fn put_bytes_to_content_type(
                 .uri(&url)
                 .header("Content-Type", content_type)
                 .body(AsyncBody::from(data))?;
-            let response =
-                match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, http_client().send(request)).await
-                {
-                    Ok(result) => result?,
-                    Err(_) => anyhow::bail!(
-                        "HTTP PUT timed out after {}s",
-                        HTTP_REQUEST_TIMEOUT.as_secs()
-                    ),
-                };
+            let response = match tokio::time::timeout(
+                HTTP_TRANSFER_TIMEOUT,
+                http_client().send(request),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => anyhow::bail!(
+                    "HTTP PUT timed out after {}s",
+                    HTTP_TRANSFER_TIMEOUT.as_secs()
+                ),
+            };
             let status = response.status();
             tracing::debug!("put_bytes_to_content_type: response status={}", status);
             if !status.is_success() {
@@ -99,7 +98,7 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
                 .method(http::Method::GET)
                 .uri(&url)
                 .body(AsyncBody::empty())?;
-            match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, async move {
+            match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, async move {
                 let mut response = http_client().send(request).await?;
                 let status = response.status();
                 if !status.is_success() {
@@ -123,7 +122,7 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
                 Ok(result) => result,
                 Err(_) => anyhow::bail!(
                     "HTTP GET timed out after {}s",
-                    HTTP_REQUEST_TIMEOUT.as_secs()
+                    HTTP_TRANSFER_TIMEOUT.as_secs()
                 ),
             }
         })
@@ -786,7 +785,11 @@ impl TransportClient {
     ) -> Result<mezon_proto::api::RoleList> {
         let transport = self.inner.clone();
         runtime()
-            .spawn(async move { transport.get_role_of_user_in_clan(clan_id, channel_id).await })
+            .spawn(async move {
+                transport
+                    .get_role_of_user_in_clan(clan_id, channel_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

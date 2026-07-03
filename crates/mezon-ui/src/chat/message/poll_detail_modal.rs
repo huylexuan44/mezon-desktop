@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, SharedString, Task, UniformListScrollHandle,
-    Window, div, img, prelude::*, px, relative, rgba, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, ListSizingBehavior, SharedString, Task,
+    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgba, uniform_list,
 };
 use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
@@ -142,7 +142,10 @@ impl Render for PollDetailModal {
                     .text_color(theme.tokens.text_secondary)
                     .hover(|s| s.bg(theme.tokens.bg_item_hover))
                     .on_click(cx.listener(move |modal, _, _, cx| {
-                        modal.selected_index = i;
+                        if modal.selected_index != i {
+                            modal.selected_index = i;
+                            modal.voter_scroll = UniformListScrollHandle::new();
+                        }
                         cx.notify();
                     }))
                     .child(format!("{} ({count})", answer.label)),
@@ -178,6 +181,7 @@ impl Render for PollDetailModal {
                     .collect::<Vec<_>>()
             })
             .track_scroll(&self.voter_scroll)
+            .with_sizing_behavior(ListSizingBehavior::Infer)
             .size_full()
             .into_any_element()
         };
@@ -288,6 +292,7 @@ fn render_voter(voter: &PollVoter, theme: &crate::theme::Theme) -> gpui::AnyElem
                 .min_w_0()
                 .child(
                     div()
+                        .truncate()
                         .text_sm()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.tokens.text_secondary)
@@ -295,6 +300,7 @@ fn render_voter(voter: &PollVoter, theme: &crate::theme::Theme) -> gpui::AnyElem
                 )
                 .child(
                     div()
+                        .truncate()
                         .text_xs()
                         .text_color(theme.text_muted)
                         .child(voter.username.clone()),

@@ -21,6 +21,10 @@ pub fn set_auto_start(enabled: bool) -> Result<()> {
     let exe_str = exe
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("executable path is not valid UTF-8"))?;
+
+    #[cfg(target_os = "macos")]
+    disable_legacy_login_item(exe_str);
+
     let mut builder = AutoLaunchBuilder::new();
     builder.set_app_name("Mezon").set_app_path(exe_str);
     #[cfg(target_os = "macos")]
@@ -36,4 +40,14 @@ pub fn set_auto_start(enabled: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn disable_legacy_login_item(exe_str: &str) {
+    let mut builder = AutoLaunchBuilder::new();
+    builder.set_app_name("Mezon").set_app_path(exe_str);
+    builder.set_use_launch_agent(false);
+    if let Ok(legacy) = builder.build() {
+        let _ = legacy.disable();
+    }
 }

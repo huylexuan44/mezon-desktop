@@ -9,12 +9,7 @@ use super::system_row::{
 use super::time::format_date_divider;
 use super::user_row::render_user_message;
 
-pub fn render_message_item(
-    messages: &[Message],
-    ix: usize,
-    ctx: &RowCtx,
-    cx: &App,
-) -> AnyElement {
+pub fn render_message_item(messages: &[Message], ix: usize, ctx: &RowCtx, cx: &App) -> AnyElement {
     let Some(msg) = messages.get(ix) else {
         return div().into_any_element();
     };

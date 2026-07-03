@@ -597,4 +597,3 @@ impl Icon {
         svg().path(name.path()).size(px(16.)).flex_none()
     }
 }
-

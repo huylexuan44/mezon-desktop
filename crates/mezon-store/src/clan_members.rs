@@ -233,8 +233,7 @@ impl ClanMembersStore {
                             .read(cx)
                             .current_user_id(cx)
                             .map(|uid| uid.0);
-                        let online_users = online_result
-                            .unwrap_or_default();
+                        let online_users = online_result.unwrap_or_default();
                         let online_ids = online_ids_from_users(&online_users, self_id);
                         let mut bucket = ClanBucket::default();
                         for cu in users {
