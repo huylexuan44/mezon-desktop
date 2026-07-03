@@ -49,6 +49,9 @@ pub struct RowCtx<'a> {
     pub welcome: Option<WelcomeContext>,
     pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
+    /// Message whose hover toolbar should show, after the React-style hover-intent
+    /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
+    pub hovered_row: Option<MessageId>,
     pub avatar_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,

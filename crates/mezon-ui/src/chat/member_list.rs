@@ -20,6 +20,8 @@ use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
 
+const DEFAULT_ROLE_COLOR: u32 = 0x99aab5;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemberSource {
     Channel,
@@ -46,6 +48,7 @@ struct MemberRow {
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    user_status: SharedString,
     is_owner: bool,
     rcm_id: SharedString,
     popover_id: SharedString,
@@ -57,6 +60,7 @@ struct RawMember {
     name: String,
     avatar_raw: String,
     online: bool,
+    user_status: String,
 }
 
 pub struct MemberListPanel {
@@ -67,6 +71,7 @@ pub struct MemberListPanel {
     avatar_image_cache: Entity<LruImageCache>,
     active_context: Option<ProfileContext>,
     open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
+    rebuild_pending: bool,
 }
 
 impl MemberListPanel {
@@ -147,12 +152,27 @@ impl MemberListPanel {
             avatar_image_cache,
             active_context: None,
             open_menu: None,
+            rebuild_pending: false,
         };
-        this.rebuild(cx);
+        this.recompute(cx);
         this
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        if self.rebuild_pending {
+            return;
+        }
+        self.rebuild_pending = true;
+        let handle = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |this, cx| {
+                this.rebuild_pending = false;
+                this.recompute(cx);
+            });
+        });
+    }
+
+    fn recompute(&mut self, cx: &mut Context<Self>) {
         self.active_context = match self.source {
             MemberSource::Channel => {
                 active_channel_context(cx).map(|ctx| ProfileContext::Clan(ctx.clan_id))
@@ -315,6 +335,7 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
                 name: member.name().to_string(),
                 avatar_raw: member.avatar().to_string(),
                 online: is_online,
+                user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
             })
             .collect()
     };
@@ -336,6 +357,7 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
             name: member.name().to_string(),
             avatar_raw: member.avatar().to_string(),
             online: member.online || presence_online.contains(&member.id()),
+            user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
         })
         .collect()
 }
@@ -418,6 +440,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         avatar_src,
         avatar_raw: raw.avatar_raw.into(),
         online: raw.online,
+        user_status: raw.user_status.into(),
         is_owner: owner_id == Some(raw.user_id),
     })
 }
@@ -434,6 +457,10 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
             .replace("{{count}}", &count.to_string())
             .to_uppercase(),
     };
+    let label_size = match kind {
+        HeaderKind::Members => px(12.),
+        HeaderKind::Online | HeaderKind::Offline => px(14.),
+    };
     div()
         .flex()
         .items_center()
@@ -441,7 +468,7 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
         .h(px(48.))
         .child(
             div()
-                .text_xs()
+                .text_size(label_size)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
                 .child(label),
@@ -497,21 +524,38 @@ fn render_member(
         .child(
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
+                .flex_col()
+                .min_w_0()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_primary)
-                        .child(member.name.clone()),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(DEFAULT_ROLE_COLOR))
+                                .child(member.name.clone()),
+                        )
+                        .when(member.is_owner, |this| {
+                            this.child(
+                                Icon::new(IconName::OwnerIcon)
+                                    .size(px(14.))
+                                    .text_color(rgb(0xF0B132)),
+                            )
+                        }),
                 )
-                .when(member.is_owner, |this| {
+                .when(!member.user_status.is_empty(), |this| {
                     this.child(
-                        Icon::new(IconName::OwnerIcon)
-                            .size(px(14.))
-                            .text_color(rgb(0xF0B132)),
+                        div()
+                            .max_w(px(100.))
+                            .text_xs()
+                            .text_color(theme.text_primary)
+                            .opacity(0.6)
+                            .truncate()
+                            .child(member.user_status.clone()),
                     )
                 }),
         );

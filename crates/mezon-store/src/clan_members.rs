@@ -7,8 +7,12 @@ use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
 use crate::KeyedCache;
+use crate::badge::BadgeService;
 use crate::clan::{ClanEvent, ClanList};
+use crate::presence::PresenceStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+const ONLINE_FETCH_LIMIT: i32 = 500;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct User {
@@ -210,22 +214,22 @@ impl ClanMembersStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let (users_result, status_result) = tokio::join!(
+            let (users_result, online_result, status_result) = tokio::join!(
                 api.list_clan_users(clan_id.get()),
+                api.list_user_online(clan_id.get(), ONLINE_FETCH_LIMIT, 0),
                 api.list_clan_users_status(clan_id.get()),
             );
             let _ = this.update(cx, |this, cx| {
                 this.loading.remove(&clan_id);
                 match users_result {
                     Ok(users) => {
-                        let online_ids: std::collections::HashSet<i64> = status_result
-                            .map(|s| {
-                                s.clan_user_statuses
-                                    .into_iter()
-                                    .map(|e| e.user_id)
-                                    .collect()
-                            })
+                        let self_id = BadgeService::global(cx)
+                            .read(cx)
+                            .current_user_id(cx)
+                            .map(|uid| uid.0);
+                        let online_users = online_result
                             .unwrap_or_default();
+                        let online_ids = online_ids_from_users(&online_users, self_id);
                         let mut bucket = ClanBucket::default();
                         for cu in users {
                             if let Some(mut member) = clan_member_from_proto(cu) {
@@ -238,6 +242,14 @@ impl ClanMembersStore {
                             bucket.ids.len()
                         );
                         this.cache.insert(clan_id, bucket, None);
+                        let online_uids: Vec<UserId> =
+                            online_ids.iter().map(|id| UserId(*id)).collect();
+                        let statuses = status_result
+                            .map(user_statuses_from_list)
+                            .unwrap_or_default();
+                        PresenceStore::global(cx).update(cx, |presence, cx| {
+                            presence.seed_presence(&online_uids, &statuses, cx);
+                        });
                         cx.emit(ClanMembersEvent::Changed { clan_id });
                         cx.notify();
                     }
@@ -375,6 +387,22 @@ fn clan_member_from_redis(user: Option<&realtime::UserProfileRedis>) -> Option<C
     })
 }
 
+fn user_statuses_from_list(list: api::ClanUserStatusList) -> Vec<(UserId, String)> {
+    list.clan_user_statuses
+        .into_iter()
+        .filter(|e| e.user_id != 0)
+        .map(|e| (UserId(e.user_id), e.user_status))
+        .collect()
+}
+
+fn online_ids_from_users(users: &[api::User], self_id: Option<i64>) -> HashSet<i64> {
+    let mut ids: HashSet<i64> = users.iter().map(|u| u.id).filter(|id| *id != 0).collect();
+    if let Some(sid) = self_id.filter(|id| *id != 0) {
+        ids.insert(sid);
+    }
+    ids
+}
+
 /// Partition members into (online, offline) id lists, each ordered online-first then by
 /// case-insensitive display name — mirrors React `selectChannelMembersSortedByStatus`.
 pub fn split_members_by_status(
@@ -494,6 +522,56 @@ mod tests {
         bucket.remove(UserId(1));
         assert_eq!(bucket.ids, vec![UserId(2)]);
         assert!(!bucket.by_id.contains_key(&UserId(1)));
+    }
+
+    fn api_user(id: i64, online: bool) -> api::User {
+        api::User {
+            id,
+            online,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn online_ids_collects_returned_users_and_adds_self() {
+        let users = vec![api_user(1, true), api_user(2, true)];
+        let ids = online_ids_from_users(&users, Some(9));
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert!(ids.contains(&9));
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn online_ids_skips_zero_ids_and_zero_self() {
+        let users = vec![api_user(0, true), api_user(5, true)];
+        let ids = online_ids_from_users(&users, Some(0));
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&5));
+    }
+
+    #[test]
+    fn online_ids_without_self_returns_only_online_users() {
+        let ids = online_ids_from_users(&[api_user(3, true)], None);
+        assert_eq!(ids, [3].into_iter().collect());
+    }
+
+    #[test]
+    fn user_statuses_maps_entries_and_skips_zero_ids() {
+        let list = api::ClanUserStatusList {
+            clan_user_statuses: vec![
+                api::ClanUserStatusEntry {
+                    user_id: 1,
+                    user_status: "Working".into(),
+                },
+                api::ClanUserStatusEntry {
+                    user_id: 0,
+                    user_status: "ghost".into(),
+                },
+            ],
+        };
+        let statuses = user_statuses_from_list(list);
+        assert_eq!(statuses, vec![(UserId(1), "Working".to_string())]);
     }
 
     #[test]

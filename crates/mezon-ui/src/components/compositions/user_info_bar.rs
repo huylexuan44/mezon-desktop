@@ -149,7 +149,6 @@ impl Render for UserInfoBar {
             .rounded(px(12.0))
             .border_1()
             .border_color(theme.tokens.border_theme_primary)
-            .shadow_lg()
             .bg(theme.tokens.bg_surface)
             .child(
                 div()
@@ -197,7 +196,7 @@ impl Render for UserInfoBar {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(theme.text_muted)
                                             .child(self.presence.clone()),
                                     ),

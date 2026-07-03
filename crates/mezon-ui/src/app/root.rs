@@ -184,6 +184,7 @@ impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
         let locale = self.settings.read(cx).language.clone();
+        let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
         let state = self.auth_state.read(cx).clone();
 
@@ -226,6 +227,7 @@ impl Render for RootView {
             .flex_col()
             .size_full()
             .bg(theme.bg_primary)
+            .font_family(base_font_family)
             .text_color(theme.text_primary)
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())

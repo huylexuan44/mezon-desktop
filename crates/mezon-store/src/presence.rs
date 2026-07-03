@@ -23,6 +23,7 @@ pub struct PresenceStore {
     pub typing_by_channel: HashMap<ChannelId, HashSet<String>>,
     pub channel_online: HashMap<ChannelId, HashSet<UserId>>,
     pub user_online: HashSet<UserId>,
+    pub user_status: HashMap<UserId, String>,
     status_notify_task: Option<Task<()>>,
     _channel_sub: Subscription,
 }
@@ -52,6 +53,13 @@ impl PresenceStore {
         self.user_online.contains(&user_id)
     }
 
+    pub fn user_status(&self, user_id: UserId) -> Option<&str> {
+        self.user_status
+            .get(&user_id)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
+    }
+
     fn new(_api: Arc<mezon_client::AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -67,6 +75,7 @@ impl PresenceStore {
             typing_by_channel: HashMap::new(),
             channel_online: HashMap::new(),
             user_online: HashSet::new(),
+            user_status: HashMap::new(),
             status_notify_task: None,
             _channel_sub: channel_sub,
         }
@@ -90,6 +99,7 @@ impl PresenceStore {
                 this.typing_by_channel.clear();
                 this.channel_online.clear();
                 this.user_online.clear();
+                this.user_status.clear();
                 cx.emit(PresenceEvent::StatusChanged);
                 cx.notify();
             });
@@ -198,6 +208,40 @@ impl PresenceStore {
             self.user_online.remove(uid);
         }
     }
+
+    pub fn seed_presence(
+        &mut self,
+        online: &[UserId],
+        statuses: &[(UserId, String)],
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.apply_seed_online(online) | self.apply_seed_user_status(statuses);
+        if changed {
+            cx.emit(PresenceEvent::StatusChanged);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn apply_seed_online(&mut self, online: &[UserId]) -> bool {
+        let mut changed = false;
+        for uid in online {
+            changed |= self.user_online.insert(*uid);
+        }
+        changed
+    }
+
+    pub(crate) fn apply_seed_user_status(&mut self, statuses: &[(UserId, String)]) -> bool {
+        let mut changed = false;
+        for (uid, status) in statuses {
+            if status.is_empty() {
+                changed |= self.user_status.remove(uid).is_some();
+            } else if self.user_status.get(uid) != Some(status) {
+                self.user_status.insert(*uid, status.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +253,7 @@ mod tests {
             typing_by_channel: HashMap::new(),
             channel_online: HashMap::new(),
             user_online: HashSet::new(),
+            user_status: HashMap::new(),
             status_notify_task: None,
             _channel_sub: gpui::Subscription::new(|| {}),
         }
@@ -293,6 +338,66 @@ mod tests {
         store.apply_status_presence(&[UserId(1)], &[]);
         store.apply_status_presence(&[], &[UserId(1)]);
         assert!(!store.user_online.contains(&UserId(1)));
+    }
+
+    #[test]
+    fn seed_online_marks_users_online_without_realtime() {
+        let mut store = empty_store();
+        let changed = store.apply_seed_online(&[UserId(1), UserId(2)]);
+        assert!(changed);
+        assert!(store.user_online.contains(&UserId(1)));
+        assert!(store.user_online.contains(&UserId(2)));
+    }
+
+    #[test]
+    fn seed_online_merges_and_reports_no_change_when_already_present() {
+        let mut store = empty_store();
+        store.apply_status_presence(&[UserId(1)], &[]);
+        let changed = store.apply_seed_online(&[UserId(1), UserId(3)]);
+        assert!(changed);
+        assert!(store.user_online.contains(&UserId(1)));
+        assert!(store.user_online.contains(&UserId(3)));
+        assert!(!store.apply_seed_online(&[UserId(1), UserId(3)]));
+    }
+
+    #[test]
+    fn realtime_leave_overrides_seeded_online() {
+        let mut store = empty_store();
+        store.apply_seed_online(&[UserId(1), UserId(2)]);
+        store.apply_status_presence(&[], &[UserId(1)]);
+        assert!(!store.user_online.contains(&UserId(1)));
+        assert!(store.user_online.contains(&UserId(2)));
+    }
+
+    #[test]
+    fn seed_user_status_stores_and_reads_back() {
+        let mut store = empty_store();
+        let changed = store.apply_seed_user_status(&[(UserId(1), "Working".to_string())]);
+        assert!(changed);
+        assert_eq!(store.user_status(UserId(1)), Some("Working"));
+    }
+
+    #[test]
+    fn seed_user_status_empty_string_reads_as_none() {
+        let mut store = empty_store();
+        store.apply_seed_user_status(&[(UserId(1), String::new())]);
+        assert_eq!(store.user_status(UserId(1)), None);
+    }
+
+    #[test]
+    fn seed_user_status_empty_clears_previous_and_reports_change() {
+        let mut store = empty_store();
+        store.apply_seed_user_status(&[(UserId(1), "Busy".to_string())]);
+        let changed = store.apply_seed_user_status(&[(UserId(1), String::new())]);
+        assert!(changed);
+        assert_eq!(store.user_status(UserId(1)), None);
+    }
+
+    #[test]
+    fn seed_user_status_no_change_when_same() {
+        let mut store = empty_store();
+        store.apply_seed_user_status(&[(UserId(1), "Away".to_string())]);
+        assert!(!store.apply_seed_user_status(&[(UserId(1), "Away".to_string())]));
     }
 
     #[test]

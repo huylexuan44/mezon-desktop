@@ -49,9 +49,7 @@ fn capture_macos_preview(kind: ScreenShareKind, id: u32) -> Option<ScreenSharePr
 }
 
 #[cfg(target_os = "macos")]
-fn cg_image_to_preview(
-    image: &core_graphics_helmer_fork::image::CGImageRef,
-) -> Option<ScreenSharePreview> {
+fn cg_image_to_preview(image: &core_graphics_helmer_fork::image::CGImageRef) -> Option<ScreenSharePreview> {
     let width = image.width() as u32;
     let height = image.height() as u32;
     if width == 0 || height == 0 {

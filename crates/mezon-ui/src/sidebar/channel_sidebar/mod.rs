@@ -536,7 +536,7 @@ fn nav_row(icon: IconName, label: &'static str, theme: &crate::theme::Theme) -> 
         )
         .child(
             div()
-                .text_sm()
+                .text_base()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(label),
         )
@@ -568,7 +568,7 @@ fn render_banner_and_events(
     if let Some(url) = banner_url {
         col = col.child(
             div().w_full().h(px(136.)).mb_2().overflow_hidden().child(
-                gpui::img(crate::util::imgproxy::proxied(cx, url, 300, 300, "fit"))
+                gpui::img(crate::util::imgproxy::proxied(cx, url, 480, 272, "fill"))
                     .w_full()
                     .h_full()
                     .object_fit(gpui::ObjectFit::Cover),
@@ -751,18 +751,25 @@ fn render_sidebar_item(
             let ch_id = id.clone();
             let row_handle = channel_list_handle.clone();
             let clan_id_inner = active_clan_id_for_nav;
-            let selected_bg = theme.bg_primary;
+            let selected_bg = theme.tokens.bg_active_member_channel;
             let hover_bg = theme.bg_hover;
-            let text_color = if *muted {
-                theme.text_muted
-            } else if *selected {
-                theme.text_primary
+            let thread_highlighted = *selected || *unread;
+            let text_color = if thread_highlighted {
+                theme.tokens.text_secondary
             } else {
-                theme.text_secondary
+                theme.tokens.text_theme_primary
             };
+            let text_hover = theme.tokens.text_secondary;
+            let name_weight = if thread_highlighted {
+                gpui::FontWeight::SEMIBOLD
+            } else {
+                gpui::FontWeight::MEDIUM
+            };
+            let thread_nub = *unread;
+            let nub_color = theme.tokens.text_secondary;
 
             let row_id = SharedString::from(format!("thread-row-{ch_id}"));
-            let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0 && !*muted;
+            let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
             let row_content = if *is_thread {
                 let line_color = theme.text_muted;
                 let line_above_val = *line_above;
@@ -816,6 +823,18 @@ fn render_sidebar_item(
                             row_id.clone(),
                         ))
                     })
+                    .when(thread_nub, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(px(12.))
+                                .w(px(4.))
+                                .h(px(8.))
+                                .rounded_r(px(4.))
+                                .bg(nub_color),
+                        )
+                    })
                     .child(div().flex_none().w(px(16.)))
                     .child(connector)
                     .child(
@@ -825,10 +844,11 @@ fn render_sidebar_item(
                             .items_center()
                             .pr_2()
                             .mr_6()
-                            .text_sm()
+                            .text_base()
                             .text_color(text_color)
-                            .when(*unread && !*muted, |el| {
-                                el.font_weight(gpui::FontWeight::BOLD)
+                            .font_weight(name_weight)
+                            .when(!*selected && !suppress_hover, |el| {
+                                el.group_hover(row_id.clone(), move |s| s.text_color(text_hover))
                             })
                             .child(div().flex_1().child(name.clone())),
                     )
@@ -883,7 +903,7 @@ fn render_sidebar_item(
                                 .child(avatar.with_size(Size::XSmall))
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_sm()
                                         .text_color(theme.text_muted)
                                         .child(name_text),
                                 )

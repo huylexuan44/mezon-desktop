@@ -168,7 +168,7 @@ impl DirectSidebar {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_base()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(locale, "directMessage.friends")),

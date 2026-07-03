@@ -36,6 +36,8 @@ const LOAD_MORE_ITEM_THRESHOLD: usize = 12;
 const LIST_OVERDRAW: f32 = 1024.;
 const LIST_BOTTOM_PADDING: f32 = 20.;
 const SCROLL_HOVER_RELEASE_MS: u64 = 150;
+const HOVER_SHOW_DELAY_MS: u64 = 200;
+const HOVER_HIDE_DELAY_MS: u64 = 100;
 const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
 const MAX_GIF_VIDEOS: usize = 6;
 
@@ -170,6 +172,10 @@ pub struct ChannelMessages {
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
     _hover_release_task: Option<Task<()>>,
+    hovered_row: Option<MessageId>,
+    raw_hover: Option<MessageId>,
+    _hover_show_task: Option<Task<()>>,
+    _hover_hide_task: Option<Task<()>>,
     last_paginate: Option<Instant>,
     last_scroll_at: Option<Instant>,
     at_bottom: bool,
@@ -249,6 +255,10 @@ impl ChannelMessages {
                     this.mention_popover = None;
                     this._mention_popover_sub = None;
                     this.context_menu_target = None;
+                    this.hovered_row = None;
+                    this.raw_hover = None;
+                    this._hover_show_task = None;
+                    this._hover_hide_task = None;
                     this.edit_input = None;
                     this._edit_input_sub = None;
                     this.active_videos.clear();
@@ -397,16 +407,19 @@ impl ChannelMessages {
             let at_bottom = event.visible_range.end + LOAD_MORE_ITEM_THRESHOLD >= event.count;
             let visible_start = event.visible_range.start;
             let _ = timeline.update(cx, |this, cx| {
+                let range_moved = this.last_visible_start != visible_start;
                 this.at_bottom = at_bottom;
                 this.last_visible_start = visible_start;
 
-                if this.context_menu_target.take().is_some() {
-                    cx.notify();
-                }
-                if this.reaction_picker.take().is_some() {
-                    this._reaction_picker_sub = None;
-                    this._reaction_picker_dismiss_sub = None;
-                    cx.notify();
+                if range_moved {
+                    if this.context_menu_target.take().is_some() {
+                        cx.notify();
+                    }
+                    if this.reaction_picker.take().is_some() {
+                        this._reaction_picker_sub = None;
+                        this._reaction_picker_dismiss_sub = None;
+                        cx.notify();
+                    }
                 }
 
                 let store_entity = MessagesStore::global(cx);
@@ -542,6 +555,10 @@ impl ChannelMessages {
             _skeleton_timer: None,
             suppress_hover: false,
             _hover_release_task: None,
+            hovered_row: None,
+            raw_hover: None,
+            _hover_show_task: None,
+            _hover_hide_task: None,
             last_paginate: None,
             last_scroll_at: None,
             at_bottom: true,
@@ -715,6 +732,54 @@ impl ChannelMessages {
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu_target.take().is_some() {
             cx.notify();
+        }
+    }
+
+    pub(crate) fn set_row_hover(
+        &mut self,
+        message_id: MessageId,
+        entered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if entered {
+            self.raw_hover = Some(message_id);
+        } else if self.raw_hover == Some(message_id) {
+            self.raw_hover = None;
+        }
+        let raw = self.raw_hover;
+
+        match raw {
+            Some(target) if self.hovered_row != Some(target) => {
+                self._hover_show_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(HOVER_SHOW_DELAY_MS))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.raw_hover == Some(target) && this.hovered_row != Some(target) {
+                            this.hovered_row = Some(target);
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
+            _ => self._hover_show_task = None,
+        }
+
+        match self.hovered_row {
+            Some(shown) if raw != Some(shown) => {
+                self._hover_hide_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(HOVER_HIDE_DELAY_MS))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.raw_hover != Some(shown) && this.hovered_row == Some(shown) {
+                            this.hovered_row = None;
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
+            _ => self._hover_hide_task = None,
         }
     }
 
@@ -1334,6 +1399,7 @@ impl Render for ChannelMessages {
         let frame_now = chrono::Local::now();
         let list_state = self.list_state.clone();
         let suppress_hover = self.suppress_hover;
+        let hovered_row = self.hovered_row;
         let avatar_image_cache = self.avatar_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
@@ -1378,6 +1444,7 @@ impl Render for ChannelMessages {
                         welcome: welcome.clone(),
                         onboarding: onboarding.clone(),
                         suppress_hover,
+                        hovered_row,
                         avatar_cache: avatar_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,

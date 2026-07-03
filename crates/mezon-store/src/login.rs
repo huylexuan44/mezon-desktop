@@ -119,6 +119,7 @@ pub(crate) fn spawn_session_logout(
             if let Err(e) = keychain::clear_session() {
                 tracing::warn!("Failed to clear keychain session: {e}");
             }
+            crate::account::clear_cached_account();
         })
         .detach();
 }

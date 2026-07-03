@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, Context, Entity, ListState, SharedString, Subscription, Window, div, img,
     list, prelude::*, px,
 };
-use mezon_store::{ClanList, DirectMessageStore, Settings};
+use mezon_store::{AccountStore, ClanList, DirectMessageStore, Settings};
 use ui::Tooltip;
 
 use crate::app::shell::Shell;
@@ -31,6 +31,7 @@ pub struct ClanSidebar {
     _direct_sub: Subscription,
     _settings_sub: Subscription,
     _router_sub: Subscription,
+    _account_sub: Subscription,
 }
 
 impl ClanSidebar {
@@ -50,6 +51,7 @@ impl ClanSidebar {
             cx.notify();
         });
         let settings_sub = cx.observe(&settings, |_, _, cx| cx.notify());
+        let account_sub = cx.observe(&AccountStore::global(cx), |_, _, cx| cx.notify());
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
             let router = router.read(cx);
             let new_dm_active = matches!(
@@ -93,6 +95,7 @@ impl ClanSidebar {
             _direct_sub: direct_sub,
             _settings_sub: settings_sub,
             _router_sub: router_sub,
+            _account_sub: account_sub,
         };
         let clan_list_handle = this.clan_list.clone();
         this.sync_rows(clan_list_handle.read(cx), cx);
@@ -158,6 +161,21 @@ impl Render for ClanSidebar {
             .into();
         let clan_list_for_modal = self.clan_list.clone();
         let settings_for_modal = self.settings.clone();
+        let custom_logo = AccountStore::global(cx)
+            .read(cx)
+            .account
+            .as_ref()
+            .and_then(|account| account.logo.clone())
+            .filter(|logo| !logo.is_empty());
+        let home_logo = SharedString::from(crate::util::imgproxy::proxied(
+            cx,
+            custom_logo
+                .as_deref()
+                .unwrap_or("https://cdn.mezon.ai/landing-page-mezon/logodefault.webp"),
+            100,
+            100,
+            "fill-down",
+        ));
 
         let clan_count = rows.len();
         let list_element = list(list_state, move |ix, _window, cx| {
@@ -183,6 +201,7 @@ impl Render for ClanSidebar {
             .flex_col()
             .w_full()
             .h_full()
+            .pb(px(68.))
             .bg(theme.bg_tertiary)
             .items_center()
             .child(
@@ -222,12 +241,10 @@ impl Render for ClanSidebar {
                             })
                             .child(render_pill(dm_active, "dm-group".into(), pill_color))
                             .child(
-                                img(SharedString::from(
-                                    "https://cdn.mezon.ai/landing-page-mezon/logodefault.webp",
-                                ))
-                                .size(px(40.))
-                                .rounded(px(8.))
-                                .object_fit(gpui::ObjectFit::Cover),
+                                img(home_logo)
+                                    .size(px(40.))
+                                    .rounded(px(8.))
+                                    .object_fit(gpui::ObjectFit::Cover),
                             ),
                     )
                     .child(unread_list)
@@ -306,7 +323,6 @@ fn render_clan_footer(
         .flex_col()
         .items_center()
         .w_full()
-        .pb(px(68.))
         .child(
             div()
                 .id("discover-btn")

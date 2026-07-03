@@ -1,10 +1,11 @@
 use crate::ids::ClanId;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiAccount;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use serde::{Deserialize, Serialize};
 
 use crate::Freshness;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
@@ -18,6 +19,7 @@ pub struct UserAccount {
     pub phone_number: Option<String>,
     pub about_me: Option<String>,
     pub password_setted: bool,
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +91,7 @@ impl AccountStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            account: None,
+            account: load_cached_account(),
             account_loading: false,
             account_error: false,
             devices: Vec::new(),
@@ -117,9 +119,10 @@ impl AccountStore {
                 if connected && !was_connected {
                     was_connected = true;
                     if this
-                        .update(cx, |this, _| {
+                        .update(cx, |this, cx| {
                             this.account_freshness.mark_stale();
                             this.devices_freshness.mark_stale();
+                            this.ensure_account(cx);
                         })
                         .is_err()
                     {
@@ -176,6 +179,13 @@ impl AccountStore {
         cx.global::<GlobalAccountStore>().0.clone()
     }
 
+    fn spawn_persist_cache(account: &UserAccount, cx: &App) {
+        let account = account.clone();
+        cx.background_executor()
+            .spawn(async move { save_cached_account(&account) })
+            .detach();
+    }
+
     pub fn ensure_account(&mut self, cx: &mut Context<Self>) {
         if !self.account_loading && !self.account_freshness.is_fresh(crate::CACHE_TTL) {
             self.fetch_account(cx);
@@ -193,8 +203,10 @@ impl AccountStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| match api.get_account().await {
             Ok(acct) => {
+                let account = user_account_from_api(acct);
                 let _ = this.update(cx, |this, cx| {
-                    this.account = Some(user_account_from_api(acct));
+                    Self::spawn_persist_cache(&account, cx);
+                    this.account = Some(account);
                     this.account_freshness.mark_fetched();
                     this.account_loading = false;
                     this.account_error = false;
@@ -276,6 +288,9 @@ impl AccountStore {
                             account.avatar_url = avatar_url;
                             account.about_me = Some(about_me);
                         }
+                        if let Some(account) = &this.account {
+                            Self::spawn_persist_cache(account, cx);
+                        }
                         cx.emit(AccountEvent::AccountSaved);
                         cx.notify();
                     });
@@ -304,6 +319,9 @@ impl AccountStore {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(account) = &mut this.account {
                             account.avatar_url = Some(url.clone());
+                        }
+                        if let Some(account) = &this.account {
+                            Self::spawn_persist_cache(account, cx);
                         }
                         cx.emit(AccountEvent::AvatarUploaded(url));
                         cx.notify();
@@ -457,6 +475,79 @@ impl AccountStore {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedAccount {
+    username: String,
+    display_name: String,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    logo: Option<String>,
+}
+
+impl PersistedAccount {
+    fn from_account(account: &UserAccount) -> Self {
+        Self {
+            username: account.username.clone(),
+            display_name: account.display_name.clone(),
+            avatar_url: account.avatar_url.clone(),
+            logo: account.logo.clone(),
+        }
+    }
+
+    fn into_account(self) -> UserAccount {
+        UserAccount {
+            username: self.username,
+            display_name: self.display_name,
+            email: None,
+            avatar_url: self.avatar_url,
+            phone_number: None,
+            about_me: None,
+            password_setted: false,
+            logo: self.logo,
+        }
+    }
+}
+
+fn account_cache_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("mezon")
+        .join("account.json")
+}
+
+fn load_cached_account() -> Option<UserAccount> {
+    let data = std::fs::read_to_string(account_cache_path()).ok()?;
+    let cached: PersistedAccount = serde_json::from_str(&data).ok()?;
+    Some(cached.into_account())
+}
+
+fn save_cached_account(account: &UserAccount) {
+    let path = account_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let data = match serde_json::to_string_pretty(&PersistedAccount::from_account(account)) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Failed to serialize account cache: {e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &data) {
+        tracing::warn!("Failed to write account cache: {e}");
+        return;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+pub(crate) fn clear_cached_account() {
+    let _ = std::fs::remove_file(account_cache_path());
+}
+
 fn user_account_from_api(acct: ApiAccount) -> UserAccount {
     let display = acct
         .display_name
@@ -471,6 +562,7 @@ fn user_account_from_api(acct: ApiAccount) -> UserAccount {
         phone_number: acct.phone_number,
         about_me: acct.about_me,
         password_setted: acct.password_setted,
+        logo: acct.logo,
     }
 }
 
@@ -512,6 +604,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn persisted_account_roundtrip_drops_sensitive_fields() {
+        let account = UserAccount {
+            username: "alice".into(),
+            display_name: "Alice".into(),
+            email: Some("a@b.c".into()),
+            avatar_url: Some("https://cdn/x.png".into()),
+            phone_number: Some("+123".into()),
+            about_me: Some("hi".into()),
+            password_setted: true,
+            logo: Some("https://cdn/logo.webp".into()),
+        };
+        let json = serde_json::to_string(&PersistedAccount::from_account(&account)).unwrap();
+        let restored = serde_json::from_str::<PersistedAccount>(&json)
+            .unwrap()
+            .into_account();
+
+        assert_eq!(restored.username, "alice");
+        assert_eq!(restored.display_name, "Alice");
+        assert_eq!(restored.avatar_url.as_deref(), Some("https://cdn/x.png"));
+        assert_eq!(restored.logo.as_deref(), Some("https://cdn/logo.webp"));
+        assert_eq!(restored.email, None);
+        assert_eq!(restored.phone_number, None);
+        assert_eq!(restored.about_me, None);
+        assert!(!restored.password_setted);
+    }
+
+    #[test]
     fn user_account_from_api_uses_username_when_display_empty() {
         let acct = user_account_from_api(ApiAccount {
             user_id: 1,
@@ -522,6 +641,7 @@ mod tests {
             about_me: None,
             phone_number: None,
             password_setted: true,
+            logo: None,
         });
         assert_eq!(acct.display_name, "alice");
     }

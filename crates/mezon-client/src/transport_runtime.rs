@@ -669,6 +669,19 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_user_online(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ListUserOnlineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_user_online(clan_id, limit, page).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_roles(
         &self,
         clan_id: i64,

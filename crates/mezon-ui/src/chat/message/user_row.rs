@@ -1,7 +1,4 @@
-use gpui::{
-    Anchor, AnyElement, App, KeyDownEvent, MouseButton, MouseDownEvent, SharedString, div,
-    prelude::*, px,
-};
+use gpui::{Anchor, AnyElement, App, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
 use mezon_store::{Message, MessageCode};
 
 use super::content::render_message_content;
@@ -108,10 +105,10 @@ pub fn render_user_message(
     let mention_border = theme.tokens.border_left_highlight;
     let context_menu_id = msg.id;
     let context_menu_host = ctx.video_host.clone();
-    let group_name = SharedString::from(format!("msg-{row_key}"));
+    let hover_host = ctx.video_host.clone();
+    let hover_id = msg.id;
     div()
         .id(("msg-row", row_key as usize))
-        .when(!ctx.suppress_hover, |d| d.group(group_name.clone()))
         .on_mouse_down(
             MouseButton::Right,
             move |event: &MouseDownEvent, _window, cx| {
@@ -121,6 +118,12 @@ pub fn render_user_message(
                 });
             },
         )
+        .when(!ctx.suppress_hover, |d| {
+            d.on_hover(move |hovered: &bool, _window, cx| {
+                let entered = *hovered;
+                let _ = hover_host.update(cx, |this, cx| this.set_row_hover(hover_id, entered, cx));
+            })
+        })
         .relative()
         .w_full()
         .min_h(px(MESSAGE_ROW_MIN_HEIGHT))
@@ -145,7 +148,6 @@ pub fn render_user_message(
             combined,
             has_reply,
             is_different_day,
-            group_name,
             ctx,
         ))
         .into_any_element()
@@ -170,43 +172,35 @@ fn render_edit_box(
                 let _ = escape_host.update(cx, |this, cx| this.cancel_edit(cx));
             }
         })
-        .child(Input::new(&input))
+        .child(Input::new(&input).text_size(px(16.)))
         .child(
             div()
                 .flex()
                 .flex_row()
-                .gap_1()
                 .items_center()
-                .child(
-                    div()
-                        .id(("edit-save", message_id.0 as usize))
-                        .p_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.bg_hover))
-                        .child(
-                            Icon::new(IconName::CheckIcon)
-                                .size_4()
-                                .text_color(theme.brand),
-                        )
-                        .on_click(move |_, window, cx| {
-                            let _ = save_host.update(cx, |this, cx| this.save_edit(window, cx));
-                        }),
-                )
+                .text_xs()
+                .text_color(theme.tokens.text_theme_primary)
+                .child(div().pr(px(3.)).child("escape to"))
                 .child(
                     div()
                         .id(("edit-cancel", message_id.0 as usize))
-                        .p_1()
-                        .rounded_md()
+                        .pr(px(3.))
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.bg_hover))
-                        .child(
-                            Icon::new(IconName::CloseIcon)
-                                .size_4()
-                                .text_color(theme.text_muted),
-                        )
+                        .text_color(gpui::rgb(0x3297ff))
+                        .child("cancel")
                         .on_click(move |_, _, cx| {
                             let _ = cancel_host.update(cx, |this, cx| this.cancel_edit(cx));
+                        }),
+                )
+                .child(div().pr(px(3.)).child("• enter to"))
+                .child(
+                    div()
+                        .id(("edit-save", message_id.0 as usize))
+                        .cursor_pointer()
+                        .text_color(gpui::rgb(0x3297ff))
+                        .child("save")
+                        .on_click(move |_, window, cx| {
+                            let _ = save_host.update(cx, |this, cx| this.save_edit(window, cx));
                         }),
                 ),
         )

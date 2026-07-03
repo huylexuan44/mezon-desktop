@@ -409,7 +409,7 @@ impl ChannelList {
             .map(AppChannel::from)
             .collect();
 
-        let badge_map: HashMap<ChannelId, i32> = badge_descs
+        let badge_map: HashMap<ChannelId, ApiChannelDesc> = badge_descs
             .into_iter()
             .filter(|d| {
                 !matches!(
@@ -417,7 +417,7 @@ impl ChannelList {
                     ChannelType::App | ChannelType::Voice
                 )
             })
-            .map(|d| (ChannelId(d.channel_id), d.badge_count))
+            .map(|d| (ChannelId(d.channel_id), d))
             .collect();
 
         let voice_map: HashMap<ChannelId, Vec<UserId>> = voice_users
@@ -430,25 +430,34 @@ impl ChannelList {
             })
             .collect();
 
-        let last_messages: Vec<(ChannelId, MessageId)> = api_channels
-            .iter()
-            .filter_map(|c| {
-                (c.last_sent_message_id > 0).then_some((
-                    ChannelId(c.channel_id),
-                    MessageId(c.last_sent_message_id),
-                ))
-            })
-            .collect();
-
         let mut channels: Vec<Channel> = api_channels
             .into_iter()
-            .map(|c| {
+            .map(|mut c| {
                 let cid = ChannelId(c.channel_id);
-                let badge = badge_map.get(&cid).copied().unwrap_or(c.badge_count).max(0) as u32;
+                let badge = if let Some(b) = badge_map.get(&cid) {
+                    if b.last_seen_timestamp > 0 {
+                        c.last_seen_timestamp = b.last_seen_timestamp;
+                        c.last_seen_message_id = b.last_seen_message_id;
+                    }
+                    if b.last_sent_timestamp > 0 {
+                        c.last_sent_timestamp = b.last_sent_timestamp;
+                        c.last_sent_message_id = b.last_sent_message_id;
+                    }
+                    b.badge_count
+                } else {
+                    c.badge_count
+                };
+                let badge = badge.max(0) as u32;
                 let voice_ids = voice_map.get(&cid).cloned().unwrap_or_default();
                 let is_favorite = favorite_ids.contains(&cid);
                 channel_from_desc(c, badge, voice_ids, is_favorite)
             })
+            .collect();
+
+        let last_messages: Vec<(ChannelId, MessageId)> = channels
+            .iter()
+            .filter(|ch| !ch.last_sent_message_id.is_zero())
+            .map(|ch| (ch.id, ch.last_sent_message_id))
             .collect();
 
         let categories = build_categories(api_categories, &mut channels);

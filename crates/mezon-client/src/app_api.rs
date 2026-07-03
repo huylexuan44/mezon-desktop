@@ -374,6 +374,19 @@ impl AppApi {
         self.transport.list_clan_users_status(clan_id).await
     }
 
+    pub async fn list_user_online(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<Vec<mezon_proto::api::User>> {
+        let resp = self
+            .transport
+            .list_user_online(clan_id, limit, page)
+            .await?;
+        Ok(resp.users)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,

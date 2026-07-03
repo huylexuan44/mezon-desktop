@@ -371,6 +371,7 @@ pub struct ApiAccount {
     pub about_me: Option<String>,
     pub phone_number: Option<String>,
     pub password_setted: bool,
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,10 +556,7 @@ fn entity_mention_targets_user(m: &ApiEntityMention, user_id: i64, role_ids: &[i
     m.role_id != 0 && role_ids.contains(&m.role_id)
 }
 
-pub fn enrich_content_tokens(
-    tokens: &mut ApiMessageContent,
-    entity_mentions: &[ApiEntityMention],
-) {
+pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[ApiEntityMention]) {
     for m in entity_mentions {
         if m.e <= m.s {
             continue;
@@ -583,9 +581,7 @@ pub fn enrich_content_tokens(
             ..Default::default()
         });
     }
-    tokens
-        .mentions
-        .sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
+    tokens.mentions.sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
 }
 
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
@@ -727,7 +723,11 @@ pub struct ContentToken {
     pub role_id: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
-    #[serde(default, rename = "channelId", deserialize_with = "string_or_number::deserialize")]
+    #[serde(
+        default,
+        rename = "channelId",
+        deserialize_with = "string_or_number::deserialize"
+    )]
     pub channel_id: Option<String>,
     #[serde(default)]
     pub emojiid: Option<String>,
@@ -1258,6 +1258,7 @@ impl MezonTransport {
         user: api::User,
         email: Option<String>,
         password_setted: bool,
+        logo: Option<String>,
     ) -> ApiAccount {
         ApiAccount {
             user_id: user.id,
@@ -1268,6 +1269,7 @@ impl MezonTransport {
             about_me: (!user.about_me.is_empty()).then_some(user.about_me),
             phone_number: (!user.phone_number.is_empty()).then_some(user.phone_number),
             password_setted,
+            logo,
         }
     }
 
@@ -1724,6 +1726,7 @@ impl MezonTransport {
                     user,
                     (!account.email.is_empty()).then_some(account.email),
                     account.password_setted,
+                    (!account.logo.is_empty()).then_some(account.logo),
                 );
                 tracing::debug!("Decoded account response: {} bytes", response.len());
                 Ok(account)
@@ -2223,7 +2226,7 @@ impl MezonTransport {
             .filter_map(|friend| {
                 friend
                     .user
-                    .map(|user| Self::account_from_user(user, None, false))
+                    .map(|user| Self::account_from_user(user, None, false, None))
             })
             .collect())
     }

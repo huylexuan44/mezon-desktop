@@ -85,6 +85,28 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         .into_any_element()
 }
 
+fn reply_preview_line(content: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut first = true;
+    for word in content.split_whitespace() {
+        if !first {
+            out.push(' ');
+            chars += 1;
+        }
+        first = false;
+        for ch in word.chars() {
+            if chars >= MAX_CHARS {
+                return out;
+            }
+            out.push(ch);
+            chars += 1;
+        }
+    }
+    out
+}
+
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let preview = if reference.content.is_empty() {
@@ -94,7 +116,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
             String::new()
         }
     } else {
-        reference.content.clone()
+        reply_preview_line(&reference.content)
     };
 
     let avatar = if reference.sender_avatar.is_empty() {
@@ -145,7 +167,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(theme.text_muted)
+                .text_color(theme.tokens.text_theme_message)
                 .child(preview),
         )
         .into_any_element()
@@ -591,10 +613,9 @@ pub fn render_hover_actions(
     combined: bool,
     has_reply: bool,
     is_different_day: bool,
-    group_name: SharedString,
     ctx: &RowCtx,
 ) -> AnyElement {
-    if ctx.suppress_hover {
+    if ctx.suppress_hover || ctx.hovered_row != Some(msg.id) {
         return div().into_any_element();
     }
     let theme = ctx.theme;
@@ -618,17 +639,10 @@ pub fn render_hover_actions(
             .child(svg_icon)
     };
 
-    // React's CSS lets this float arbitrarily far above the row (up to -48px) since
-    // the whole subtree stays hoverable regardless of visual position. GPUI's
-    // `.group_hover()` only tracks the row's own hitbox, so an offset that large
-    // makes the toolbar bleed into the neighboring row's hitbox — causing it to
-    // either go dead (unreachable) or duplicate (both rows' toolbars visible at
-    // once). Clamped to -16px, the one value proven not to escape the row's own
-    // box, at the cost of exact pixel parity with React on the day-boundary case.
     let (top, margin_top) = if is_different_day {
-        (-16., 4.)
+        (-8., 4.)
     } else if combined || has_reply {
-        (-16., 0.)
+        (-8., 0.)
     } else {
         (16., 0.)
     };
@@ -718,9 +732,6 @@ pub fn render_hover_actions(
         .p_0p5()
         .rounded_lg()
         .bg(theme.tokens.bg_theme_contexify)
-        .opacity(0.)
-        .group_hover(group_name, |s| s.opacity(1.))
-        .hover(|s| s.opacity(1.))
         .children(recent_emoji)
         .when(show_topic, |d| {
             let coming_soon = coming_soon.clone();

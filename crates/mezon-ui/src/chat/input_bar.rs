@@ -1,18 +1,10 @@
-use std::sync::Arc;
-
-use crate::chat::ReplyTarget;
-// composer: use crate::chat::{MentionInput, ReplyTarget};
-use crate::components::primitives::{Button, Icon, IconName, Input, InputState};
-// composer: use crate::components::primitives::{Button, Icon, IconName};
+use crate::chat::{MentionInput, ReplyTarget};
+use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
-use gpui::{App, ClickEvent, Window, div, prelude::*, px};
-
-type SendHandler = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
+use gpui::{div, prelude::*, px};
 
 pub struct InputBar {
-    input_state: Option<gpui::Entity<InputState>>,
-    // composer: mention_input: Option<gpui::Entity<MentionInput>>,
-    on_send: Option<SendHandler>,
+    mention_input: Option<gpui::Entity<MentionInput>>,
     // composer: on_cancel_reply: Option<SendHandler>,
     replying_to: Option<ReplyTarget>,
 }
@@ -26,9 +18,7 @@ impl Default for InputBar {
 impl InputBar {
     pub fn new() -> Self {
         Self {
-            input_state: None,
-            // composer: mention_input: None,
-            on_send: None,
+            mention_input: None,
             // composer: on_cancel_reply: None,
             replying_to: None,
         }
@@ -39,17 +29,8 @@ impl InputBar {
     // composer:     self
     // composer: }
 
-    pub fn with_input(mut self, state: gpui::Entity<InputState>) -> Self {
-        self.input_state = Some(state);
-        self
-    }
-    // composer: pub fn with_mention_input(mut self, mention_input: gpui::Entity<MentionInput>) -> Self {
-    // composer:     self.mention_input = Some(mention_input);
-    // composer:     self
-    // composer: }
-
-    pub fn on_send(mut self, handler: SendHandler) -> Self {
-        self.on_send = Some(handler);
+    pub fn with_mention_input(mut self, mention_input: gpui::Entity<MentionInput>) -> Self {
+        self.mention_input = Some(mention_input);
         self
     }
 
@@ -128,17 +109,11 @@ impl InputBar {
     }
 
     pub fn render(&self, theme: &Theme, locale: &str) -> impl IntoElement {
-        let on_send = self.on_send.clone();
-
-        let on_click = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            if let Some(ref handler) = on_send {
-                handler(window, cx);
-            }
-        };
-
         div()
             .flex()
             .flex_col()
+            .px_3()
+            .pb_4()
             .when_some(self.replying_to.as_ref(), |d, target| {
                 d.child(Self::reply_preview_bar(theme, locale, target))
                 // composer: d.child(self.reply_preview_bar(theme, locale, target))
@@ -148,25 +123,14 @@ impl InputBar {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .min_w_0()
-                    .w_full()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .bg(theme.bg_primary)
-                    .when_some(self.input_state.as_ref(), |d, state| {
-                        d.child(div().flex_1().min_w_0().child(Input::new(state)))
-                    })
-                    // composer: .when_some(self.mention_input.clone(), |d, mention_input| {
-                    // composer:     d.child(div().flex_1().child(mention_input))
-                    // composer: })
-                    .child(
-                        Button::new("send-btn")
-                            .label(mezon_i18n::t(locale, "chat.send"))
-                            .on_click(on_click),
-                    ),
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.tokens.border_primary)
+                    .bg(theme.tokens.bg_surface)
+                    .shadow_md()
+                    .when_some(self.mention_input.clone(), |d, mention_input| {
+                        d.child(div().flex_1().child(mention_input))
+                    }),
             )
     }
 }
