@@ -322,17 +322,15 @@ impl Render for ChatHeader {
             .members_active(self.members_active)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
-        if show_threads {
-            if let Ok(thread_handle) = self
+        if show_threads
+            && let Ok(thread_handle) = self
                 .layout
                 .read_with(cx, |layout, _| layout.thread_popover_handle.clone())
-            {
-                if let Some(layout) = self.layout.upgrade() {
-                    header = header
-                        .layout(layout)
-                        .thread_popover(thread_handle);
-                }
-            }
+            && let Some(layout) = self.layout.upgrade()
+        {
+            header = header
+                .layout(layout)
+                .thread_popover(thread_handle);
         }
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);

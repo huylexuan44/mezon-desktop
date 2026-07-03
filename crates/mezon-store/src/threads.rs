@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::AppApi;
+use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
 use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_client::RealtimeEvent;
@@ -11,6 +12,7 @@ use mezon_proto::{api, realtime};
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
 use crate::channel_permissions::{ChannelPermissionsStore, PERMISSION_MANAGE_THREAD};
 use crate::clan::ClanList;
+use crate::clan_members::ClanMembersStore;
 use crate::ids::{ChannelId, ClanId};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -27,6 +29,7 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(500);
 const LOAD_MORE_THRESHOLD: usize = 6;
 const MESSAGE_CODE_CHAT: i32 = 0;
 const MESSAGE_CODE_CHAT_UPDATE: i32 = 1;
+const STREAM_MODE_THREAD: i32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct ThreadSummary {
@@ -71,6 +74,7 @@ pub struct ThreadsStore {
     has_more: bool,
     loading: bool,
     loading_more: bool,
+    fetch_error: bool,
     searching: bool,
     creating: bool,
     submitting: bool,
@@ -78,6 +82,7 @@ pub struct ThreadsStore {
     name_error: Option<String>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
+    _conn_watch: Task<()>,
 }
 
 struct GlobalThreadsStore(Entity<ThreadsStore>);
@@ -103,6 +108,7 @@ impl ThreadsStore {
             }
         });
         Self::register_realtime(cx);
+        let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         let mut store = Self {
             list_channel_id: None,
             clan_id: None,
@@ -116,6 +122,7 @@ impl ThreadsStore {
             has_more: false,
             loading: false,
             loading_more: false,
+            fetch_error: false,
             searching: false,
             creating: false,
             submitting: false,
@@ -123,6 +130,7 @@ impl ThreadsStore {
             name_error: None,
             api,
             _channel_sub: channel_sub,
+            _conn_watch: conn_watch,
         };
         if let Some(channel) = ChannelList::global(cx).read(cx).active_channel() {
             store.apply_channel(channel);
@@ -143,7 +151,36 @@ impl ThreadsStore {
                     this.on_realtime_event(event, cx);
                 });
             }
+            dispatch.on_lagged(&entity, |this, cx| this.refresh(cx));
         });
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this
+                        .update(cx, |this, cx| {
+                            if this.loaded_channel.is_some() {
+                                this.refresh(cx);
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
+                }
+            }
+        })
     }
 
     fn on_realtime_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -264,6 +301,14 @@ impl ThreadsStore {
         self.loading_more
     }
 
+    pub fn fetch_error(&self) -> bool {
+        self.fetch_error
+    }
+
+    pub fn retry_fetch(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
+    }
+
     pub fn has_more(&self) -> bool {
         self.has_more
     }
@@ -339,6 +384,7 @@ impl ThreadsStore {
         self.current_page = 0;
         self.has_more = false;
         self.loading_more = false;
+        self.fetch_error = false;
         self.submitting = false;
         self.name_error = None;
         cx.notify();
@@ -363,9 +409,9 @@ impl ThreadsStore {
         self.loaded_channel = None;
         self.current_page = 0;
         self.has_more = false;
-        self.threads.clear();
         self.loading = false;
         self.loading_more = false;
+        self.fetch_error = false;
         self.ensure_create_permissions(cx);
         self.ensure_loaded(cx);
     }
@@ -503,9 +549,11 @@ impl ThreadsStore {
                 this.searching = false;
                 match result {
                     Ok(list) => {
-                        this.search_results = Some(filter_threads(
+                        let results = filter_threads(
                             list.into_iter().map(thread_from_api).collect(),
-                        ));
+                        );
+                        this.ensure_clan_members_for_threads(&results, cx);
+                        this.search_results = Some(results);
                     }
                     Err(e) => tracing::error!("search_thread failed: {e}"),
                 }
@@ -513,6 +561,24 @@ impl ThreadsStore {
             });
         })
         .detach();
+    }
+
+    fn ensure_clan_members_for_threads(
+        &self,
+        threads: &[ThreadSummary],
+        cx: &mut Context<Self>,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        for thread in threads {
+            let Ok(clan_id) = thread.clan_id.parse::<ClanId>() else {
+                continue;
+            };
+            if seen.insert(clan_id) {
+                ClanMembersStore::global(cx).update(cx, |store, cx| {
+                    store.ensure_loaded(clan_id, cx);
+                });
+            }
+        }
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -538,6 +604,7 @@ impl ThreadsStore {
             return;
         } else {
             self.loading = true;
+            self.fetch_error = false;
         }
         cx.notify();
 
@@ -559,16 +626,23 @@ impl ThreadsStore {
                         let page_full = page_has_more(list.len());
                         let batch =
                             filter_threads(list.into_iter().map(thread_from_api).collect());
+                        this.ensure_clan_members_for_threads(&batch, cx);
                         if append {
                             merge_threads(&mut this.threads, batch);
                         } else {
                             this.threads = batch;
                             this.loaded_channel = Some(channel_id);
+                            this.fetch_error = false;
                         }
                         this.current_page = page;
                         this.has_more = page_full;
                     }
-                    Err(e) => tracing::error!("list_thread_descs page {page} failed: {e}"),
+                    Err(e) => {
+                        tracing::error!("list_thread_descs page {page} failed: {e}");
+                        if !append {
+                            this.fetch_error = true;
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -687,7 +761,7 @@ impl ThreadsStore {
                     thread_id,
                     &message,
                     false,
-                    2,
+                    STREAM_MODE_THREAD,
                     vec![],
                     vec![],
                     vec![],
@@ -695,6 +769,14 @@ impl ThreadsStore {
                 .await
             {
                 tracing::error!("send starter message to thread failed: {e}");
+                let _ = this.update(cx, |this, cx| {
+                    this.submitting = false;
+                    cx.emit(ThreadsEvent::CreateFailed {
+                        message: e.to_string(),
+                    });
+                    cx.notify();
+                });
+                return;
             }
 
             if let Err(e) = api

@@ -40,18 +40,16 @@ fn resolve_message_avatar_urls(
     ctx: &RowCtx,
     cx: &App,
 ) -> (String, Option<SharedString>) {
-    if let Some(context) = ctx.profile_context {
-        if let Some(user_id) = msg.sender_user_id {
-            if let Some(profile) = resolve_user_profile(user_id, context, cx) {
-                if !profile.avatar_url.is_empty() {
-                    let proxied = crate::util::imgproxy::avatar_url(cx, &profile.avatar_url);
-                    return (
-                        profile.avatar_url,
-                        Some(SharedString::from(proxied)),
-                    );
-                }
-            }
-        }
+    if let Some(context) = ctx.profile_context
+        && let Some(user_id) = msg.sender_user_id
+        && let Some(profile) = resolve_user_profile(user_id, context, cx)
+        && !profile.avatar_url.is_empty()
+    {
+        let proxied = crate::util::imgproxy::avatar_url(cx, &profile.avatar_url);
+        return (
+            profile.avatar_url,
+            Some(SharedString::from(proxied)),
+        );
     }
 
     let proxied = msg.avatar_proxied.clone();
