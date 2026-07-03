@@ -5,6 +5,7 @@ pub mod badge;
 pub mod cache;
 pub mod channel;
 pub mod channel_members;
+pub mod channel_permissions;
 pub mod clan;
 pub mod clan_members;
 pub mod config;
@@ -18,11 +19,13 @@ pub mod message;
 pub mod message_time;
 pub mod messages;
 pub mod pinned;
+pub mod permissions;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
+pub mod threads;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
@@ -43,6 +46,9 @@ pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
 pub use channel::*;
 pub use channel_members::{ChannelMember, ChannelMembersEvent, ChannelMembersStore};
+pub use channel_permissions::{
+    ChannelPermissionsEvent, ChannelPermissionsStore, PERMISSION_MANAGE_THREAD,
+};
 pub use clan::*;
 pub use clan_members::{
     ClanMember, ClanMembersEvent, ClanMembersStore, User, split_members_by_status,
@@ -62,12 +68,22 @@ pub use message::{
 };
 pub use messages::*;
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
+pub use permissions::{
+    ClanSettingsPermissions, PermissionEvent, PermissionStore, PERMISSION_ADMINISTRATOR,
+    PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN,
+};
 pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
 pub use sticker::{Sticker, StickerEvent, StickerStore};
-pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
+pub use threads::{
+    THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
+};
+pub use user_profile::{
+    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar,
+    resolve_user_profile,
+};
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
     NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,

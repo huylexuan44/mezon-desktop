@@ -1,4 +1,4 @@
-use gpui::{Anchor, AnyElement, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui::{Anchor, AnyElement, App, KeyDownEvent, MouseButton, MouseDownEvent, div, prelude::*, px};
 use mezon_store::{Message, MessageCode};
 
 use super::content::render_message_content;
@@ -26,6 +26,7 @@ pub fn render_user_message(
     combined: bool,
     is_different_day: bool,
     ctx: &RowCtx,
+    cx: &App,
 ) -> AnyElement {
     let theme = ctx.theme;
     let has_reply = !msg.references.is_empty();
@@ -104,7 +105,7 @@ pub fn render_user_message(
             )
         })
         .when_some(
-            show_head.then(|| build_avatar_element(msg, ctx)),
+            show_head.then(|| build_avatar_element(msg, ctx, cx)),
             |d, avatar_element| {
                 d.child(
                     div()
@@ -229,8 +230,8 @@ fn render_edit_box(
         .into_any_element()
 }
 
-fn build_avatar_element(msg: &Message, ctx: &RowCtx) -> AnyElement {
-    let plain = avatar_element(msg, ctx);
+fn build_avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
+    let plain = avatar_element(msg, ctx, cx);
     let Some(profile_ctx) = ctx.profile_context else {
         return plain;
     };
