@@ -96,6 +96,7 @@ struct ChannelOption {
 pub struct OverviewSettingPage {
     clan_id: ClanId,
     clan_list: Entity<ClanList>,
+    channel_list: Entity<ChannelList>,
     settings: Entity<Settings>,
     draft: ClanOverviewDraft,
     saved_draft: ClanOverviewDraft,
@@ -111,6 +112,7 @@ pub struct OverviewSettingPage {
     banner_uploading: bool,
     system_loading: bool,
     _name_sub: Option<Subscription>,
+    _channel_sub: Subscription,
     _fetch_task: Option<Task<()>>,
     _upload_task: Option<Task<()>>,
 }
@@ -139,6 +141,7 @@ impl OverviewSettingPage {
         let mut this = Self {
             clan_id,
             clan_list,
+            channel_list: channel_list.clone(),
             settings,
             draft,
             saved_draft,
@@ -154,6 +157,9 @@ impl OverviewSettingPage {
             banner_uploading: false,
             system_loading: true,
             _name_sub: None,
+            _channel_sub: cx.observe(&channel_list, |this, _, cx| {
+                this.rebuild_channel_options(cx);
+            }),
             _fetch_task: None,
             _upload_task: None,
         };
@@ -217,6 +223,19 @@ impl OverviewSettingPage {
         (draft.clone(), draft, selected)
     }
 
+    fn rebuild_channel_options(&mut self, cx: &mut Context<Self>) {
+        let options = Self::build_channel_options(&self.channel_list, self.clan_id, cx);
+        let selected_channel = self
+            .system_message
+            .as_ref()
+            .map(|m| m.channel_id)
+            .filter(|id| id.get() != 0)
+            .and_then(|channel_id| options.iter().position(|o| o.id == channel_id));
+        self.channel_options = options;
+        self.selected_channel_index = selected_channel;
+        cx.notify();
+    }
+
     fn build_channel_options(
         channel_list: &Entity<ChannelList>,
         clan_id: ClanId,
@@ -257,6 +276,7 @@ impl OverviewSettingPage {
         if let Some(option) = self.channel_options.get(index) {
             self.selected_channel_index = Some(index);
             self.channel_menu_open = false;
+            self.draft.welcome_channel_id = Some(option.id);
             if let Some(system) = self.system_message.as_mut() {
                 system.channel_id = option.id;
             }
@@ -519,9 +539,15 @@ impl OverviewSettingPage {
                 show_error(cx, message);
                 return;
             }
-            let file_size = match std::fs::metadata(&path) {
-                Ok(m) => m.len(),
-                Err(_) => {
+            let path_buf = path.clone();
+            let file_size = match cx
+                .background_spawn(async move {
+                    std::fs::metadata(&path_buf).ok().map(|m| m.len())
+                })
+                .await
+            {
+                Some(size) => size,
+                None => {
                     let _ = this.update(cx, |this, cx| {
                         finish(this);
                         cx.notify();
@@ -844,7 +870,7 @@ impl OverviewSettingPage {
             .and_then(|index| self.channel_options.get(index));
         let open = self.channel_menu_open;
         let selected_index = self.selected_channel_index;
-        let options = self.channel_options.clone();
+        let menu_options = open.then(|| self.channel_options.clone());
 
         let mut trigger = h_flex()
             .id("clan-system-channel")
@@ -889,6 +915,7 @@ impl OverviewSettingPage {
             .w_full()
             .child(trigger)
             .when(open, |menu| {
+                let options = menu_options.unwrap_or_default();
                 menu.child(deferred(
                     div()
                         .absolute()

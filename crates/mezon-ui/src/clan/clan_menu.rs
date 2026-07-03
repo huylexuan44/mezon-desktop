@@ -208,14 +208,6 @@ impl RenderOnce for ClanMenuDropdown {
                             .px(px(8.))
                             .py(px(6.))
                             .rounded(px(4.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(hover))
-                            .on_click({
-                                let on_toggle = on_toggle.clone();
-                                move |_: &ClickEvent, window, cx| {
-                                    on_toggle(!checked, window, cx);
-                                }
-                            })
                             .child(
                                 div()
                                     .text_sm()

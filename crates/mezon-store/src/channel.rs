@@ -709,12 +709,13 @@ impl ChannelList {
     pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
         let mut changed = false;
         if let Some(categories) = self.cache.get_mut(&clan_id) {
-            for ch in categories.iter_mut().flat_map(|c| &mut c.channels) {
-                if ch.badge_count > 0 || ch.is_unread() {
-                    changed = true;
+            for category in categories.iter_mut() {
+                for ch in &category.channels {
+                    if ch.badge_count > 0 || ch.is_unread() {
+                        changed = true;
+                    }
                 }
-                ch.badge_count = 0;
-                ch.last_seen_timestamp = ch.last_sent_timestamp;
+                Self::mark_channels_read(&mut category.channels);
             }
         }
         if changed {

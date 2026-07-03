@@ -163,10 +163,16 @@ impl CreateClanModal {
                 return;
             }
 
-            let file_size = match std::fs::metadata(&path) {
-                Ok(m) => m.len(),
-                Err(e) => {
-                    tracing::warn!("logo pick: cannot read file metadata: {e}");
+            let path_buf = path.clone();
+            let file_size = match cx
+                .background_spawn(async move {
+                    std::fs::metadata(&path_buf).ok().map(|m| m.len())
+                })
+                .await
+            {
+                Some(size) => size,
+                None => {
+                    tracing::warn!("logo pick: cannot read file metadata");
                     let _ = this.update(cx, |this, _| finish(this));
                     return;
                 }

@@ -9,6 +9,13 @@ use crate::theme::ActiveTheme;
 type ToggleHandler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum DropdownTriggerStyle {
+    #[default]
+    Default,
+    InputPrimary,
+}
+
 #[derive(IntoElement)]
 pub struct Dropdown {
     id: ElementId,
@@ -16,6 +23,7 @@ pub struct Dropdown {
     selected: Option<usize>,
     open: bool,
     placeholder: SharedString,
+    trigger_style: DropdownTriggerStyle,
     on_toggle: Option<ToggleHandler>,
     on_select: Option<SelectHandler>,
 }
@@ -28,9 +36,15 @@ impl Dropdown {
             selected: None,
             open: false,
             placeholder: "Select…".into(),
+            trigger_style: DropdownTriggerStyle::Default,
             on_toggle: None,
             on_select: None,
         }
+    }
+
+    pub fn trigger_style(mut self, style: DropdownTriggerStyle) -> Self {
+        self.trigger_style = style;
+        self
     }
 
     pub fn items(mut self, items: Vec<SharedString>) -> Self {
@@ -74,19 +88,17 @@ impl RenderOnce for Dropdown {
         let toggle = self.on_toggle.clone();
         let on_select = self.on_select.clone();
         let open = self.open;
+        let trigger_style = self.trigger_style;
 
-        let trigger = h_flex()
+        let mut trigger = h_flex()
             .id(self.id)
             .w_full()
-            .h(px(40.0))
             .items_center()
             .justify_between()
             .gap_2()
-            .px(px(12.0))
             .rounded_md()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.tokens.bg_theme_input_primary)
             .text_sm()
             .text_color(theme.text_primary)
             .cursor_pointer()
@@ -95,10 +107,21 @@ impl RenderOnce for Dropdown {
                 Icon::new(IconName::ArrowDown)
                     .size_4()
                     .text_color(theme.text_muted),
-            )
-            .when_some(toggle.clone(), |el, handler| {
-                el.on_click(move |_, window, cx| handler(window, cx))
-            });
+            );
+        match trigger_style {
+            DropdownTriggerStyle::Default => {
+                trigger = trigger.px(px(10.)).py(px(6.)).bg(theme.bg_tertiary);
+            }
+            DropdownTriggerStyle::InputPrimary => {
+                trigger = trigger
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .bg(theme.tokens.bg_theme_input_primary);
+            }
+        }
+        let trigger = trigger.when_some(toggle.clone(), |el, handler| {
+            el.on_click(move |_, window, cx| handler(window, cx))
+        });
 
         div().relative().w_full().child(trigger).when(open, |this| {
             let toggle = toggle.clone();

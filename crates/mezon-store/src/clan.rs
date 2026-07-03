@@ -113,24 +113,24 @@ pub struct ClanOverviewDraft {
 }
 
 impl ClanOverviewDraft {
-    fn into_update_request(self, clan_id: ClanId, clan: &Clan) -> UpdateClanDescRequest {
+    fn update_request(&self, clan_id: ClanId, clan: &Clan) -> UpdateClanDescRequest {
         UpdateClanDescRequest {
             clan_id: clan_id.get(),
             clan_name: self.clan_name.trim().to_string(),
-            logo: Some(self.logo),
-            banner: Some(self.banner),
+            logo: Some(self.logo.clone()),
+            banner: Some(self.banner.clone()),
             prevent_anonymous: self.prevent_anonymous,
             welcome_channel_id: proto_channel_id(self.welcome_channel_id.or(clan.welcome_channel_id)),
             ..Default::default()
         }
     }
 
-    fn into_clan_update(self, clan: &Clan, name: String) -> ClanUpdate {
+    fn clan_update(&self, clan: &Clan, name: String) -> ClanUpdate {
         ClanUpdate {
             name: Some(name),
-            logo: self.logo,
-            banner: self.banner,
-            welcome_channel_id: clan.welcome_channel_id,
+            logo: self.logo.clone(),
+            banner: self.banner.clone(),
+            welcome_channel_id: self.welcome_channel_id.or(clan.welcome_channel_id),
             status: clan.status,
             is_onboarding: clan.is_onboarding,
             is_community: clan.is_community,
@@ -485,7 +485,7 @@ impl ClanList {
     }
 
     pub fn clan(&self, clan_id: ClanId) -> Option<&Clan> {
-        self.clans.iter().find(|c| c.id == clan_id)
+        self.clan_by_id(clan_id)
     }
 
     pub fn active_clan_banner(&self) -> Option<&str> {
@@ -637,10 +637,10 @@ impl ClanList {
         let Some(clan) = clan else {
             return cx.spawn(async move |_, _| Err("clan not found".into()));
         };
-        let request = draft.clone().into_update_request(clan_id, &clan);
+        let request = draft.update_request(clan_id, &clan);
         let trimmed_name = draft.clan_name.trim().to_string();
         let previous_name = clan.name.clone();
-        let local_update = draft.clone().into_clan_update(&clan, trimmed_name.clone());
+        let local_update = draft.clan_update(&clan, trimmed_name.clone());
         cx.spawn(async move |this, cx| {
             if trimmed_name != previous_name.trim() {
                 let is_duplicate = api
@@ -815,9 +815,7 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
         clan.name = name;
     }
     clan.avatar_url = (!update.logo.is_empty()).then_some(update.logo);
-    if !update.banner.is_empty() {
-        clan.banner_url = Some(update.banner);
-    }
+    clan.banner_url = (!update.banner.is_empty()).then_some(update.banner);
     if let Some(wc) = update.welcome_channel_id {
         clan.welcome_channel_id = Some(wc);
     }

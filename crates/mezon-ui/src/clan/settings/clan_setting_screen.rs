@@ -168,6 +168,9 @@ impl ClanSettingScreen {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify()).detach();
+        PermissionStore::global(cx).update(cx, |store, cx| {
+            store.load_clan_permissions(clan_id, cx);
+        });
         let mut this = Self {
             clan_id,
             settings,
@@ -285,9 +288,6 @@ impl Render for ClanSettingScreen {
         let page = self.current_page;
         let clan_id = self.clan_id;
         let clan_name = self.clan_name(cx);
-        PermissionStore::global(cx).update(cx, |store, cx| {
-            store.load_clan_permissions(clan_id, cx);
-        });
         let perms = PermissionStore::global(cx)
             .read(cx)
             .clan_settings_permissions(clan_id, cx);
