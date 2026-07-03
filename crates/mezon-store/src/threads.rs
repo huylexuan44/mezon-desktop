@@ -5,8 +5,8 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 use mezon_client::AppApi;
 use mezon_client::ConnectionStatus;
 use mezon_client::MezonTransport;
-use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_client::RealtimeEvent;
+use mezon_client::transport::{ApiThreadDesc, THREAD_LIST_LIMIT};
 use mezon_proto::{api, realtime};
 
 use crate::channel::{Channel, ChannelEvent, ChannelList, ChannelType};
@@ -193,9 +193,7 @@ impl ThreadsStore {
             {
                 self.apply_thread_created(ev, cx);
             }
-            RealtimeEvent::ChannelUpdated(ev)
-                if ev.channel_type == CHANNEL_TYPE_THREAD as i32 =>
-            {
+            RealtimeEvent::ChannelUpdated(ev) if ev.channel_type == CHANNEL_TYPE_THREAD as i32 => {
                 self.apply_thread_updated(ev, cx);
             }
             RealtimeEvent::ChannelMessage(msg) => self.apply_thread_message(msg, cx),
@@ -255,10 +253,13 @@ impl ThreadsStore {
     fn apply_thread_deleted(&mut self, channel_id: &str, cx: &mut Context<Self>) {
         let before = self.threads.len();
         self.threads.retain(|t| t.channel_id != channel_id);
+        let mut changed = self.threads.len() != before;
         if let Some(results) = self.search_results.as_mut() {
+            let results_before = results.len();
             results.retain(|t| t.channel_id != channel_id);
+            changed |= results.len() != results_before;
         }
-        if self.threads.len() != before {
+        if changed {
             cx.notify();
         }
     }
@@ -267,16 +268,21 @@ impl ThreadsStore {
         if ev.channel_type != CHANNEL_TYPE_THREAD as i32 {
             return;
         }
-        let Some(summary) = filter_threads(vec![thread_from_created_event(ev)]).into_iter().next()
+        let Some(summary) = filter_threads(vec![thread_from_created_event(ev)])
+            .into_iter()
+            .next()
         else {
             return;
         };
         let before = self.threads.len();
         merge_threads(&mut self.threads, vec![summary.clone()]);
+        let mut changed = self.threads.len() != before;
         if let Some(results) = self.search_results.as_mut() {
+            let results_before = results.len();
             merge_threads(results, vec![summary]);
+            changed |= results.len() != results_before;
         }
-        if self.threads.len() != before {
+        if changed {
             cx.notify();
         }
     }
@@ -342,7 +348,11 @@ impl ThreadsStore {
         self.list_channel_id
             .as_ref()
             .and_then(|id| id.parse::<ChannelId>().ok())
-            .and_then(|id| ChannelList::global(cx).read(cx).find_channel_in_active_clan(id))
+            .and_then(|id| {
+                ChannelList::global(cx)
+                    .read(cx)
+                    .find_channel_in_active_clan(id)
+            })
             .is_some_and(|ch| {
                 !matches!(ch.channel_type, ChannelType::Thread)
                     && matches!(
@@ -366,7 +376,10 @@ impl ThreadsStore {
                 self.category_id = None;
             }
             Some(id) => {
-                if let Some(channel) = ChannelList::global(cx).read(cx).find_channel_in_active_clan(id) {
+                if let Some(channel) = ChannelList::global(cx)
+                    .read(cx)
+                    .find_channel_in_active_clan(id)
+                {
                     self.apply_channel(channel);
                 } else {
                     self.list_channel_id = Some(id.to_string());
@@ -406,12 +419,6 @@ impl ThreadsStore {
     }
 
     pub fn open_popover(&mut self, cx: &mut Context<Self>) {
-        self.loaded_channel = None;
-        self.current_page = 0;
-        self.has_more = false;
-        self.loading = false;
-        self.loading_more = false;
-        self.fetch_error = false;
         self.ensure_create_permissions(cx);
         self.ensure_loaded(cx);
     }
@@ -494,14 +501,18 @@ impl ThreadsStore {
     }
 
     pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
-        self.search_query = query.clone();
         if query.trim().is_empty() {
+            if self.search_query.is_empty() && self.search_results.is_none() && !self.searching {
+                return;
+            }
+            self.search_query = query;
             self.search_results = None;
             self.searching = false;
             self.search_generation = self.search_generation.wrapping_add(1);
             cx.notify();
             return;
         }
+        self.search_query = query.clone();
         self.searching = true;
         cx.notify();
         self.schedule_search(cx, query);
@@ -549,9 +560,8 @@ impl ThreadsStore {
                 this.searching = false;
                 match result {
                     Ok(list) => {
-                        let results = filter_threads(
-                            list.into_iter().map(thread_from_api).collect(),
-                        );
+                        let results =
+                            filter_threads(list.into_iter().map(thread_from_api).collect());
                         this.ensure_clan_members_for_threads(&results, cx);
                         this.search_results = Some(results);
                     }
@@ -563,11 +573,7 @@ impl ThreadsStore {
         .detach();
     }
 
-    fn ensure_clan_members_for_threads(
-        &self,
-        threads: &[ThreadSummary],
-        cx: &mut Context<Self>,
-    ) {
+    fn ensure_clan_members_for_threads(&self, threads: &[ThreadSummary], cx: &mut Context<Self>) {
         let mut seen = std::collections::HashSet::new();
         for thread in threads {
             let Ok(clan_id) = thread.clan_id.parse::<ClanId>() else {
@@ -624,8 +630,7 @@ impl ThreadsStore {
                 match result {
                     Ok(list) => {
                         let page_full = page_has_more(list.len());
-                        let batch =
-                            filter_threads(list.into_iter().map(thread_from_api).collect());
+                        let batch = filter_threads(list.into_iter().map(thread_from_api).collect());
                         this.ensure_clan_members_for_threads(&batch, cx);
                         if append {
                             merge_threads(&mut this.threads, batch);
@@ -662,6 +667,13 @@ impl ThreadsStore {
     }
 
     pub fn cancel_create(&mut self, cx: &mut Context<Self>) {
+        if !self.creating
+            && !self.submitting
+            && self.create_private == 0
+            && self.name_error.is_none()
+        {
+            return;
+        }
         self.creating = false;
         self.submitting = false;
         self.create_private = 0;
@@ -911,27 +923,21 @@ fn patch_thread_in_list(
     true
 }
 
-pub fn group_threads(
-    threads: &[ThreadSummary],
-) -> (
-    Vec<&ThreadSummary>,
-    Vec<&ThreadSummary>,
-    Vec<&ThreadSummary>,
-) {
+pub fn group_threads(threads: &[ThreadSummary]) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
     let mut joined = Vec::new();
     let mut active = Vec::new();
     let mut older = Vec::new();
 
-    for t in threads {
+    for (index, t) in threads.iter().enumerate() {
         match t.active {
-            THREAD_STATUS_JOINED => joined.push(t),
-            THREAD_STATUS_ARCHIVED => older.push(t),
-            _ => active.push(t),
+            THREAD_STATUS_JOINED => joined.push(index),
+            THREAD_STATUS_ARCHIVED => older.push(index),
+            _ => active.push(index),
         }
     }
 
-    let sort = |v: &mut Vec<&ThreadSummary>| {
-        v.sort_by_key(|t| std::cmp::Reverse(t.last_sent_timestamp));
+    let sort = |v: &mut Vec<usize>| {
+        v.sort_by_key(|&i| std::cmp::Reverse(threads[i].last_sent_timestamp));
     };
     sort(&mut joined);
     sort(&mut active);

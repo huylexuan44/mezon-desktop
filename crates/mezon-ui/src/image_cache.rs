@@ -16,6 +16,10 @@ pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
 pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
+pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 8;
+pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+pub const VIEWER_ENTRY_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
 /// App-wide fallback cache attached at the root, so any `img`/avatar that does
 /// not declare its own cache uses this bounded LRU instead of GPUI's unbounded
 /// global asset cache (which never evicts and leaks RAM for every URL seen).

@@ -26,7 +26,11 @@ mod skeleton;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{OpenMenu, build_channel_menu, on_category_click, on_channel_click};
 
-fn resolve_voice_member_slot(cx: &App, clan_id: Option<ClanId>, m: &VoiceMember) -> VoiceMemberSlot {
+fn resolve_voice_member_slot(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    m: &VoiceMember,
+) -> VoiceMemberSlot {
     let mut slot = VoiceMemberSlot::from(m);
     if let Some(clan_id) = clan_id
         && let Some(store) = ClanMembersStore::try_global(cx)
@@ -54,6 +58,7 @@ pub struct ChannelSidebar {
     items: Rc<Vec<SidebarItem>>,
     list_state: ListState,
     active_clan_name: String,
+    active_clan_name_upper: String,
     active_clan_id: Option<ClanId>,
     loaded_clans: HashSet<ClanId>,
     channel_list_handle: Entity<ChannelList>,
@@ -146,6 +151,7 @@ impl ChannelSidebar {
             items: Rc::new(Vec::new()),
             list_state,
             active_clan_name: String::new(),
+            active_clan_name_upper: String::new(),
             active_clan_id: None,
             loaded_clans: HashSet::new(),
             channel_list_handle,
@@ -183,6 +189,9 @@ impl ChannelSidebar {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| mezon_i18n::t(&locale, "sidebar.selectClan").to_string());
         let name_changed = new_clan_name != self.active_clan_name;
+        if name_changed {
+            self.active_clan_name_upper = new_clan_name.to_uppercase();
+        }
         self.active_clan_name = new_clan_name;
         self.active_clan_id = new_clan_id;
 
@@ -473,7 +482,7 @@ impl Render for ChannelSidebar {
                 let sidebar = sidebar.clone();
                 let sidebar_for_menu = sidebar_for_clan_menu.clone();
                 let channel_list_for_menu = channel_list_for_clan_menu.clone();
-                let clan_name = self.active_clan_name.clone();
+                let clan_name = self.active_clan_name_upper.clone();
                 let has_clan = self.active_clan_id.is_some();
                 div()
                     .relative()
@@ -510,7 +519,7 @@ impl Render for ChannelSidebar {
                                         .text_base()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .text_color(theme.text_primary)
-                                        .child(clan_name.to_uppercase()),
+                                        .child(clan_name.clone()),
                                 )
                                 .child(
                                     Icon::new(IconName::ChevronDownIcon)
@@ -529,7 +538,7 @@ impl Render for ChannelSidebar {
                                 .text_base()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme.text_primary)
-                                .child(clan_name.to_uppercase()),
+                                .child(clan_name.clone()),
                         )
                     })
                     .when_some(clan_menu_data, move |el, (clan_id, show_empty, locale)| {

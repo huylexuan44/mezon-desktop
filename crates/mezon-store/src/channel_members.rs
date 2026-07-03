@@ -152,6 +152,16 @@ impl ChannelMembersStore {
         }
     }
 
+    pub fn member_ids_preview(&self, channel_id: ChannelId, max: usize) -> (Vec<UserId>, usize) {
+        match self.cache.get(&channel_id) {
+            Some(bucket) => {
+                let preview = bucket.members.iter().take(max).map(|m| m.user_id).collect();
+                (preview, bucket.members.len())
+            }
+            None => (Vec::new(), 0),
+        }
+    }
+
     pub fn has_channel(&self, channel_id: ChannelId) -> bool {
         self.cache.contains(&channel_id)
     }

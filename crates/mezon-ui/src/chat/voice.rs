@@ -34,7 +34,9 @@ pub fn render_voice_channel(
     );
 
     if store.is_connected_to(&channel.id.to_string()) || connecting {
-        return render_in_call(theme, locale, channel, voice, settings, store, connecting, cx);
+        return render_in_call(
+            theme, locale, channel, voice, settings, store, connecting, cx,
+        );
     }
 
     let error = match store.connection() {
@@ -962,12 +964,7 @@ fn render_grid(
                         .rounded_lg()
                         .bg(theme.bg_secondary)
                         .child(avatar)
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_primary)
-                                .child(name),
-                        )
+                        .child(div().text_sm().text_color(theme.text_primary).child(name))
                 }))
                 .into_any_element();
         }

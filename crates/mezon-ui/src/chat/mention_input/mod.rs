@@ -282,7 +282,6 @@ impl MentionInput {
             .collect();
         self.committed.clear();
         self.reset_popup();
-        self.pooled = None;
         self.picker_open = false;
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
@@ -401,6 +400,7 @@ impl MentionInput {
         self.query_len = 0;
         self.suggestions.clear();
         self.selected = 0;
+        self.pooled = None;
     }
 
     fn hide(&mut self, cx: &mut Context<Self>) {
@@ -483,7 +483,11 @@ impl MentionInput {
 
         if self.pooled != Some((at, sigil)) {
             self.refresh_pool(sigil, cx);
-            self.pooled = Some((at, sigil));
+            self.pooled = if self.pool_is_empty(sigil) {
+                None
+            } else {
+                Some((at, sigil))
+            };
         }
         self.active_at = Some(at);
         self.active_sigil = sigil;
@@ -506,6 +510,14 @@ impl MentionInput {
                 }
                 self.session_emojis = emoji_suggest_pool(cx);
             }
+        }
+    }
+
+    fn pool_is_empty(&self, sigil: Sigil) -> bool {
+        match sigil {
+            Sigil::At => self.session_members.is_empty(),
+            Sigil::Hash => self.session_channels.is_empty(),
+            Sigil::Colon => self.session_emojis.is_empty(),
         }
     }
 

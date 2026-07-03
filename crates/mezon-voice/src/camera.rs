@@ -39,7 +39,10 @@ impl Drop for CameraStopper {
 pub fn start_camera(
     identity: String,
     frame_store: Arc<VideoFrameStore>,
-) -> (CameraStopper, flume::Receiver<Result<LocalVideoTrack, String>>) {
+) -> (
+    CameraStopper,
+    flume::Receiver<Result<LocalVideoTrack, String>>,
+) {
     let stop = Arc::new(AtomicBool::new(false));
     let (track_tx, track_rx) = flume::bounded(1);
 
@@ -244,8 +247,8 @@ fn camera_indices() -> Vec<CameraIndex> {
 }
 
 fn try_open_camera(index: &CameraIndex, requested: RequestedFormat<'_>) -> Result<Camera, String> {
-    let mut camera = Camera::new(index.clone(), requested)
-        .map_err(|e| format!("open camera: {e}"))?;
+    let mut camera =
+        Camera::new(index.clone(), requested).map_err(|e| format!("open camera: {e}"))?;
     camera
         .open_stream()
         .map_err(|e| format!("open camera stream: {e}"))?;

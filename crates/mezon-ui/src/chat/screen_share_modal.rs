@@ -177,10 +177,13 @@ impl ScreenShareModal {
             while let Ok((kind, id, preview)) = rx.recv_async().await {
                 let key = PreviewKey { kind, id };
                 let image = preview.and_then(preview_to_render_image);
-                this.update(cx, |this, cx| {
-                    if let Some(image) = image {
+                this.update(cx, |this, cx| match image {
+                    Some(image) => {
                         this.previews.insert(key, image);
                         cx.notify();
+                    }
+                    None => {
+                        this.preview_requests.remove(&key);
                     }
                 });
             }

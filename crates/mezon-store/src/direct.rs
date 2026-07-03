@@ -343,10 +343,8 @@ impl DirectMessageStore {
         self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let (result, badges) = tokio::join!(
-                api.list_dm_channels(1),
-                api.list_channel_badge_counts(0),
-            );
+            let (result, badges) =
+                tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0),);
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;

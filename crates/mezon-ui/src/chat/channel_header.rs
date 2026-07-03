@@ -187,8 +187,7 @@ impl ChannelHeader {
                         if !show_threads {
                             return None;
                         }
-                        let (Some(handle), Some(layout)) =
-                            (thread_handle.clone(), layout.clone())
+                        let (Some(handle), Some(layout)) = (thread_handle.clone(), layout.clone())
                         else {
                             return None;
                         };
@@ -378,6 +377,7 @@ pub struct ChatHeader {
     inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
     clan_id: Option<String>,
     locale: Option<String>,
+    show_threads: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
@@ -400,6 +400,7 @@ impl ChatHeader {
             inbox_handle: None,
             clan_id: None,
             locale: None,
+            show_threads: false,
             pin_handle: None,
             layout,
             settings: settings.clone(),
@@ -423,6 +424,7 @@ impl ChatHeader {
         let name = name.unwrap_or_else(|| self.name.clone());
         self.inbox_handle = inbox_handle;
         self.pin_handle = pin_handle;
+        let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
         if self.name == name
             && self.dm == dm
             && self.members_action == members_action
@@ -430,6 +432,7 @@ impl ChatHeader {
             && self.show_inbox == show_inbox
             && self.clan_id == clan_id
             && self.locale == locale
+            && self.show_threads == show_threads
         {
             return;
         }
@@ -440,6 +443,7 @@ impl ChatHeader {
         self.show_inbox = show_inbox;
         self.clan_id = clan_id;
         self.locale = locale;
+        self.show_threads = show_threads;
         cx.notify();
     }
 }
@@ -449,7 +453,7 @@ impl Render for ChatHeader {
         let theme = cx.theme();
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
-        let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
+        let show_threads = self.show_threads;
         let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
         });
@@ -466,9 +470,7 @@ impl Render for ChatHeader {
                 .read_with(cx, |layout, _| layout.thread_popover_handle.clone())
             && let Some(layout) = self.layout.upgrade()
         {
-            header = header
-                .layout(layout)
-                .thread_popover(thread_handle);
+            header = header.layout(layout).thread_popover(thread_handle);
         }
         if let (Some(handle), Some(clan_id), Some(locale)) = (
             self.inbox_handle.clone(),
@@ -515,10 +517,7 @@ impl Toggleable for ThreadPopoverTrigger {
 }
 
 impl Clickable for ThreadPopoverTrigger {
-    fn on_click(
-        mut self,
-        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(handler));
         self
     }

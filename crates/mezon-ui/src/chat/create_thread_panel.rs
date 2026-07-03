@@ -119,124 +119,125 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                 ),
         )
         .child(
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .px_3()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .justify_end()
-                        .child(
-                            div()
-                                .mx_4()
-                                .mt_4()
-                                .w(px(64.))
-                                .h(px(64.))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(tokens.bg_active_member_channel)
-                                .child(
-                                    Icon::new(thread_icon)
-                                        .size(px(28.))
-                                        .text_color(tokens.bg_icon_theme),
-                                ),
-                        )
-                        .child(
-                            v_flex()
-                                .mt_4()
-                                .mb_4()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .mb_2()
-                                        .text_color(tokens.text_secondary)
-                                        .child(mezon_i18n::t(
+            v_flex().flex_1().min_h_0().overflow_hidden().px_3().child(
+                v_flex()
+                    .flex_1()
+                    .justify_end()
+                    .child(
+                        div()
+                            .mx_4()
+                            .mt_4()
+                            .w(px(64.))
+                            .h(px(64.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(tokens.bg_active_member_channel)
+                            .child(
+                                Icon::new(thread_icon)
+                                    .size(px(28.))
+                                    .text_color(tokens.bg_icon_theme),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .mt_4()
+                            .mb_4()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .mb_2()
+                                    .text_color(tokens.text_secondary)
+                                    .child(
+                                        mezon_i18n::t(
                                             locale,
                                             "channelTopbar.createThread.threadName",
-                                        ).to_uppercase()),
-                                )
-                                .child(
+                                        )
+                                        .to_uppercase(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .h(px(40.))
+                                    .rounded_lg()
+                                    .bg(tokens.bg_active_member_channel)
+                                    .border_1()
+                                    .border_color(tokens.border_primary)
+                                    .px(px(10.))
+                                    .child(
+                                        Input::new(&thread_name_input)
+                                            .w_full()
+                                            .text_base()
+                                            .text_color(tokens.text_theme_message),
+                                    ),
+                            )
+                            .when_some(error_label, |this, err| {
+                                this.child(
                                     div()
-                                        .flex()
-                                        .items_center()
-                                        .h(px(40.))
-                                        .rounded_lg()
-                                        .bg(tokens.bg_active_member_channel)
-                                        .border_1()
-                                        .border_color(tokens.border_primary)
-                                        .px(px(10.))
-                                        .child(
-                                            Input::new(&thread_name_input)
-                                                .w_full()
-                                                .text_base()
-                                                .text_color(tokens.text_theme_message),
-                                        ),
+                                        .mt_1()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.status_dnd)
+                                        .child(err.to_string()),
                                 )
-                                .when_some(error_label, |this, err| {
-                                    this.child(
-                                        div()
-                                            .mt_1()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.status_dnd)
-                                            .child(err.to_string()),
-                                    )
-                                }),
-                        )
-                        .child(
-                            v_flex()
-                                .mt_4()
-                                .mb_4()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .mb_2()
-                                        .text_color(tokens.text_secondary)
-                                        .child(mezon_i18n::t(
+                            }),
+                    )
+                    .child(
+                        v_flex()
+                            .mt_4()
+                            .mb_4()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .mb_2()
+                                    .text_color(tokens.text_secondary)
+                                    .child(
+                                        mezon_i18n::t(
                                             locale,
                                             "channelTopbar.createThread.privateThread",
-                                        ).to_uppercase()),
-                                )
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            Checkbox::new("create-thread-private")
-                                                .checked(create_private)
-                                                .on_click(move |checked, _window, cx| {
-                                                    layout_private.update(cx, |layout, cx| {
-                                                        layout.set_create_thread_private(*checked, cx);
-                                                    });
-                                                }),
                                         )
-                                        .child(
-                                            div()
-                                                .text_base()
-                                                .text_color(tokens.text_theme_primary)
-                                                .child(private_label),
-                                        ),
-                                )
-                                .when(create_private, |this| {
-                                    this.child(
-                                        div()
-                                            .mt_2()
-                                            .text_xs()
-                                            .text_color(tokens.text_theme_primary)
-                                            .child(mezon_i18n::t(
-                                                locale,
-                                                "channelTopbar.createThread.inviteMessage",
-                                            )),
+                                        .to_uppercase(),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Checkbox::new("create-thread-private")
+                                            .checked(create_private)
+                                            .on_click(move |checked, _window, cx| {
+                                                layout_private.update(cx, |layout, cx| {
+                                                    layout.set_create_thread_private(*checked, cx);
+                                                });
+                                            }),
                                     )
-                                }),
-                        ),
-                ),
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .text_color(tokens.text_theme_primary)
+                                            .child(private_label),
+                                    ),
+                            )
+                            .when(create_private, |this| {
+                                this.child(
+                                    div()
+                                        .mt_2()
+                                        .text_xs()
+                                        .text_color(tokens.text_theme_primary)
+                                        .child(mezon_i18n::t(
+                                            locale,
+                                            "channelTopbar.createThread.inviteMessage",
+                                        )),
+                                )
+                            }),
+                    ),
+            ),
         )
         .child(
             v_flex()

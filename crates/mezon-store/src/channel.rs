@@ -152,6 +152,7 @@ pub struct ChannelList {
     collapsed: HashSet<(String, String)>,
     show_empty_categories: HashSet<ClanId>,
     channel_index: RefCell<ChannelLocationCache>,
+    reset_generation: u64,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
@@ -215,6 +216,7 @@ impl ChannelList {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.cache.clear();
         self.app_channels_cache.clear();
         self.topic_parent_badges.clear();
@@ -281,6 +283,7 @@ impl ChannelList {
             collapsed: HashSet::new(),
             show_empty_categories: HashSet::new(),
             channel_index: RefCell::new(ChannelLocationCache::default()),
+            reset_generation: 0,
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
@@ -363,11 +366,15 @@ impl ChannelList {
         }
         self.loading.insert(clan_id);
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = Self::fetch_clan_data(&api, clan_id).await;
             match result {
                 Ok((mut categories, app_channels, last_messages)) => {
                     let _ = this.update(cx, |this, cx| {
+                        if this.reset_generation != generation {
+                            return;
+                        }
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.merge_pending_badges(&mut categories);
