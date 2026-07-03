@@ -375,12 +375,29 @@ impl AppConfig {
         format!("{}/{}{}", base, self.imgproxy_key, path)
     }
 
+    pub fn voice_link(&self, clan_id: &str, channel_id: &str) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        if clan_id.is_empty() || clan_id == "0" {
+            format!("{base}/chat/direct/message/{channel_id}/3")
+        } else {
+            format!("{base}/chat/clans/{clan_id}/channels/{channel_id}")
+        }
+    }
+
     pub fn avatar_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 100, 100, "fit")
+        self.imgproxy_url(source, 100, 100, "fill")
     }
 
     pub fn profile_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 300, 300, "fit")
+        self.imgproxy_url(source, 300, 300, "fill")
+    }
+
+    pub fn emoji_src(&self, emoji_id: &str) -> String {
+        if emoji_id.is_empty() {
+            return String::new();
+        }
+        let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
+        self.imgproxy_url(&source, 100, 100, "fit")
     }
 
     pub fn attachment_proxy(

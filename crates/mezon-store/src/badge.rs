@@ -5,6 +5,7 @@ use mezon_client::RealtimeEvent;
 use mezon_proto::api::{ChannelMessage, Notification};
 
 use crate::AuthState;
+use crate::Settings;
 use crate::channel::ChannelList;
 use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
@@ -12,6 +13,7 @@ use crate::direct::DirectMessageStore;
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
 use crate::message::MessageCode;
 use crate::messages::MessagesStore;
+use crate::platform::{DesktopNotification, PlatformStore};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const STREAM_MODE_GROUP: i32 = 3;
@@ -121,6 +123,41 @@ fn is_viewing_channel(cx: &App, channel_id: ChannelId) -> bool {
     messages.active_channel_id() == Some(channel_id)
 }
 
+fn maybe_show_desktop_notification(cx: &App, notif: &Notification, channel_id: ChannelId) {
+    if cx.active_window().is_some() {
+        return;
+    }
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let (enabled, hide_content) = {
+        let s = settings.read(cx);
+        (s.notifications_enabled, s.notifications_hide_content)
+    };
+    if !enabled {
+        return;
+    }
+    let Some(platform) = PlatformStore::try_global(cx) else {
+        return;
+    };
+    let title = notif
+        .channel
+        .as_ref()
+        .map(|c| c.channel_label.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Mezon".to_string());
+    let body = if hide_content || notif.subject.is_empty() {
+        "New message".to_string()
+    } else {
+        notif.subject.clone()
+    };
+    platform.read(cx).show_notification(DesktopNotification {
+        title,
+        body,
+        channel_id: Some(channel_id.to_string()),
+    });
+}
+
 fn is_message_already_seen(
     cx: &App,
     clan_id: ClanId,
@@ -156,6 +193,16 @@ impl BadgeService {
 
     pub fn global(cx: &App) -> Entity<Self> {
         cx.global::<GlobalBadgeService>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalBadgeService>().map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.processed_badge_messages.clear();
+        self.processed_badge_order.clear();
+        cx.notify();
     }
 
     pub fn current_user_id(&self, cx: &App) -> Option<UserId> {
@@ -473,6 +520,7 @@ impl BadgeService {
             message_id = message_id.get(),
             "badge: apply notification increment"
         );
+        maybe_show_desktop_notification(cx, notif, badge_channel);
         ChannelList::global(cx).update(cx, |cl, cx| {
             cl.note_channel_message(
                 clan_id,

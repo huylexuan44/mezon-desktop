@@ -64,7 +64,7 @@ impl GifVideoView {
         cx.notify();
     }
 
-    fn poll_frame(&mut self, cx: &mut Context<Self>) {
+    fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
         };
@@ -83,16 +83,17 @@ impl GifVideoView {
             }
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
-        Self::release_frame(previous, cx);
+        Self::release_frame(previous, window, cx);
     }
 
     #[cfg(target_os = "macos")]
-    fn release_frame(_previous: Option<VideoFrame>, _cx: &mut Context<Self>) {}
+    fn release_frame(_previous: Option<VideoFrame>, _window: &mut Window, _cx: &mut Context<Self>) {
+    }
 
     #[cfg(not(target_os = "macos"))]
-    fn release_frame(previous: Option<VideoFrame>, cx: &mut Context<Self>) {
+    fn release_frame(previous: Option<VideoFrame>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(previous) = previous {
-            cx.drop_image(previous, None);
+            cx.drop_image(previous, Some(window));
         }
     }
 
@@ -130,7 +131,7 @@ impl GifVideoView {
 
 impl Render for GifVideoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.poll_frame(cx);
+        self.poll_frame(window, cx);
         let theme = cx.theme();
         let failed = self.shared.borrow().failed;
         let root = div()

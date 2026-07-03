@@ -13,11 +13,10 @@ pub struct SingleInstance {
     #[cfg(unix)]
     _listener: Option<std::os::unix::net::UnixListener>,
 
-    /// Windows: the server pipe handle kept alive so the listener thread can
-    /// keep accepting connections.  Wrapped in an Arc so it can be cloned into
-    /// the listener thread.
     #[cfg(windows)]
     _pipe_name: String,
+    #[cfg(windows)]
+    url_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<String>>>,
 }
 
 impl SingleInstance {
@@ -144,12 +143,9 @@ impl SingleInstance {
 
     #[cfg(windows)]
     fn try_acquire_windows(forward_url: Option<&str>) -> anyhow::Result<Option<Self>> {
-        use std::io::{Read as _, Write as _};
-        use std::time::Duration;
+        use std::io::Write as _;
 
-        // Try to connect to an existing server pipe.
         match std::fs::OpenOptions::new()
-            .read(true)
             .write(true)
             .open(Self::PIPE_NAME)
         {
@@ -170,33 +166,37 @@ impl SingleInstance {
             }
         }
 
-        // Create the named pipe server.
-        Self::create_pipe_server()?;
+        let url_rx = Self::create_pipe_server()?;
 
         tracing::debug!("Single instance lock acquired (Windows named pipe)");
         Ok(Some(Self {
             _pipe_name: Self::PIPE_NAME.to_owned(),
+            url_rx: std::sync::Mutex::new(Some(url_rx)),
         }))
     }
 
-    /// Create the named pipe server instance using the Windows API.
     #[cfg(windows)]
-    fn create_pipe_server() -> anyhow::Result<()> {
-        use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+    fn create_pipe_server() -> anyhow::Result<std::sync::mpsc::Receiver<String>> {
+        use std::time::Duration;
+        use windows::Win32::Foundation::{
+            ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE,
+        };
         use windows::Win32::Storage::FileSystem::{
-            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND,
         };
         use windows::Win32::System::Pipes::{
             CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
             PIPE_WAIT,
         };
 
+        const MIN_BACKOFF: Duration = Duration::from_millis(100);
+        const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
         let pipe_name: Vec<u16> = Self::PIPE_NAME
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
 
-        // Create the first server instance with FILE_FLAG_FIRST_PIPE_INSTANCE
         // so a second server creation attempt fails (mutex semantics).
         let handle = unsafe {
             CreateNamedPipeW(
@@ -221,38 +221,54 @@ impl SingleInstance {
         // Extract raw pointer value; HANDLE is Copy so just store the value
         let raw = unsafe { handle.0 as usize };
 
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+
         // Transfer ownership into the listener thread.
         // The thread keeps the handle alive and continuously accepts + reads connections.
         std::thread::Builder::new()
             .name("mezon-single-instance".into())
             .spawn(move || {
                 let h = windows::Win32::Foundation::HANDLE(raw as *mut std::ffi::c_void);
+                let mut backoff = MIN_BACKOFF;
                 loop {
                     let connected =
-                        unsafe { windows::Win32::System::Pipes::ConnectNamedPipe(h, None).is_ok() };
-                    if connected {
-                        let mut buf = [0u8; 4096];
-                        let mut bytes_read = 0u32;
-                        let ok = unsafe {
-                            windows::Win32::Storage::FileSystem::ReadFile(
-                                h,
-                                Some(&mut buf),
-                                Some(&mut bytes_read),
-                                None,
-                            )
-                            .is_ok()
+                        match unsafe { windows::Win32::System::Pipes::ConnectNamedPipe(h, None) } {
+                            Ok(()) => true,
+                            Err(_) => unsafe { GetLastError() == ERROR_PIPE_CONNECTED },
                         };
-                        if ok && bytes_read > 0 {
-                            if let Ok(url) = std::str::from_utf8(&buf[..bytes_read as usize]) {
-                                let safe = url.split(['?', '#']).next().unwrap_or_default();
-                                tracing::debug!(
-                                    "Named pipe: received URL from secondary instance: {safe}"
-                                );
-                            }
-                        }
+                    if !connected {
                         unsafe {
                             let _ = windows::Win32::System::Pipes::DisconnectNamedPipe(h);
                         }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        continue;
+                    }
+                    backoff = MIN_BACKOFF;
+
+                    let mut buf = [0u8; 4096];
+                    let mut bytes_read = 0u32;
+                    let ok = unsafe {
+                        windows::Win32::Storage::FileSystem::ReadFile(
+                            h,
+                            Some(&mut buf),
+                            Some(&mut bytes_read),
+                            None,
+                        )
+                        .is_ok()
+                    };
+                    if ok && bytes_read > 0 {
+                        if let Ok(url) = std::str::from_utf8(&buf[..bytes_read as usize]) {
+                            let url = url.trim().to_owned();
+                            let safe = url.split(['?', '#']).next().unwrap_or_default();
+                            tracing::debug!(
+                                "Named pipe: received URL from secondary instance: {safe}"
+                            );
+                            let _ = tx.send(url);
+                        }
+                    }
+                    unsafe {
+                        let _ = windows::Win32::System::Pipes::DisconnectNamedPipe(h);
                     }
                 }
             })
@@ -260,7 +276,7 @@ impl SingleInstance {
                 anyhow::anyhow!("Failed to spawn single-instance pipe listener thread: {e}")
             })?;
 
-        Ok(())
+        Ok(rx)
     }
 
     // ── Shared: URL forwarding listener ───────────────────────────────────────
@@ -318,7 +334,12 @@ impl SingleInstance {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("Unix socket accept error: {e}");
+                        if Self::is_transient_accept_error(&e) {
+                            tracing::debug!("Transient Unix socket accept error, retrying: {e}");
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
+                        }
+                        tracing::warn!("Unix socket accept error (stopping URL forwarding): {e}");
                         break;
                     }
                 }
@@ -326,77 +347,38 @@ impl SingleInstance {
         });
     }
 
-    /// On Windows we create a *second* pipe server instance (the first is
-    /// the acquisition lock; additional instances handle subsequent callers).
+    #[cfg(unix)]
+    fn is_transient_accept_error(e: &std::io::Error) -> bool {
+        use std::io::ErrorKind;
+        if matches!(
+            e.kind(),
+            ErrorKind::ConnectionAborted | ErrorKind::Interrupted | ErrorKind::WouldBlock
+        ) {
+            return true;
+        }
+        matches!(e.raw_os_error(), Some(23) | Some(24) | Some(55) | Some(105))
+    }
+
     #[cfg(windows)]
     fn listen_for_urls_windows(&self, callback: impl Fn(String) + Send + 'static) {
-        let pipe_name: Vec<u16> = Self::PIPE_NAME
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let Some(rx) = self.url_rx.lock().ok().and_then(|mut guard| guard.take()) else {
+            tracing::debug!("Windows URL forwarding already wired or unavailable");
+            let _ = callback;
+            return;
+        };
 
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("mezon-pipe-url-listener".into())
             .spawn(move || {
-                use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-                use windows::Win32::{
-                    Foundation::HANDLE,
-                    Storage::FileSystem::{
-                        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
-                        ReadFile,
-                    },
-                    System::Pipes::{
-                        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-                        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-                    },
-                };
-
-                let handle = unsafe {
-                    CreateNamedPipeW(
-                        windows::core::PCWSTR(pipe_name.as_ptr()),
-                        PIPE_ACCESS_INBOUND,
-                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                        PIPE_UNLIMITED_INSTANCES,
-                        4096,
-                        4096,
-                        0,
-                        None,
-                    )
-                };
-
-                if handle == INVALID_HANDLE_VALUE {
-                    tracing::warn!(
-                        "Could not create URL-listener pipe: {}",
-                        std::io::Error::last_os_error()
-                    );
-                    return;
-                }
-
-                loop {
-                    let connected = unsafe { ConnectNamedPipe(handle, None).is_ok() };
-                    if connected {
-                        let mut buf = [0u8; 4096];
-                        let mut bytes_read = 0u32;
-                        let ok = unsafe {
-                            ReadFile(handle, Some(&mut buf), Some(&mut bytes_read), None).is_ok()
-                        };
-                        if ok && bytes_read > 0 {
-                            if let Ok(url) = std::str::from_utf8(&buf[..bytes_read as usize]) {
-                                let url = url.trim().to_owned();
-                                let safe = url.split(['?', '#']).next().unwrap_or_default();
-                                tracing::debug!("Named pipe URL listener: received {safe}");
-                                callback(url);
-                            }
-                        }
-                        unsafe {
-                            let _ = DisconnectNamedPipe(handle);
-                        }
-                    }
+                for url in rx {
+                    let safe = url.split(['?', '#']).next().unwrap_or_default();
+                    tracing::debug!("Named pipe URL listener: delivering {safe}");
+                    callback(url);
                 }
             })
-            .map_err(|e| {
-                tracing::warn!("Failed to spawn pipe URL listener thread: {e}");
-            });
+        {
+            tracing::warn!("Failed to spawn pipe URL listener thread: {e}");
+        }
     }
 }
 

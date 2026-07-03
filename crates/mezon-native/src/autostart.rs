@@ -1,6 +1,5 @@
 /// Auto-start on login using the `auto-launch` crate.
 ///
-/// On macOS: adds a Login Item via LaunchServices.
 /// On Windows: writes to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 /// On Linux: creates/removes `~/.config/autostart/mezon.desktop`.
 use anyhow::Result;
@@ -22,10 +21,11 @@ pub fn set_auto_start(enabled: bool) -> Result<()> {
     let exe_str = exe
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("executable path is not valid UTF-8"))?;
-    let auto = AutoLaunchBuilder::new()
-        .set_app_name("Mezon")
-        .set_app_path(exe_str)
-        .build()?;
+    let mut builder = AutoLaunchBuilder::new();
+    builder.set_app_name("Mezon").set_app_path(exe_str);
+    #[cfg(target_os = "macos")]
+    builder.set_use_launch_agent(true);
+    let auto = builder.build()?;
 
     if enabled {
         auto.enable()?;

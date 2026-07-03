@@ -271,6 +271,7 @@ impl ConnectionStore {
                             *state = AuthState::NotAuthenticated;
                             cx.notify();
                         });
+                        crate::login::LoginStore::reset_all_user_stores(cx);
                     });
                     consecutive_failures = 0;
                     retry_backoff_secs = 1;

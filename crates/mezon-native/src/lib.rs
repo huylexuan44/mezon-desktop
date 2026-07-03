@@ -16,7 +16,7 @@ pub fn open_url(url: &str) -> anyhow::Result<()> {
             "open_url rejected: only http(s) scheme is allowed"
         ));
     }
-    open::that(url).map_err(|e| anyhow::anyhow!("Failed to open URL: {}", e))
+    open::that_detached(url).map_err(|e| anyhow::anyhow!("Failed to open URL: {}", e))
 }
 
 #[cfg(test)]

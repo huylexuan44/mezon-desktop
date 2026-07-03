@@ -42,6 +42,9 @@ fn set_badge_macos(count: u32) {
         };
 
         let _: () = msg_send![dock_tile, setBadgeLabel: label];
+        if !label.is_null() {
+            let _: () = msg_send![label, release];
+        }
     }
 }
 
@@ -53,32 +56,26 @@ fn set_badge_macos(count: u32) {
 
 #[cfg(target_os = "windows")]
 fn set_badge_windows(count: u32) {
-    // SetOverlayIcon must be called on the thread that owns the HWND (the UI
-    // thread).  We spawn a thread here but the real call needs to happen on the
-    // message thread.  For Stage 0 we do a best-effort call from a dedicated
-    // thread — GPUI will move this to the main window thread in Stage 2 when
-    // we have proper WindowHandle access.
-    std::thread::spawn(move || {
-        if let Err(e) = try_set_overlay_icon(count) {
-            tracing::warn!("Windows badge count failed: {e}");
-        }
-    });
+    if let Err(e) = try_set_overlay_icon(count) {
+        tracing::warn!("Windows badge count failed: {e}");
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC, DeleteObject,
-        FillRect, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
-    };
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyIcon, HICON, ICONINFO,
+        CreateIconIndirect, DestroyIcon, GetActiveWindow, HICON, ICONINFO,
     };
     use windows::core::Interface as _;
 
-    // Instantiate ITaskbarList3 via CoCreate.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
+    let hwnd = unsafe { GetActiveWindow() };
+
     let taskbar: ITaskbarList3 = unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &TaskbarList,
@@ -92,7 +89,7 @@ fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
         // Pass null icon to clear the overlay.
         unsafe {
             taskbar.SetOverlayIcon(
-                HWND(std::ptr::null_mut()),
+                hwnd,
                 HICON(std::ptr::null_mut()),
                 &windows::core::HSTRING::new(),
             )?
@@ -104,11 +101,9 @@ fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
     let hicon = build_count_icon(count)?;
     let description = windows::core::HSTRING::from(format!("{count} unread"));
 
-    // HWND(0) — the OS uses the foreground window of the calling process.
-    // Stage 2 will pass the real HWND from the stored WindowHandle.
     unsafe {
-        taskbar.SetOverlayIcon(HWND(std::ptr::null_mut()), hicon, &description)?;
-        DestroyIcon(hicon);
+        taskbar.SetOverlayIcon(hwnd, hicon, &description)?;
+        let _ = DestroyIcon(hicon);
     }
     Ok(())
 }

@@ -99,7 +99,7 @@ impl DmRow {
             .items_center()
             .justify_center()
             .size(px(20.))
-            .text_size(px(20.))
+            .text_size(px(24.))
             .opacity(0.)
             .text_color(muted)
             .cursor_pointer()
@@ -140,7 +140,7 @@ impl DmRow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
+                    .text_base()
                     .text_color(name_color)
                     .truncate()
                     .child(self.label.clone()),

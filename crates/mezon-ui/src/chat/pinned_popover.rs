@@ -131,17 +131,10 @@ impl Render for PinnedPopoverPanel {
         let locale = self.settings.read(cx).language.clone();
         let store = PinnedMessagesStore::global(cx);
         let loading = store.read(cx).is_loading();
-        let clan_id = store.read(cx).clan_id();
         let handle = self.popover_handle.clone();
         let scroll = self.scroll.clone();
         let avatar_cache = self.avatar_image_cache.clone();
         let tokens = &theme.tokens;
-
-        if let Some(clan_id) = clan_id {
-            ClanMembersStore::global(cx).update(cx, |members, cx| {
-                members.ensure_loaded(clan_id, cx);
-            });
-        }
 
         v_flex()
             .key_context("menu")

@@ -72,7 +72,6 @@ impl ProfilePage {
         clan_list: Entity<ClanList>,
         cx: &mut Context<Self>,
     ) -> Self {
-        tracing::warn!("DBG ProfilePage::new start");
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |this, store, cx| {
@@ -128,7 +127,6 @@ impl ProfilePage {
             Some(account) => (Some(ProfileState::from_account(account)), true),
             None => (None, false),
         };
-        tracing::warn!("DBG ProfilePage::new done profile_some={account_loaded}");
 
         Self {
             settings,
@@ -195,19 +193,6 @@ impl ProfilePage {
             }
         }));
 
-        self._subscriptions.push(cx.observe(&display, {
-            move |this: &mut Self, input: Entity<InputState>, cx| {
-                let value = input.read(cx).value().to_string();
-                if let Some(state) = &mut this.profile
-                    && !state.saving
-                    && state.display_name.as_ref() != value
-                {
-                    state.display_name = value.into();
-                    cx.notify();
-                }
-            }
-        }));
-
         self._subscriptions.push(cx.subscribe_in(&about, window, {
             let about = about.clone();
             move |this: &mut Self, _, event: &InputEvent, _, cx| {
@@ -216,19 +201,6 @@ impl ProfilePage {
                     && !state.saving
                 {
                     let value = about.read(cx).value().to_string();
-                    state.about_me = value.into();
-                    cx.notify();
-                }
-            }
-        }));
-
-        self._subscriptions.push(cx.observe(&about, {
-            move |this: &mut Self, input: Entity<InputState>, cx| {
-                let value = input.read(cx).value().to_string();
-                if let Some(state) = &mut this.profile
-                    && !state.saving
-                    && state.about_me.as_ref() != value
-                {
                     state.about_me = value.into();
                     cx.notify();
                 }
@@ -387,12 +359,6 @@ impl ProfilePage {
 
 impl Render for ProfilePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        tracing::warn!(
-            "DBG ProfilePage::render profile_some={} fetch_error={} input_some={}",
-            self.profile.is_some(),
-            self.fetch_error,
-            self.display_name_input.is_some()
-        );
         if self.profile.as_ref().is_some_and(|p| !p.loading) && self.display_name_input.is_none() {
             self.init_inputs(window, cx);
         }

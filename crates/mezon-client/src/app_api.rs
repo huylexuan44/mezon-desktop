@@ -282,6 +282,35 @@ impl AppApi {
             .await
     }
 
+    pub async fn vote_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+        answer_indices: Vec<i32>,
+    ) -> Result<mezon_proto::api::VotePollResponse> {
+        self.transport
+            .vote_poll(poll_id, message_id, channel_id, answer_indices)
+            .await
+    }
+
+    pub async fn get_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::GetPollResponse> {
+        self.transport
+            .get_poll(poll_id, message_id, channel_id)
+            .await
+    }
+
+    pub async fn close_poll(&self, poll_id: i64, message_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .close_poll(poll_id, message_id, channel_id)
+            .await
+    }
+
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
@@ -365,6 +394,19 @@ impl AppApi {
         clan_id: i64,
     ) -> Result<mezon_proto::api::ClanUserStatusList> {
         self.transport.list_clan_users_status(clan_id).await
+    }
+
+    pub async fn list_user_online(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<Vec<mezon_proto::api::User>> {
+        let resp = self
+            .transport
+            .list_user_online(clan_id, limit, page)
+            .await?;
+        Ok(resp.users)
     }
 
     #[allow(clippy::too_many_arguments)]

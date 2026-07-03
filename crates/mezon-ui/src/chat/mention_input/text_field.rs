@@ -770,10 +770,7 @@ impl Render for MentionInputState {
             self.caret_blink.sync_blurred(cx);
         }
 
-        let bg: Hsla = cx.theme().bg_tertiary.into();
         let text_color: Hsla = cx.theme().text_primary.into();
-        let border = cx.theme().border;
-        let focus_border = cx.theme().brand;
 
         div()
             .key_context(KEY_CONTEXT)
@@ -803,15 +800,12 @@ impl Render for MentionInputState {
             .flex()
             .items_start()
             .w_full()
-            .min_h(px(36.))
-            .px(px(10.))
-            .py(px(8.))
-            .rounded_md()
-            .bg(bg)
+            .min_h(px(44.))
+            .pl(px(44.))
+            .pr(px(120.))
+            .py(px(9.))
             .text_color(text_color)
-            .text_size(px(14.))
-            .border_1()
-            .border_color(if focused { focus_border } else { border })
+            .text_size(px(16.))
             .child(
                 div()
                     .flex_1()

@@ -96,12 +96,14 @@ struct CommittedToken {
 struct ChannelSuggestRaw {
     channel_id: String,
     name: String,
+    name_lc: String,
 }
 
 #[derive(Clone)]
 struct EmojiSuggestRaw {
     emoji_id: String,
     shortname: String,
+    shortname_lc: String,
     src: String,
 }
 
@@ -135,6 +137,7 @@ pub struct MentionInput {
     committed: Vec<CommittedToken>,
     active_at: Option<usize>,
     active_sigil: Sigil,
+    pooled: Option<(usize, Sigil)>,
     query_len: usize,
     suggestions: Vec<Suggestion>,
     selected: usize,
@@ -207,6 +210,7 @@ impl MentionInput {
             committed: Vec::new(),
             active_at: None,
             active_sigil: Sigil::At,
+            pooled: None,
             query_len: 0,
             suggestions: Vec::new(),
             selected: 0,
@@ -278,6 +282,7 @@ impl MentionInput {
             .collect();
         self.committed.clear();
         self.reset_popup();
+        self.pooled = None;
         self.picker_open = false;
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
@@ -476,8 +481,9 @@ impl MentionInput {
             return;
         }
 
-        if self.active_at != Some(at) || self.active_sigil != sigil {
+        if self.pooled != Some((at, sigil)) {
             self.refresh_pool(sigil, cx);
+            self.pooled = Some((at, sigil));
         }
         self.active_at = Some(at);
         self.active_sigil = sigil;
@@ -527,7 +533,7 @@ impl MentionInput {
                     if out.len() >= MAX_SUGGESTIONS {
                         break;
                     }
-                    if channel.name.to_lowercase().starts_with(&needle) {
+                    if channel.name_lc.starts_with(&needle) {
                         out.push(Suggestion::Channel(channel.clone()));
                     }
                 }
@@ -537,7 +543,7 @@ impl MentionInput {
                     if out.len() >= MAX_SUGGESTIONS {
                         break;
                     }
-                    if emoji.shortname.to_lowercase().starts_with(&needle) {
+                    if emoji.shortname_lc.starts_with(&needle) {
                         out.push(Suggestion::Emoji(emoji.clone()));
                     }
                 }
@@ -683,6 +689,7 @@ impl MentionInput {
                         .map(|e| EmojiSuggestRaw {
                             emoji_id: e.id.clone(),
                             shortname: e.shortname.clone(),
+                            shortname_lc: e.shortname.to_lowercase(),
                             src: e.src.clone(),
                         })
                         .collect(),
@@ -765,7 +772,7 @@ impl MentionInput {
     ) -> AnyElement {
         let text_primary = theme.text_primary;
         let text_muted = theme.text_muted;
-        let selected_bg = theme.bg_hover;
+        let selected_bg = theme.tokens.bg_active_member_channel;
         let is_selected = index == self.selected;
 
         let (leading, display, secondary): (Option<AnyElement>, SharedString, SharedString) =
@@ -1026,6 +1033,7 @@ fn channel_suggest_pool(cx: &App) -> Vec<ChannelSuggestRaw> {
                 out.push(ChannelSuggestRaw {
                     channel_id: channel.id.to_string(),
                     name: channel.name.clone(),
+                    name_lc: channel.name.to_lowercase(),
                 });
             }
         }
@@ -1048,6 +1056,7 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
         .map(|emoji| EmojiSuggestRaw {
             emoji_id: emoji.id.clone(),
             shortname: emoji.shortname.clone(),
+            shortname_lc: emoji.shortname.to_lowercase(),
             src: emoji.src.clone(),
         })
         .collect()
@@ -1140,7 +1149,7 @@ impl Render for MentionInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.popup_open();
         let theme = cx.theme();
-        let popup_bg = theme.bg_floating;
+        let popup_bg = theme.tokens.bg_ping_member;
         let border = theme.border;
         let toggle_color = if self.picker_open {
             theme.text_primary
@@ -1218,27 +1227,57 @@ impl Render for MentionInput {
                 div()
                     .id("attachment-add")
                     .absolute()
-                    .right(px(64.))
-                    .top(px(8.))
+                    .left(px(12.))
+                    .top(px(10.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(20.))
+                    .size(px(24.))
                     .rounded(px(4.))
                     .cursor_pointer()
                     .child(
                         Icon::new(IconName::AddCircle)
-                            .size_4()
+                            .size_5()
                             .text_color(plus_color),
                     )
                     .on_click(cx.listener(|this, _event, _window, cx| this.open_file_picker(cx))),
             )
             .child(
                 div()
+                    .id("mic-record")
+                    .absolute()
+                    .right(px(96.))
+                    .top(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded(px(4.))
+                    .child(
+                        Icon::new(IconName::MicEnable)
+                            .size_5()
+                            .text_color(plus_color),
+                    ),
+            )
+            .child(
+                div()
+                    .id("gif-toggle")
+                    .absolute()
+                    .right(px(68.))
+                    .top(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.))
+                    .rounded(px(4.))
+                    .child(Icon::new(IconName::Gif).size_5().text_color(plus_color)),
+            )
+            .child(
+                div()
                     .id("sticker-toggle")
                     .absolute()
-                    .right(px(36.))
-                    .top(px(8.))
+                    .right(px(40.))
+                    .top(px(12.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1247,7 +1286,7 @@ impl Render for MentionInput {
                     .cursor_pointer()
                     .child(
                         Icon::new(IconName::Sticker)
-                            .size_4()
+                            .size_5()
                             .text_color(sticker_color),
                     )
                     .on_click(
@@ -1258,15 +1297,15 @@ impl Render for MentionInput {
                 div()
                     .id("emoji-toggle")
                     .absolute()
-                    .right(px(8.))
-                    .top(px(8.))
+                    .right(px(12.))
+                    .top(px(12.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .size(px(20.))
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .child(Icon::new(IconName::Smile).size_4().text_color(toggle_color))
+                    .child(Icon::new(IconName::Smile).size_5().text_color(toggle_color))
                     .on_click(cx.listener(|this, _event, _window, cx| this.toggle_picker(cx))),
             )
             .when_some(popup, |this, popup| this.child(popup))

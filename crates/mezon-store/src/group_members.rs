@@ -120,6 +120,12 @@ impl GroupMembersStore {
             .map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.cache.clear();
+        self.loading.clear();
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
@@ -142,6 +148,7 @@ impl GroupMembersStore {
                     this.handle_event(event, cx)
                 });
             }
+            dispatch.on_lagged(&entity, |this, _cx| this.invalidate());
         });
     }
 

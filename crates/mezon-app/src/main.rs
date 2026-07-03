@@ -170,12 +170,6 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let api = Arc::new(AppApi::new(transport.clone()));
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
-    // Sync login-item with settings.
-    mezon_native::autostart::sync_auto_start(settings.auto_start);
-
-    // Register mezonapp:// deep link scheme (idempotent).
-    mezon_native::deep_link::register_deep_link_scheme();
-
     // Subscribe to screen lock/unlock events.
     mezon_native::power::subscribe(Box::new(|event| match event {
         mezon_native::power::PowerEvent::ScreenLocked => {
@@ -186,6 +180,8 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         }
     }));
 
+    let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
+
     let app_config_handle = app_config.clone();
     let app = application()
         .with_http_client(Arc::new(
@@ -194,6 +190,17 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             ),
         ))
         .with_assets(mezon_ui::util::assets::Assets);
+
+    {
+        let tx = url_tx.clone();
+        app.on_open_urls(move |urls| {
+            for url in urls {
+                if url.starts_with("mezonapp://") {
+                    let _ = tx.unbounded_send(url);
+                }
+            }
+        });
+    }
 
     #[cfg(target_os = "macos")]
     app.on_reopen(show_main_window);
@@ -247,8 +254,15 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             return;
         }
 
-        // Shared channel so background threads can send deep link URLs to the GPUI main thread.
-        let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
+        {
+            let auto_start = settings.auto_start;
+            cx.background_executor()
+                .spawn(async move {
+                    mezon_native::autostart::sync_auto_start(auto_start);
+                    mezon_native::deep_link::register_deep_link_scheme();
+                })
+                .detach();
+        }
 
         // Listen for deep link URLs forwarded from secondary instances.
         {
@@ -258,12 +272,15 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             });
         }
 
+        cx.set_global(SingleInstanceGlobal(lock));
+
         // If we were launched with a deep link, inject it immediately.
         if let Some(url) = initial_url {
             let _ = url_tx.unbounded_send(url);
         }
 
         let settings_entity = cx.new(|_| settings.clone());
+        mezon_store::Settings::init_global(&settings_entity, cx);
 
         let (auth_state_handle, window_handle) = open_main_window(
             cx,
@@ -277,6 +294,8 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         register_main_window(window_handle, cx);
 
+        install_badge_bridge(cx);
+
         let deep_link_task = {
             let auth_state = auth_state_handle.clone();
             cx.spawn(async move |cx: &mut AsyncApp| {
@@ -286,6 +305,16 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                         url.split(['?', '#']).next().unwrap_or_default()
                     );
                     if url.starts_with("mezonapp://callback") {
+                        let flow_pending = cx.update(|cx| {
+                            matches!(
+                                auth_state.read(cx),
+                                AuthState::NotAuthenticated | AuthState::AwaitingCallback
+                            )
+                        });
+                        if !flow_pending {
+                            tracing::warn!("Ignoring OAuth callback deep link: no login flow pending");
+                            continue;
+                        }
                         if let Some(token) = mezon_store::token_from_oauth_callback_url(&url) {
                             let client = cx
                                 .update(|cx| mezon_store::LoginStore::global(cx).read(cx).client());
@@ -462,6 +491,17 @@ fn open_main_window(
         std::sync::Arc::new(|url: &str, filename: &str| save_attachment(url, filename)),
         cx,
     );
+    mezon_store::PlatformStore::set_notifier(
+        &platform_store,
+        std::sync::Arc::new(|n: mezon_store::DesktopNotification| {
+            mezon_native::notifications::show(&mezon_native::notifications::Notification {
+                title: n.title,
+                body: n.body,
+                channel_id: n.channel_id,
+            });
+        }),
+        cx,
+    );
 
     let audio_store = mezon_store::AudioStore::init(cx);
     mezon_store::AudioStore::set_device_enumerator(
@@ -509,6 +549,53 @@ fn open_main_window(
     mezon_ui::app::window_controls::macos::configure_window(cx, window_handle);
 
     (auth_state, window_handle.into())
+}
+
+struct SingleInstanceGlobal(#[allow(dead_code)] SingleInstance);
+impl gpui::Global for SingleInstanceGlobal {}
+
+struct BadgeBridgeGlobal {
+    _clan: gpui::Subscription,
+    _dm: gpui::Subscription,
+}
+impl gpui::Global for BadgeBridgeGlobal {}
+
+fn install_badge_bridge(cx: &mut App) {
+    let clan_list = mezon_store::ClanList::global(cx);
+    let dm_store = mezon_store::DirectMessageStore::global(cx);
+
+    update_native_badge(cx);
+
+    let clan_sub = cx.observe(&clan_list, |_, cx| update_native_badge(cx));
+    let dm_sub = cx.observe(&dm_store, |_, cx| update_native_badge(cx));
+
+    cx.set_global(BadgeBridgeGlobal {
+        _clan: clan_sub,
+        _dm: dm_sub,
+    });
+}
+
+fn update_native_badge(cx: &App) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LAST_BADGE: AtomicU32 = AtomicU32::new(0);
+
+    let clan_total: u32 = mezon_store::ClanList::global(cx)
+        .read(cx)
+        .clans
+        .iter()
+        .map(|clan| clan.badge_count)
+        .sum();
+    let dm_total: u32 = mezon_store::DirectMessageStore::global(cx)
+        .read(cx)
+        .channels()
+        .iter()
+        .map(|channel| channel.unread_count)
+        .sum();
+    let total = clan_total.saturating_add(dm_total);
+
+    if LAST_BADGE.swap(total, Ordering::Relaxed) != total {
+        mezon_native::badge::set_badge_count(total);
+    }
 }
 
 fn show_main_window(cx: &mut App) {

@@ -235,6 +235,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     let profile_context = ctx.profile_context;
     let settings = ctx.settings.clone();
     let host = ctx.video_host.clone();
+    let avatar_cache = ctx.avatar_cache.clone();
     let interactive = InteractiveText::new(("msg-itext", msg.row_anchor_id.0 as usize), styled)
         .on_click(click_ranges, move |range_ix, window, cx| {
             let Some(action) = actions.get(range_ix) else {
@@ -249,7 +250,14 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                     };
                     let position = window.mouse_position();
                     let popover = cx.new(|cx| {
-                        UserProfilePopover::new(*user_id, context, settings.clone(), window, cx)
+                        UserProfilePopover::new(
+                            *user_id,
+                            context,
+                            settings.clone(),
+                            avatar_cache.clone(),
+                            window,
+                            cx,
+                        )
                     });
                     let _ = host.update(cx, move |this, cx| {
                         this.set_mention_popover(popover, position, cx);
@@ -488,6 +496,7 @@ fn render_mention_chip(
         user_id,
         profile_ctx,
         settings,
+        ctx.avatar_cache.clone(),
     )
     .anchor(Anchor::BottomLeft)
     .attach(Anchor::TopLeft)

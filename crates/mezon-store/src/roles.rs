@@ -48,6 +48,12 @@ impl RolesStore {
         cx.try_global::<GlobalRolesStore>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.cache.clear();
+        self.loading.clear();
+        cx.notify();
+    }
+
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {

@@ -122,7 +122,7 @@ impl ChannelHeader {
                     })
                     .child(
                         div()
-                            .text_sm()
+                            .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_primary)
                             .child(self.name.clone()),

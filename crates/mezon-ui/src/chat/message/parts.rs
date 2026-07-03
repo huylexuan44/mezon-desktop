@@ -62,16 +62,41 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         .into_any_element()
 }
 
+fn reply_preview_line(content: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut first = true;
+    for word in content.split_whitespace() {
+        if !first {
+            out.push(' ');
+            chars += 1;
+        }
+        first = false;
+        for ch in word.chars() {
+            if chars >= MAX_CHARS {
+                return out;
+            }
+            out.push(ch);
+            chars += 1;
+        }
+    }
+    out
+}
+
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
-    let preview = if reference.content.is_empty() {
+    let is_deleted = reference.message_ref_id.is_zero();
+    let preview = if is_deleted {
+        mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()
+    } else if reference.content.is_empty() {
         if reference.has_attachment {
             mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()
         } else {
             String::new()
         }
     } else {
-        reference.content.clone()
+        reply_preview_line(&reference.content)
     };
 
     let avatar = if reference.sender_avatar.is_empty() {
@@ -122,7 +147,8 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(theme.text_muted)
+                .text_color(theme.tokens.text_theme_message)
+                .when(is_deleted, |d| d.italic())
                 .child(preview),
         )
         .into_any_element()
@@ -487,6 +513,7 @@ fn reaction_pill(
     let add_emoji = reaction.emoji.clone();
     let panel_emoji_id = reaction.emoji_id.clone();
     let panel_emoji = reaction.emoji.clone();
+    let avatar_cache = ctx.avatar_cache.clone();
 
     let mut pill = div()
         .id(("reaction", index))
@@ -516,7 +543,13 @@ fn reaction_pill(
         })
         .hoverable_tooltip(move |_window, cx| {
             cx.new(|cx| {
-                UserReactionPanel::new(message_id, panel_emoji_id.clone(), panel_emoji.clone(), cx)
+                UserReactionPanel::new(
+                    message_id,
+                    panel_emoji_id.clone(),
+                    panel_emoji.clone(),
+                    avatar_cache.clone(),
+                    cx,
+                )
             })
             .into()
         });
@@ -557,10 +590,9 @@ pub fn render_hover_actions(
     combined: bool,
     has_reply: bool,
     is_different_day: bool,
-    group_name: SharedString,
     ctx: &RowCtx,
 ) -> AnyElement {
-    if ctx.suppress_hover {
+    if ctx.suppress_hover || ctx.hovered_row != Some(msg.id) {
         return div().into_any_element();
     }
     let theme = ctx.theme;
@@ -584,17 +616,10 @@ pub fn render_hover_actions(
             .child(svg_icon)
     };
 
-    // React's CSS lets this float arbitrarily far above the row (up to -48px) since
-    // the whole subtree stays hoverable regardless of visual position. GPUI's
-    // `.group_hover()` only tracks the row's own hitbox, so an offset that large
-    // makes the toolbar bleed into the neighboring row's hitbox — causing it to
-    // either go dead (unreachable) or duplicate (both rows' toolbars visible at
-    // once). Clamped to -16px, the one value proven not to escape the row's own
-    // box, at the cost of exact pixel parity with React on the day-boundary case.
     let (top, margin_top) = if is_different_day {
-        (-16., 4.)
+        (-8., 4.)
     } else if combined || has_reply {
-        (-16., 0.)
+        (-8., 0.)
     } else {
         (16., 0.)
     };
@@ -684,9 +709,6 @@ pub fn render_hover_actions(
         .p_0p5()
         .rounded_lg()
         .bg(theme.tokens.bg_theme_contexify)
-        .opacity(0.)
-        .group_hover(group_name, |s| s.opacity(1.))
-        .hover(|s| s.opacity(1.))
         .children(recent_emoji)
         .when(show_topic, |d| {
             let coming_soon = coming_soon.clone();
