@@ -70,7 +70,7 @@ pub struct VoiceParticipant {
 
 #[derive(Clone, Debug)]
 pub enum VoiceEvent {
-    Connected,
+    Connected { room_name: String },
     Reconnecting,
     Reconnected,
     NetworkWeak,
@@ -218,7 +218,9 @@ async fn session_main(
     let room = Arc::new(room);
     tracing::info!("voice connected to room: {}", room.name());
     let local_identity = room.local_participant().identity().as_str().to_string();
-    let _ = evt_tx.send(VoiceEvent::Connected);
+    let _ = evt_tx.send(VoiceEvent::Connected {
+        room_name: room.name(),
+    });
 
     let mic_enabled = Arc::new(AtomicBool::new(false));
     let mic_publication: Arc<Mutex<Option<LocalTrackPublication>>> = Arc::new(Mutex::new(None));
@@ -651,7 +653,7 @@ fn emit_participants(
         name: display_name(&local.name(), local.identity().as_str()),
         is_local: true,
         speaking: local.is_speaking(),
-        muted: !local_mic_enabled,
+        muted: !local_mic_enabled || local_mic_muted(&local),
         camera: local_camera_on.then(|| local_camera_key(local_identity)),
         screenshare: local_screen_on.then(|| local_screen_key(local_identity)),
         quality: network_quality(local.connection_quality()),
@@ -701,6 +703,14 @@ fn network_quality(quality: ConnectionQuality) -> NetworkQuality {
         ConnectionQuality::Poor => NetworkQuality::Poor,
         ConnectionQuality::Lost => NetworkQuality::Unknown,
     }
+}
+
+fn local_mic_muted(local: &LocalParticipant) -> bool {
+    local
+        .track_publications()
+        .values()
+        .find(|publication| publication.source() == TrackSource::Microphone)
+        .is_some_and(|publication| publication.is_muted())
 }
 
 fn remote_mic_muted(participant: &RemoteParticipant) -> bool {

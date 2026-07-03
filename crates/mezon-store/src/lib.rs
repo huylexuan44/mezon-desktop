@@ -71,9 +71,9 @@ pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
     NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
-    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant,
-    VoiceStore, camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError,
+    VoiceParticipant, VoiceStore, camera_tile_id, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);

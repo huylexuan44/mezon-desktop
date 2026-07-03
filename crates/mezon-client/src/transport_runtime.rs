@@ -46,6 +46,15 @@ pub fn handle() -> tokio::runtime::Handle {
     runtime().handle().clone()
 }
 
+fn parse_optional_id(value: &str, field: &str) -> Result<i64> {
+    if value.is_empty() {
+        return Ok(0);
+    }
+    value
+        .parse::<i64>()
+        .map_err(|e| anyhow::anyhow!("invalid {field}: {e}"))
+}
+
 pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
     tracing::debug!("put_bytes_to_url: PUTting {} bytes", data.len());
     let url = url.to_string();
@@ -370,6 +379,54 @@ impl TransportClient {
                     .generate_meet_token(channel_id, &room_name)
                     .await
                     .map(|resp| resp.token)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn remove_participant_mezon_meet(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        room_name: &str,
+        username: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
+        let clan_id = parse_optional_id(clan_id, "clan_id")?;
+        let room_name = room_name.to_string();
+        let username = username.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .remove_participant_mezon_meet(channel_id, clan_id, &room_name, &username)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn mute_participant_mezon_meet(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        room_name: &str,
+        username: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
+        let clan_id = parse_optional_id(clan_id, "clan_id")?;
+        let room_name = room_name.to_string();
+        let username = username.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .mute_participant_mezon_meet(channel_id, clan_id, &room_name, &username)
+                    .await
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
