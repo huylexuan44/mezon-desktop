@@ -79,6 +79,7 @@ pub struct InputState {
     is_selecting: bool,
     masked: bool,
     multi_line: bool,
+    embedded: bool,
     validate: Option<ValidateFn>,
     height: Option<Pixels>,
     radius: Option<Pixels>,
@@ -108,6 +109,7 @@ impl InputState {
             is_selecting: false,
             masked: false,
             multi_line: false,
+            embedded: false,
             validate: None,
             height: None,
             radius: None,
@@ -192,6 +194,11 @@ impl InputState {
         self
     }
 
+    pub fn embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
+        self
+    }
+
     pub fn validate(mut self, validate: impl Fn(&str, &mut App) -> bool + 'static) -> Self {
         self.validate = Some(Box::new(validate));
         self
@@ -213,6 +220,16 @@ impl InputState {
         self.marked_range = None;
         cx.notify();
         cx.emit(InputEvent::Change);
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            return;
+        }
+        self.content = SharedString::default();
+        self.selected_range = 0..0;
+        self.marked_range = None;
+        cx.notify();
     }
 
     pub fn set_masked(&mut self, masked: bool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -687,18 +704,21 @@ impl Render for InputState {
             .when(self.multi_line, |el| el.items_start().py(px(8.)))
             .when(!self.multi_line, |el| el.items_center())
             .w_full()
-            .min_h(height)
-            .px(padding_x)
-            .when_some(padding_right, |el, p| el.pr(p))
-            .when(radius.is_none(), |el| el.rounded_md())
-            .when_some(radius, |el, r| el.rounded(r))
-            .bg(bg)
+            .when(self.embedded, |el| el.min_h(px(24.)).px_0())
+            .when(!self.embedded, |el| {
+                el.min_h(height)
+                    .px(padding_x)
+                    .when_some(padding_right, |el, p| el.pr(p))
+                    .when(radius.is_none(), |el| el.rounded_md())
+                    .when_some(radius, |el, r| el.rounded(r))
+                    .bg(bg)
+                    .when(show_border, |el| {
+                        el.border_1()
+                            .border_color(if focused { focus_border } else { border })
+                    })
+            })
             .text_color(text_color)
             .text_size(text_size)
-            .when(show_border, |el| {
-                el.border_1()
-                    .border_color(if focused { focus_border } else { border })
-            })
             .child(
                 div()
                     .flex_1()

@@ -1466,7 +1466,7 @@ impl Render for ChannelMessages {
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
                     };
-                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx)
+                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full()

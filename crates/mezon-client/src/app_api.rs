@@ -7,7 +7,7 @@ use crate::{
     TransportClient,
     transport::{
         ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
-        ApiMessage, ApiPinMessage, ApiVoiceChannelUser, RealtimeEvent,
+        ApiMessage, ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -208,6 +208,38 @@ impl AppApi {
     ) -> Result<crate::transport::ListChannelMessagesResult> {
         self.transport
             .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
+            .await
+    }
+
+    pub async fn list_thread_descs(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        page: i32,
+    ) -> Result<Vec<ApiThreadDesc>> {
+        self.transport
+            .list_thread_descs(channel_id, clan_id, page)
+            .await
+    }
+
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<ApiThreadDesc>> {
+        self.transport
+            .search_thread(clan_id, channel_id, label)
+            .await
+    }
+
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        self.transport
+            .check_duplicate_thread_name(name, parent_channel_id)
             .await
     }
 
@@ -455,9 +487,17 @@ impl AppApi {
         channel_type: u32,
         category_id: Option<i64>,
         parent_id: Option<i64>,
+        channel_private: i32,
     ) -> Result<ApiChannelDesc> {
         self.transport
-            .create_channel(clan_id, channel_label, channel_type, category_id, parent_id)
+            .create_channel(
+                clan_id,
+                channel_label,
+                channel_type,
+                category_id,
+                parent_id,
+                channel_private,
+            )
             .await
     }
 
@@ -857,6 +897,16 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .logout_device(token, refresh_token, device_id)
+            .await
+    }
+
+    pub async fn list_user_permission_in_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
+        self.transport
+            .list_user_permission_in_channel(clan_id, channel_id)
             .await
     }
 }
