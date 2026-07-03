@@ -82,10 +82,8 @@ impl ChannelAttachment {
         let is_video = is_video_type(&api.filetype, &api.url);
         let is_image = !is_video && is_image_type(&api.filetype, &api.url);
         let (thumb_src, viewer_src) = if is_video {
-            (
-                cfg.gallery_thumb_proxy(&api.url).into(),
-                api.url.clone().into(),
-            )
+            let url = api.url.clone();
+            (url.clone().into(), url.into())
         } else {
             (
                 cfg.gallery_thumb_proxy(&api.url).into(),
@@ -672,6 +670,42 @@ mod tests {
             uploader_avatar: SharedString::default(),
             uploader_avatar_raw: SharedString::default(),
         }
+    }
+
+    #[test]
+    fn video_thumb_skips_imgproxy() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let url = "https://cdn.mezon.ai/2016174228608389120/2072236531032002560.mov";
+        let api = ApiChannelAttachment {
+            url: url.into(),
+            filetype: "video/quicktime".into(),
+            ..ApiChannelAttachment::default()
+        };
+        let att = ChannelAttachment::from_api(api, ChannelId(1), ClanId(1), &cfg);
+        assert!(att.is_video);
+        assert_eq!(att.thumb_src.as_ref(), url);
+        assert!(!att.thumb_src.contains("imgproxy"));
+        assert_eq!(att.viewer_src.as_ref(), url);
+    }
+
+    #[test]
+    fn image_thumb_uses_imgproxy() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let api = ApiChannelAttachment {
+            url: "https://cdn.mezon.ai/photo.png".into(),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            ..ApiChannelAttachment::default()
+        };
+        let att = ChannelAttachment::from_api(api, ChannelId(1), ClanId(1), &cfg);
+        assert!(att.is_image);
+        assert!(att.thumb_src.contains("dev-imgproxy"));
+        assert!(att.viewer_src.contains("dev-imgproxy"));
     }
 
     #[test]

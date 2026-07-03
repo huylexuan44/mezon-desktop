@@ -859,10 +859,14 @@ fn render_image_row(
         let entity = entity.clone();
         let is_video = att.is_video;
         let thumb_src = att.thumb_src.clone();
-        let media = img(thumb_src)
-            .size_full()
-            .object_fit(gpui::ObjectFit::Cover)
-            .into_any_element();
+        let media = if is_video {
+            div().size_full().into_any_element()
+        } else {
+            img(thumb_src)
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element()
+        };
         row = row.child(
             div()
                 .id(("gallery-tile", id as usize))

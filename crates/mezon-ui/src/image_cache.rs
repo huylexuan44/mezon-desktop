@@ -18,6 +18,9 @@ pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 8;
 pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+pub const VIEWER_THUMB_STRIP_CACHE_CAPACITY: usize = 64;
+pub const VIEWER_THUMB_STRIP_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+pub const VIEWER_THUMB_ENTRY_MAX_BYTES: u64 = 512 * 1024;
 
 /// App-wide fallback cache attached at the root, so any `img`/avatar that does
 /// not declare its own cache uses this bounded LRU instead of GPUI's unbounded
@@ -456,10 +459,13 @@ impl LruImageCache {
         let notify_task = task.clone();
         window
             .spawn(cx, async move |cx| {
-                let _ = Abortable::new(notify_task, abort_reg).await;
-                cx.on_next_frame(move |_, cx| {
-                    cx.notify(entity);
-                });
+                let loaded = Abortable::new(notify_task, abort_reg).await;
+                if matches!(loaded, Ok(Ok(_))) {
+                    let _ = cx.update(|window, cx| {
+                        cx.notify(entity);
+                        window.refresh();
+                    });
+                }
             })
             .detach();
 

@@ -1,13 +1,12 @@
-use std::borrow::BorrowMut;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::AsyncReadExt as _;
 use gpui::{
     App, AppContext, Bounds, Context, Corners, Entity, FocusHandle, Focusable, FontWeight,
-    ImageCache,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render,
-    RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
     Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
     WindowOptions, canvas,
     div, img, point, prelude::*, px, relative, size, uniform_list,
@@ -20,7 +19,7 @@ use mezon_store::{
     resolve_attachment_uploader,
 };
 
-use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
+use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView, VideoThumbView};
 use crate::app::main_window::activate_main_window;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls::{self, APP_NAME};
@@ -28,7 +27,8 @@ use crate::components::primitives::{Avatar, Icon, IconName, Spinner};
 use crate::components::primitives::{ContextMenu, context_menu_at};
 use crate::image_cache::{
     LruImageCache, VIEWER_IMAGE_CACHE_BYTES, VIEWER_IMAGE_CACHE_CAPACITY,
-    VIEWER_IMAGE_ENTRY_MAX_BYTES,
+    VIEWER_IMAGE_ENTRY_MAX_BYTES, VIEWER_THUMB_ENTRY_MAX_BYTES,
+    VIEWER_THUMB_STRIP_CACHE_BYTES, VIEWER_THUMB_STRIP_CACHE_CAPACITY,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -36,6 +36,7 @@ const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 5.0;
 const ZOOM_STEP: f32 = 0.25;
 const THUMB_ROW_HEIGHT: f32 = 72.0;
+const THUMB_VIDEO_WINDOW: usize = 24;
 const SIDEBAR_WIDTH: f32 = 96.0;
 const VIEWER_FETCH_LIMIT: i32 = 50;
 const LOAD_MORE_THRESHOLD: usize = 3;
@@ -90,7 +91,6 @@ pub(crate) fn trim_process_memory() {
 pub(crate) fn trim_process_memory() {}
 
 fn close_image_viewer_window(handle: WindowHandle<ImageViewer>, cx: &mut App) {
-    let _ = handle.update(cx, |viewer, window, cx| viewer.release_resources(window, cx));
     clear_image_viewer_global(cx);
     let _ = handle.update(cx, |_, window, _| window.remove_window());
 }
@@ -165,13 +165,21 @@ pub struct ImageViewer {
     rotation_deg: i32,
     rotated_image: Option<Arc<RenderImage>>,
     rotation_loading: bool,
+    base_image: Option<Arc<RenderImage>>,
+    base_image_loading: bool,
+    base_image_url: Option<String>,
+    base_image_token: Option<(u64, usize)>,
     image_cache: Entity<LruImageCache>,
+    thumb_cache: Entity<LruImageCache>,
+    avatar_cache: Entity<LruImageCache>,
     list_scroll: UniformListScrollHandle,
     active_video: Option<Entity<VideoPlayerView>>,
     active_video_url: Option<String>,
+    thumb_videos: HashMap<i64, Entity<VideoThumbView>>,
     session: u64,
     video_sync_token: Option<(u64, usize)>,
     last_trim: Option<Instant>,
+    closing: bool,
     _release: Subscription,
 }
 
@@ -195,7 +203,27 @@ impl ImageViewer {
                 cx,
             )
         });
+        let thumb_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "viewer-thumb",
+                VIEWER_THUMB_STRIP_CACHE_CAPACITY,
+                VIEWER_THUMB_STRIP_CACHE_BYTES,
+                VIEWER_THUMB_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
+        let avatar_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "viewer-avatar",
+                16,
+                4 * 1024 * 1024,
+                512 * 1024,
+                cx,
+            )
+        });
         let cache_for_release = image_cache.clone();
+        let thumb_cache_for_release = thumb_cache.clone();
+        let avatar_cache_for_release = avatar_cache.clone();
         let release = cx.on_release(move |viewer, cx| {
             viewer.session = viewer.session.wrapping_add(1);
             if let Some(view) = viewer.active_video.take() {
@@ -203,10 +231,15 @@ impl ImageViewer {
                 drop(view);
             }
             viewer.active_video_url = None;
+            viewer.thumb_videos.clear();
             viewer.clear_rotated_image(None, cx);
+            viewer.clear_base_image(None, cx);
             viewer.rotation_loading = false;
+            viewer.base_image_loading = false;
             viewer.attachments.clear();
             cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
+            thumb_cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
+            avatar_cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
             trim_process_memory();
         });
         let channel_label = resolve_channel_label(
@@ -236,13 +269,21 @@ impl ImageViewer {
             rotation_deg: 0,
             rotated_image: None,
             rotation_loading: false,
+            base_image: None,
+            base_image_loading: false,
+            base_image_url: None,
+            base_image_token: None,
             image_cache,
+            thumb_cache,
+            avatar_cache,
             list_scroll: UniformListScrollHandle::new(),
             active_video: None,
             active_video_url: None,
+            thumb_videos: HashMap::new(),
             session: 0,
             video_sync_token: None,
             last_trim: None,
+            closing: false,
             _release: release,
         };
         this.set_request(request, window, cx);
@@ -250,24 +291,42 @@ impl ImageViewer {
     }
 
     fn release_resources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        self.closing = true;
         self.session = self.session.wrapping_add(1);
         self.loading = false;
         self.context_menu = None;
         self.drop_video_player(Some(window), cx);
+        self.thumb_videos.clear();
         self.clear_rotated_image(Some(&mut *window), cx);
+        self.clear_base_image(Some(&mut *window), cx);
         self.rotation_loading = false;
+        self.base_image_loading = false;
         self.rotation_deg = 0;
         self.video_sync_token = None;
+        self.base_image_token = None;
         self.attachments.clear();
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
+        self.thumb_cache
+            .update(cx, |cache, cx| cache.clear(window, cx));
+        self.avatar_cache
+            .update(cx, |cache, cx| cache.clear(window, cx));
     }
 
-    /// Drop the rotated preview and release its atlas tile.
     fn clear_rotated_image(&mut self, window: Option<&mut Window>, cx: &mut App) {
         if let Some(old) = self.rotated_image.take() {
             cx.drop_image(old, window);
         }
+    }
+
+    fn clear_base_image(&mut self, window: Option<&mut Window>, cx: &mut App) {
+        if let Some(old) = self.base_image.take() {
+            cx.drop_image(old, window);
+        }
+        self.base_image_url = None;
     }
 
     /// Return freed heap pages to the OS
@@ -317,7 +376,7 @@ impl ImageViewer {
         let (width, height) = video_display_size(att);
         let activation = VideoActivation {
             url: url.clone().into(),
-            poster: att.thumb_src.clone(),
+            poster: SharedString::default(),
             width,
             height,
             fullscreen_mode: VideoFullscreenMode::InPlaceTheater,
@@ -342,6 +401,85 @@ impl ImageViewer {
         self.ensure_video_player(window, cx);
     }
 
+    fn maybe_sync_base_image(&mut self, cx: &mut Context<Self>) {
+        let token = (self.session, self.index);
+        if self.base_image_token == Some(token) {
+            return;
+        }
+        self.refresh_base_image(cx);
+    }
+
+    fn refresh_base_image(&mut self, cx: &mut Context<Self>) {
+        let session = self.session;
+        let index = self.index;
+        if self.rotation_deg != 0 || self.rotation_loading {
+            self.base_image_token = Some((session, index));
+            return;
+        }
+        let Some(att) = self.current().filter(|a| a.is_image && !is_animated_image(a)) else {
+            self.clear_base_image(None, cx);
+            self.base_image_loading = false;
+            self.base_image_token = Some((session, index));
+            return;
+        };
+        let url = att.viewer_src.to_string();
+        if self.base_image_url.as_deref() == Some(url.as_str()) && self.base_image.is_some() {
+            self.base_image_token = Some((session, index));
+            return;
+        }
+        self.clear_base_image(None, cx);
+        self.base_image_url = Some(url.clone());
+        self.base_image_loading = true;
+        self.base_image_token = Some((session, index));
+        let client = cx.http_client();
+        cx.spawn(async move |this, cx| {
+            let result = fetch_rotated_image(&url, 0, client).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session != session {
+                    return;
+                }
+                this.base_image_loading = false;
+                match result {
+                    Ok(image) => {
+                        this.clear_base_image(None, cx);
+                        this.base_image = Some(image);
+                    }
+                    Err(e) => {
+                        tracing::warn!("viewer image load failed: {e}");
+                        this.base_image_url = None;
+                        this.base_image_token = None;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_thumb_videos(&mut self, cx: &mut Context<Self>) {
+        if self.attachments.is_empty() {
+            self.thumb_videos.clear();
+            return;
+        }
+        let lo = self.index.saturating_sub(THUMB_VIDEO_WINDOW);
+        let hi = (self.index + THUMB_VIDEO_WINDOW).min(self.attachments.len() - 1);
+        let wanted: HashSet<i64> = self.attachments[lo..=hi]
+            .iter()
+            .filter(|att| att.is_video)
+            .map(|att| att.id)
+            .collect();
+        self.thumb_videos.retain(|id, _| wanted.contains(id));
+        for att in &self.attachments[lo..=hi] {
+            if !att.is_video || self.thumb_videos.contains_key(&att.id) {
+                continue;
+            }
+            let url = att.url.clone().into();
+            let view = cx.new(|cx| VideoThumbView::new(url, cx));
+            self.thumb_videos.insert(att.id, view);
+        }
+    }
+
     fn set_request(
         &mut self,
         request: OpenViewerRequest,
@@ -362,9 +500,13 @@ impl ImageViewer {
         self.pan = point(px(0.), px(0.));
         self.rotation_deg = 0;
         self.clear_rotated_image(Some(&mut *window), cx);
+        self.clear_base_image(Some(&mut *window), cx);
         self.rotation_loading = false;
+        self.base_image_loading = false;
         self.context_menu = None;
         self.drop_video_player(Some(window), cx);
+        self.base_image_token = None;
+        self.video_sync_token = None;
         self.attachments = request.attachments;
         self.has_more_before = true;
         self.has_more_after = false;
@@ -607,10 +749,13 @@ impl ImageViewer {
         self.pan = point(px(0.), px(0.));
         self.rotation_deg = 0;
         self.clear_rotated_image(Some(&mut *window), cx);
+        self.clear_base_image(Some(&mut *window), cx);
         self.rotation_loading = false;
+        self.base_image_loading = false;
         self.context_menu = None;
         self.refresh_uploader_at(index, cx);
         self.ensure_video_player(window, cx);
+        self.refresh_base_image(cx);
         if self.index + LOAD_MORE_THRESHOLD >= self.attachments.len() {
             self.fetch_older(cx);
         }
@@ -678,6 +823,7 @@ impl ImageViewer {
         self.rotation_loading = true;
         self.session = self.session.wrapping_add(1);
         let session = self.session;
+        self.base_image_token = Some((session, self.index));
         let client = cx.http_client();
         cx.spawn(async move |this, cx| {
             let result = fetch_rotated_image(&url, degrees, client).await;
@@ -708,10 +854,7 @@ impl ImageViewer {
         self.settings.read(cx).language.clone()
     }
 
-    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.release_resources(window, cx);
-        clear_image_viewer_global(cx.borrow_mut());
-        activate_main_window(cx.borrow_mut());
+    fn close_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         window.remove_window();
     }
 
@@ -864,9 +1007,11 @@ impl Focusable for ImageViewer {
 
 impl Render for ImageViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.image_cache
-            .update(cx, |cache, cx| cache.sweep(window, cx));
-        self.maybe_sync_video(window, cx);
+        if !self.closing {
+            self.maybe_sync_video(window, cx);
+            self.maybe_sync_base_image(cx);
+            self.sync_thumb_videos(cx);
+        }
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
 
@@ -897,7 +1042,7 @@ impl Render for ImageViewer {
                     .min_h_0()
                     .child(self.render_main_area(&theme, &locale, cx))
                     .when(self.show_thumbnails, |el| {
-                        el.child(self.render_sidebar(&theme, cx))
+                        el.child(self.render_sidebar(&theme, window, cx))
                     }),
             )
             .child(self.render_bottom_bar(&theme, &locale, window, cx))
@@ -981,7 +1126,6 @@ impl ImageViewer {
             .flex()
             .items_center()
             .justify_center()
-            .image_cache(self.image_cache.clone())
             .child(content)
             .when(can_prev, |el| {
                 el.child(nav_button(IconName::ArrowLeft, theme, true).on_mouse_down(
@@ -1020,19 +1164,19 @@ impl ImageViewer {
             .into_any_element()
     }
 
-    fn render_image(&self, att: &ChannelAttachment, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_image(&self, _att: &ChannelAttachment, cx: &mut Context<Self>) -> gpui::AnyElement {
         let zoom = self.zoom;
         let pan = self.pan;
         let rotated_image = self.rotated_image.clone();
+        let base_image = self.base_image.clone();
         let rotation_loading = self.rotation_loading;
-        let viewer_src = att.viewer_src.clone();
-        let image_cache = self.image_cache.clone();
+        let base_image_loading = self.base_image_loading;
 
         div()
             .size_full()
             .relative()
             .overflow_hidden()
-            .when(rotation_loading, |el| {
+            .when(rotation_loading || base_image_loading, |el| {
                 el.child(
                     div()
                         .absolute()
@@ -1045,18 +1189,14 @@ impl ImageViewer {
             })
             .child(
                 canvas(
-                    move |_bounds, window, cx| {
-                        if rotation_loading {
+                    move |_bounds, _window, _cx| {
+                        if rotation_loading || base_image_loading {
                             return None;
                         }
                         if let Some(image) = rotated_image {
                             return Some(image);
                         }
-                        let resource =
-                            Resource::Uri(SharedUri::from(viewer_src.as_ref()));
-                        image_cache.update(cx, |cache, cx| {
-                            ImageCache::load(cache, &resource, window, cx).and_then(|r| r.ok())
-                        })
+                        base_image
                     },
                     move |bounds, image, window, _cx| {
                         let Some(image) = image else {
@@ -1143,34 +1283,48 @@ impl ImageViewer {
             .into_any_element()
     }
 
-    fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.thumb_cache
+            .update(cx, |cache, cx| cache.sweep(window, cx));
         let count = self.attachments.len();
         let entity = cx.entity();
         let active = self.index;
-        let cache = self.image_cache.clone();
+        let cache = self.thumb_cache.clone();
         let border = theme.border;
         let brand = theme.brand;
+        let tile_bg = theme.bg_tertiary;
 
         let list = uniform_list("viewer-thumbnails", count, move |range, _window, cx| {
             range
                 .map(|ix| {
-                    let info = entity.read(cx).attachments.get(ix).map(|att| {
-                        let src = if is_animated_image(att) {
-                            SharedUri::from(&att.url)
-                        } else {
-                            SharedUri::from(&att.thumb_src)
-                        };
-                        (att.is_video, src)
-                    });
-                    let Some((is_video, src)) = info else {
+                    let att = entity.read(cx).attachments.get(ix);
+                    let Some(att) = att else {
                         return div().into_any_element();
                     };
                     let is_active = ix == active;
-                    let media = img(src)
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::Cover)
-                        .id(("viewer-thumb-img", ix))
-                        .into_any_element();
+                    let is_video = att.is_video;
+                    let thumb_id = att.id as usize;
+                    let thumb_src = att.thumb_src.clone();
+                    let video_view = entity.read(cx).thumb_videos.get(&att.id).cloned();
+                    let media = if is_video {
+                        if let Some(view) = video_view {
+                            div().size_full().child(view).into_any_element()
+                        } else {
+                            div().size_full().bg(tile_bg).into_any_element()
+                        }
+                    } else {
+                        img(thumb_src)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .bg(tile_bg)
+                            .id(("viewer-thumb-img", thumb_id))
+                            .into_any_element()
+                    };
                     div()
                         .id(("viewer-thumb", ix))
                         .h(px(THUMB_ROW_HEIGHT))
@@ -1181,6 +1335,7 @@ impl ImageViewer {
                                 .size_full()
                                 .rounded(px(6.))
                                 .overflow_hidden()
+                                .bg(tile_bg)
                                 .border_2()
                                 .border_color(if is_active { brand } else { gpui::rgba(0) })
                                 .relative()
@@ -1241,7 +1396,7 @@ impl ImageViewer {
             let mut avatar = Avatar::new()
                 .name(uploader.clone())
                 .size_px(px(32.))
-                .image_cache(self.image_cache.clone());
+                .image_cache(self.avatar_cache.clone());
             if let Some(att) = att {
                 let proxied = att.uploader_avatar.clone();
                 let raw = att.uploader_avatar_raw.clone();
