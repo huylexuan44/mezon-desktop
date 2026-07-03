@@ -4,6 +4,7 @@ pub mod channel_typing;
 pub mod chat_sending;
 pub mod create_thread_panel;
 pub mod grouping;
+pub mod inbox;
 pub mod input_bar;
 pub mod layout;
 pub mod member_list;

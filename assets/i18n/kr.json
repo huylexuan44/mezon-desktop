@@ -3265,6 +3265,8 @@
   "notifications.empty.messages.description": "CTRL+I 를 눌러 상자를 열고 CTRL+Shift+E 를 눌러 첫 번째 메시지를 읽음으로 표시하세요.",
   "notifications.empty.messages.protip": "팁:",
   "notifications.empty.messages.title": "다 보았습니다!",
+  "notifications.empty.topics.description": "참여 중인 주제에 누군가 답글을 남기면 여기에 표시됩니다.",
+  "notifications.empty.topics.title": "아직 주제 업데이트가 없습니다",
   "notifications.inbox": " Inbox",
   "notifications.tabs.forYou": "당신을 위해",
   "notifications.tabs.mentions": "알림",

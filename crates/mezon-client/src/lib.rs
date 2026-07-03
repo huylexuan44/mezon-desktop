@@ -6,6 +6,7 @@ pub mod app_api;
 pub mod attachment_download;
 pub mod auth;
 pub mod image_disk_cache;
+pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
 pub mod network_probe;
@@ -24,6 +25,13 @@ pub use app_api::{AppApi, ConnectionStatus, UploadFile, UrlAttachment};
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
+pub use inbox::{
+    DIRECTION_AROUND_TIMESTAMP, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
+    InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    attachment_link_is_image, display_text_from_message_content, inbox_notification_from_api,
+    inbox_notifications_from_list, message_content_is_attachment, topic_discussion_from_api,
+    topics_from_list,
+};
 pub use network_monitor::NetworkMonitor;
 pub use network_probe::{
     RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,

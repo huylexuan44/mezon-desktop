@@ -1452,6 +1452,24 @@ impl MezonTransport {
         }
     }
 
+    fn decode_channel_desc_list(response: &[u8]) -> Result<api::ChannelDescList> {
+        match api::ChannelDescList::decode(response) {
+            Ok(list) => Ok(list),
+            Err(decode_err) => {
+                if let Ok(error) = realtime::Error::decode(response)
+                    && (error.code != 0 || !error.message.is_empty())
+                {
+                    return Err(anyhow::anyhow!(
+                        "API error: code={} {}",
+                        error.code,
+                        error.message.trim()
+                    ));
+                }
+                Err(decode_err.into())
+            }
+        }
+    }
+
     fn channel_desc_from_proto(channel: api::ChannelDescription) -> ApiChannelDesc {
         let last_seen_message_id = channel
             .last_seen_message
@@ -1958,7 +1976,7 @@ impl MezonTransport {
             ));
         }
 
-        let channels = api::ChannelDescList::decode(response.as_slice())?;
+        let channels = Self::decode_channel_desc_list(&response)?;
         Ok(channels
             .channeldesc
             .into_iter()
@@ -1993,7 +2011,7 @@ impl MezonTransport {
             ));
         }
 
-        let channels = api::ChannelDescList::decode(response.as_slice())?;
+        let channels = Self::decode_channel_desc_list(&response)?;
         Ok(channels
             .channeldesc
             .into_iter()
@@ -2465,12 +2483,17 @@ impl MezonTransport {
         &self,
         clan_id: i64,
         limit: i32,
+        notification_id: i64,
+        category: i32,
+        direction: i32,
     ) -> Result<api::NotificationList> {
         let cid = self.generate_cid();
         let body = api::ListNotificationsRequest {
             clan_id,
             limit,
-            ..Default::default()
+            notification_id,
+            category,
+            direction,
         }
         .encode_to_vec();
         let (code, response) = self
@@ -4390,14 +4413,14 @@ impl MezonTransport {
     }
 
     /// Delete notifications.
-    pub async fn delete_notifications(&self, ids: &[&str]) -> Result<()> {
+    pub async fn delete_notifications(&self, ids: &[&str], category: i32) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::DeleteNotificationsRequest {
             ids: ids
                 .iter()
                 .map(|s| parse_id(s))
                 .collect::<Result<Vec<_>>>()?,
-            ..Default::default()
+            category,
         }
         .encode_to_vec();
         let (code, _) = self

@@ -3272,6 +3272,8 @@
   "notifications.empty.messages.description": "Öppna inkorgen genom att klicka på CTRL+I och markera första meddelande som läst med CTRL+Shift+E.",
   "notifications.empty.messages.protip": "PROTIPS:",
   "notifications.empty.messages.title": "Du har tittat alla!",
+  "notifications.empty.topics.description": "När någon svarar på ett ämne som du deltar i visas det här.",
+  "notifications.empty.topics.title": "Inga ämnesuppdateringar än",
   "notifications.inbox": "Inkorg",
   "notifications.tabs.forYou": "För dig",
   "notifications.tabs.mentions": "Nämnd",

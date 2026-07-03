@@ -3272,6 +3272,8 @@
   "notifications.empty.messages.description": "CTRL+I を押して受信トレイを開き、CTRL+Shift+E で最初のメッセージを既読にマークしましょう。",
   "notifications.empty.messages.protip": "ヒント:",
   "notifications.empty.messages.title": "すべてを見ました!",
+  "notifications.empty.topics.description": "参加しているトピックに誰かが返信すると、ここに表示されます。",
+  "notifications.empty.topics.title": "トピックの更新はまだありません",
   "notifications.inbox": "受信トレイ",
   "notifications.tabs.forYou": "あなた向け",
   "notifications.tabs.mentions": "メンション",

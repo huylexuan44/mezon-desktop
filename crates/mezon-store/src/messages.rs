@@ -420,6 +420,7 @@ pub struct MessagesStore {
     viewing_older_by_channel: HashMap<ChannelId, bool>,
     active_channel_id: Option<ChannelId>,
     active_clan_id: Option<ClanId>,
+    pending_jump: Option<(ChannelId, MessageId)>,
     is_public: bool,
     is_dm: bool,
     mode: i32,
@@ -528,6 +529,7 @@ impl MessagesStore {
             viewing_older_by_channel: HashMap::new(),
             active_channel_id: None,
             active_clan_id: None,
+            pending_jump: None,
             is_public: true,
             is_dm: false,
             mode: STREAM_MODE_CHANNEL,
@@ -1262,6 +1264,27 @@ impl MessagesStore {
     /// If the target is already in the buffer, emit [`MessagesEvent::JumpTo`] so
     /// the UI scrolls to it. Otherwise fetch a window centered on it
     /// (`AROUND_TIMESTAMP`), replace the buffer, and emit `Reset` then `JumpTo`.
+    pub fn request_jump(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_jump = Some((channel_id, message_id));
+        self.try_consume_pending_jump(cx);
+    }
+
+    fn try_consume_pending_jump(&mut self, cx: &mut Context<Self>) {
+        let Some((channel_id, message_id)) = self.pending_jump else {
+            return;
+        };
+        if self.active_channel_id != Some(channel_id) || self.loading {
+            return;
+        }
+        self.pending_jump = None;
+        self.jump_to_message(message_id, cx);
+    }
+
     pub fn jump_to_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         let Some(channel_id) = self.active_channel_id else {
             return;
@@ -1751,6 +1774,7 @@ impl MessagesStore {
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.pending_jump = None;
         if self.active_channel_id.is_none() && !self.is_dm {
             return;
         }
@@ -1857,6 +1881,7 @@ impl MessagesStore {
             let count = self.messages().len();
             cx.emit(MessagesEvent::Reset { count });
             cx.notify();
+            self.try_consume_pending_jump(cx);
             return;
         }
 
@@ -1935,6 +1960,7 @@ impl MessagesStore {
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
                     cx.notify();
+                    self.try_consume_pending_jump(cx);
                 }
             }
             Err(e) => {

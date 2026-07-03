@@ -896,6 +896,35 @@ impl AppApi {
         self.transport.get_notification_clan(clan_id).await
     }
 
+    pub async fn list_notifications(
+        &self,
+        clan_id: &str,
+        limit: i32,
+        notification_id: &str,
+        category: i32,
+        direction: i32,
+    ) -> Result<Vec<crate::InboxNotification>> {
+        self.transport
+            .list_notifications(clan_id, limit, notification_id, category, direction)
+            .await
+    }
+
+    pub async fn delete_notifications(&self, ids: &[&str], category: i32) -> Result<()> {
+        self.transport.delete_notifications(ids, category).await
+    }
+
+    pub async fn list_sd_topics(
+        &self,
+        clan_id: &str,
+        limit: i32,
+    ) -> Result<Vec<crate::TopicDiscussion>> {
+        self.transport.list_sd_topics(clan_id, limit).await
+    }
+
+    pub async fn get_topic_detail(&self, topic_id: &str) -> Result<crate::TopicDiscussion> {
+        self.transport.get_topic_detail(topic_id).await
+    }
+
     pub async fn list_channel_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiChannelDesc>> {
         self.transport.list_channel_badge_counts(clan_id).await
     }

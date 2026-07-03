@@ -3272,6 +3272,8 @@
   "notifications.empty.messages.description": "Öffne den Posteingang mit CTRL+I und markiere die erste Nachricht mit CTRL+Shift+E als gelesen.",
   "notifications.empty.messages.protip": "Profi-Tipp:",
   "notifications.empty.messages.title": "Du hast alles gesehen!",
+  "notifications.empty.topics.description": "Wenn jemand auf ein Thema antwortet, an dem du beteiligt bist, wird es hier angezeigt.",
+  "notifications.empty.topics.title": "Noch keine Themen-Updates",
   "notifications.inbox": "Posteingang",
   "notifications.tabs.forYou": "Für dich",
   "notifications.tabs.mentions": "Erwähnungen",

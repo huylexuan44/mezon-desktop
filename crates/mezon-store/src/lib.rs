@@ -15,6 +15,7 @@ pub mod emoji;
 pub mod gallery;
 pub mod group_members;
 pub mod ids;
+pub mod inbox;
 pub mod login;
 pub mod message;
 pub mod message_time;
@@ -27,6 +28,8 @@ pub mod realtime;
 pub mod roles;
 pub mod sticker;
 pub mod threads;
+pub mod topic_badges;
+pub mod topics;
 pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
@@ -68,6 +71,7 @@ pub use gallery::{
 };
 pub use group_members::{GroupMember, GroupMembersEvent, GroupMembersStore};
 pub use ids::{ChannelId, ClanId, MessageId, ParseIdError, RoleId, UserId};
+pub use inbox::{InboxEvent, InboxStore};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{
@@ -75,6 +79,10 @@ pub use message::{
     recompute_message_grouping, same_message_sender, should_show_message_head,
 };
 pub use messages::*;
+pub use mezon_client::{
+    InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
+    attachment_link_is_image, message_content_is_attachment,
+};
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
@@ -86,6 +94,8 @@ pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
 pub use sticker::{Sticker, StickerEvent, StickerStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
+pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
+pub use topics::{TopicsEvent, TopicsStore};
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
     resolve_user_profile,
