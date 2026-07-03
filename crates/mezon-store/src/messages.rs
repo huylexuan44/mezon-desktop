@@ -21,13 +21,14 @@ use crate::AppConfig;
 use crate::KeyedCache;
 use crate::account::AccountStore;
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
+use crate::badge::BadgeService;
 use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::message::{
     MentionTarget, Message, MessageAttachment, MessageCode, MessageReference, ViewerMedia,
     aggregate_reactions, apply_reaction_event, message_combined_with_prev, message_sort_key,
-    parse_spans, recompute_message_grouping, sort_messages,
+    parse_spans, reaction_key, recompute_message_grouping, rollback_reaction, sort_messages,
 };
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -70,7 +71,9 @@ pub enum MessagesEvent {
     },
     /// An in-place change to an existing row (e.g. a reaction add/remove) that
     /// does not alter the row count — the UI just needs to re-render.
-    Updated,
+    /// `message_id` is the affected row when known (lets scoped observers skip
+    /// unrelated updates), or `None` for a broad in-place change.
+    Updated { message_id: Option<MessageId> },
     /// Scroll to and briefly highlight a message that is now in the buffer
     /// (cf. React `idMessageToJump`). Emitted by [`MessagesStore::jump_to_message`]
     /// once the target is loaded — either it was already present, or an
@@ -426,7 +429,10 @@ pub struct MessagesStore {
     fetch_generation: u64,
     /// Active reply target for the composer, if any.
     reply_target: Option<ReplyDraft>,
+    /// Message currently being edited inline in its row (self-only; one at a time).
+    editing: Option<MessageId>,
     joined_channels: HashSet<ChannelId>,
+    pending_self_adds: HashMap<(ChannelId, MessageId, String), u32>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
@@ -483,7 +489,9 @@ impl MessagesStore {
             consecutive_loads: 0,
             fetch_generation: 0,
             reply_target: None,
+            editing: None,
             joined_channels: HashSet::new(),
+            pending_self_adds: HashMap::new(),
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
@@ -553,13 +561,37 @@ impl MessagesStore {
         self.messages()
     }
 
+    pub fn reaction_view(
+        &self,
+        message_id: MessageId,
+        emoji_id: &str,
+        emoji: &str,
+    ) -> Option<(u32, Vec<(String, u32)>)> {
+        let channel_id = self.active_channel_id?;
+        let msg = self
+            .cache
+            .get(&channel_id)?
+            .messages
+            .get_by_id(message_id)?;
+        let key = reaction_key(emoji_id, emoji);
+        let reaction = msg.reactions.iter().find(|r| r.key == key)?;
+        Some((
+            reaction.count(),
+            reaction
+                .senders
+                .iter()
+                .map(|s| (s.sender_id.clone(), s.count))
+                .collect(),
+        ))
+    }
+
     /// Emit the splice for a single row appended at the bottom, accounting for
     /// any front-trim that dropped the oldest rows to keep the buffer within the
     /// cap. `old_len` is the buffer length before the push.
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
         if new_len <= old_len {
-            cx.emit(MessagesEvent::Updated);
+            cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
             return;
         }
@@ -990,7 +1022,7 @@ impl MessagesStore {
                         channel.has_more = false;
                         // No more history above: tell the UI so it can drop the
                         // persistent top loading skeleton.
-                        cx.emit(MessagesEvent::Updated);
+                        cx.emit(MessagesEvent::Updated { message_id: None });
                         cx.notify();
                         return;
                     }
@@ -1111,7 +1143,7 @@ impl MessagesStore {
                         .map(|m| message_from_api(m, cfg))
                         .collect();
                     if newer.is_empty() {
-                        cx.emit(MessagesEvent::Updated);
+                        cx.emit(MessagesEvent::Updated { message_id: None });
                         cx.notify();
                         return;
                     }
@@ -1285,6 +1317,91 @@ impl MessagesStore {
         if self.reply_target.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// Message currently being edited inline in its row, if any.
+    pub fn editing_message_id(&self) -> Option<MessageId> {
+        self.editing
+    }
+
+    /// Enter inline-edit mode for a message (own message only; enforced by callers).
+    pub fn start_edit(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        self.editing = Some(message_id);
+        cx.notify();
+    }
+
+    /// Leave inline-edit mode without saving.
+    pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Apply an edited message locally, then send the update to the server.
+    /// No rollback on network failure — a channel refresh reconciles true failures.
+    pub fn edit_message(&mut self, message_id: MessageId, content: String, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let spans = parse_spans(&ApiMessageContent {
+            t: content.clone(),
+            ..Default::default()
+        });
+        let Some(channel) = self.cache.get_mut(&channel_id) else {
+            return;
+        };
+        let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
+            return;
+        };
+        msg.content = content.clone();
+        msg.spans = spans;
+        msg.is_edited = true;
+        patch_reply_previews_after_update(&mut channel.messages, message_id, &content);
+        self.editing = None;
+        cx.emit(MessagesEvent::Updated {
+            message_id: Some(message_id),
+        });
+        cx.notify();
+
+        let api = self.api.clone();
+        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        let channel_num = channel_id.get();
+        let message_num = message_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .update_channel_message(clan_id, channel_num, message_num, &content)
+                .await
+            {
+                tracing::error!("update_channel_message failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    /// Remove a message locally, then send the delete to the server.
+    /// No rollback on network failure — a channel refresh reconciles true failures.
+    pub fn delete_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        if self.editing == Some(message_id) {
+            self.editing = None;
+        }
+        self.apply_message_remove(channel_id, channel_id, message_id, cx);
+
+        let api = self.api.clone();
+        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        let channel_num = channel_id.get();
+        let message_num = message_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api
+                .delete_channel_message(clan_id, channel_num, message_num)
+                .await
+            {
+                tracing::error!("delete_channel_message failed: {e}");
+            }
+        })
+        .detach();
     }
 
     pub fn send_message(
@@ -1543,7 +1660,9 @@ impl MessagesStore {
     }
 
     fn on_active_channel_changed(&mut self, channel_id: Option<ChannelId>, cx: &mut Context<Self>) {
+        self.pending_self_adds.clear();
         let Some(channel_id) = channel_id else {
+            self.flush_pending_last_seen(cx);
             self.active_channel_id = None;
             self.active_clan_id = None;
             self.is_dm = false;
@@ -1639,6 +1758,7 @@ impl MessagesStore {
         mode: i32,
         cx: &mut Context<Self>,
     ) {
+        self.flush_pending_last_seen(cx);
         self.active_channel_id = Some(channel_id);
         self.active_clan_id = Some(clan_id);
         self.is_public = is_public;
@@ -1816,7 +1936,7 @@ impl MessagesStore {
         };
         if channel.messages.contains_id(msg.id) {
             if channel.messages.merge_existing(msg.id, msg) && is_active {
-                cx.emit(MessagesEvent::Updated);
+                cx.emit(MessagesEvent::Updated { message_id: None });
                 cx.notify();
             }
             return;
@@ -1844,7 +1964,7 @@ impl MessagesStore {
             if appended {
                 self.emit_appended(old_len, cx);
             } else {
-                cx.emit(MessagesEvent::Updated);
+                cx.emit(MessagesEvent::Updated { message_id: None });
                 cx.notify();
             }
         }
@@ -1868,7 +1988,7 @@ impl MessagesStore {
         merge_message_update(existing, &incoming);
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
         if is_active {
-            cx.emit(MessagesEvent::Updated);
+            cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
         }
     }
@@ -1932,29 +2052,214 @@ impl MessagesStore {
         }
     }
 
+    pub fn add_reaction(
+        &mut self,
+        message_id: MessageId,
+        emoji_id: String,
+        emoji: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_reaction(message_id, emoji_id, emoji, false, cx);
+    }
+
+    pub fn remove_reaction(
+        &mut self,
+        message_id: MessageId,
+        emoji_id: String,
+        emoji: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_reaction(message_id, emoji_id, emoji, true, cx);
+    }
+
+    fn send_reaction(
+        &mut self,
+        message_id: MessageId,
+        emoji_id: String,
+        emoji: String,
+        remove: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
+            return;
+        };
+        let uid_str = current_uid.get().to_string();
+        let key = reaction_key(&emoji_id, &emoji).to_string();
+        let cfg = AppConfig::try_global(cx);
+        let applied = self
+            .cache
+            .get_mut(&channel_id)
+            .and_then(|channel| channel.messages.get_mut_by_id(message_id))
+            .map(|msg| {
+                apply_reaction_event(&mut msg.reactions, &emoji_id, &emoji, &uid_str, remove, cfg);
+            })
+            .is_some();
+        if applied {
+            if !remove {
+                *self
+                    .pending_self_adds
+                    .entry((channel_id, message_id, key))
+                    .or_insert(0) += 1;
+            }
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+            cx.notify();
+        }
+
+        let api = self.api.clone();
+        let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        let mode = self.mode;
+        let is_public = self.is_public;
+        let message_sender_id = current_uid.get();
+        let emoji_id_num = emoji_id.parse::<i64>().unwrap_or(0);
+        let channel = channel_id.get();
+        let message = message_id.get();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api
+                .react_channel_message(
+                    clan_id,
+                    channel,
+                    message,
+                    emoji_id_num,
+                    &emoji,
+                    1,
+                    message_sender_id,
+                    mode,
+                    is_public,
+                    remove,
+                )
+                .await
+            {
+                tracing::error!("react_channel_message failed: {e}");
+                if applied {
+                    let _ = this.update(cx, |store, cx| {
+                        store.rollback_reaction_send(
+                            channel_id, message_id, &emoji_id, &emoji, &uid_str, remove, cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn rollback_reaction_send(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji_id: &str,
+        emoji: &str,
+        sender_id: &str,
+        was_remove: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let cfg = AppConfig::try_global(cx);
+        if let Some(msg) = self
+            .cache
+            .get_mut(&channel_id)
+            .and_then(|channel| channel.messages.get_mut_by_id(message_id))
+        {
+            rollback_reaction(
+                &mut msg.reactions,
+                emoji_id,
+                emoji,
+                sender_id,
+                was_remove,
+                cfg,
+            );
+        }
+        if !was_remove {
+            let entry_key = (
+                channel_id,
+                message_id,
+                reaction_key(emoji_id, emoji).to_string(),
+            );
+            if let Some(count) = self.pending_self_adds.get_mut(&entry_key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.pending_self_adds.remove(&entry_key);
+                }
+            }
+        }
+        cx.emit(MessagesEvent::Updated {
+            message_id: Some(message_id),
+        });
+        cx.notify();
+    }
+
     fn handle_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::MessageReaction(r) = event else {
             return;
         };
         let channel_id = ChannelId(r.channel_id);
+        let message_id = MessageId(r.message_id);
         let is_active = self.active_channel_id == Some(channel_id);
+        let sender_id = r.sender_id.to_string();
+        let emoji_id = r.emoji_id.to_string();
+
+        if !r.action
+            && self.consume_pending_self_add(
+                channel_id, message_id, &emoji_id, &r.emoji, &sender_id, cx,
+            )
+        {
+            return;
+        }
+
+        let cfg = AppConfig::try_global(cx);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
             return;
         };
-        let Some(msg) = channel.messages.get_mut_by_id(MessageId(r.message_id)) else {
+        let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
         apply_reaction_event(
             &mut msg.reactions,
-            &r.emoji_id.to_string(),
+            &emoji_id,
             &r.emoji,
-            &r.sender_id.to_string(),
+            &sender_id,
             r.action,
+            cfg,
         );
         if is_active {
-            cx.emit(MessagesEvent::Updated);
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
             cx.notify();
         }
+    }
+
+    fn consume_pending_self_add(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji_id: &str,
+        emoji: &str,
+        sender_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
+            return false;
+        };
+        if current_uid.get().to_string() != sender_id {
+            return false;
+        }
+        let entry_key = (
+            channel_id,
+            message_id,
+            reaction_key(emoji_id, emoji).to_string(),
+        );
+        let Some(count) = self.pending_self_adds.get_mut(&entry_key) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.pending_self_adds.remove(&entry_key);
+        }
+        true
     }
 
     fn reconcile_temp(
@@ -1993,7 +2298,7 @@ impl MessagesStore {
         if pushed {
             self.emit_appended(old_len, cx);
         } else {
-            cx.emit(MessagesEvent::Updated);
+            cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
         }
     }
@@ -2417,7 +2722,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .iter()
         .map(|r| message_reference_from_api(r, cfg))
         .collect();
-    let reactions = aggregate_reactions(&m.reactions);
+    let reactions = aggregate_reactions(&m.reactions, cfg);
     let attachments: Vec<MessageAttachment> = m
         .attachments
         .into_iter()

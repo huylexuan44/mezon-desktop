@@ -22,3 +22,9 @@ pub fn profile_url(cx: &App, source_url: &str) -> String {
         .map(|cfg| cfg.profile_proxy(source_url))
         .unwrap_or_else(|| source_url.to_string())
 }
+
+pub fn emoji_url(cx: &App, emoji_id: &str) -> String {
+    AppConfig::try_global(cx)
+        .map(|cfg| cfg.emoji_src(emoji_id))
+        .unwrap_or_default()
+}

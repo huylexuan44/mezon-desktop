@@ -1,7 +1,8 @@
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div,
+    App, Context, Entity, FontWeight, SharedString, Task, UniformListScrollHandle, Window, div,
     prelude::*, px, uniform_list,
 };
 use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
@@ -10,6 +11,8 @@ use crate::components::compositions::DmRow;
 use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
+
+const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 
 struct DmItem {
     channel_id: ChannelId,
@@ -26,6 +29,9 @@ pub struct DirectSidebar {
     settings: Entity<Settings>,
     list_scroll: UniformListScrollHandle,
     dm_items: Rc<Vec<DmItem>>,
+    suppress_hover: bool,
+    last_scroll_at: Option<Instant>,
+    _hover_release_task: Option<Task<()>>,
 }
 
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
@@ -78,7 +84,38 @@ impl DirectSidebar {
             settings,
             list_scroll: UniformListScrollHandle::new(),
             dm_items,
+            suppress_hover: false,
+            last_scroll_at: None,
+            _hover_release_task: None,
         }
+    }
+
+    fn on_scroll(&mut self, cx: &mut Context<Self>) {
+        self.last_scroll_at = Some(Instant::now());
+        if self.suppress_hover {
+            return;
+        }
+        self.suppress_hover = true;
+        cx.notify();
+        self._hover_release_task = Some(cx.spawn(async move |this, cx| {
+            let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
+            loop {
+                cx.background_executor().timer(idle).await;
+                let still_scrolling = this
+                    .update(cx, |this, _| {
+                        this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
+                    })
+                    .unwrap_or(false);
+                if still_scrolling {
+                    continue;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.suppress_hover = false;
+                    cx.notify();
+                });
+                break;
+            }
+        }));
     }
 
     fn render_search(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -187,6 +224,7 @@ impl Render for DirectSidebar {
             _ => None,
         };
         let items = self.dm_items.clone();
+        let suppress_hover = self.suppress_hover;
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -201,6 +239,7 @@ impl Render for DirectSidebar {
                             .online(item.online)
                             .avatar_src(item.avatar_src.clone())
                             .avatar_raw(item.avatar_raw.clone())
+                            .suppress_hover(suppress_hover)
                             .render(&theme)
                             .into_any_element()
                     }
@@ -209,6 +248,7 @@ impl Render for DirectSidebar {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.list_scroll)
+        .on_scroll_wheel(cx.listener(|this, _event, _window, cx| this.on_scroll(cx)))
         .flex_1()
         .min_h_0()
         .px_2();

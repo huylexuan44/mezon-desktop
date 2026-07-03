@@ -2,7 +2,7 @@ use gpui::{App, ClickEvent, Context, Entity, SharedString, Window, div, prelude:
 
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::ActiveTheme;
-use mezon_store::{AuthState, PresenceStore};
+use mezon_store::{AccountStore, AuthState, PresenceStore};
 
 fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
     move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -12,12 +12,16 @@ fn on_settings_click() -> impl Fn(&ClickEvent, &mut Window, &mut App) {
 
 pub struct UserInfoBar {
     auth_state: Entity<AuthState>,
+    account_store: Entity<AccountStore>,
     username: SharedString,
     presence: SharedString,
+    avatar_src: SharedString,
+    avatar_raw: SharedString,
 }
 
 impl UserInfoBar {
     pub fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
+        let account_store = AccountStore::global(cx);
         cx.observe(&PresenceStore::global(cx), |this, _, cx| {
             if this.sync_presence(cx) {
                 cx.notify();
@@ -30,14 +34,44 @@ impl UserInfoBar {
             }
         })
         .detach();
+        cx.observe(&account_store, |this, _, cx| {
+            if this.sync_avatar(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+        account_store.update(cx, |store, cx| store.ensure_account(cx));
         let username = Self::read_username(&auth_state, cx);
         let mut bar = Self {
             auth_state,
+            account_store,
             username,
             presence: SharedString::from("Offline"),
+            avatar_src: SharedString::default(),
+            avatar_raw: SharedString::default(),
         };
         bar.sync_presence(cx);
+        bar.sync_avatar(cx);
         bar
+    }
+
+    fn sync_avatar(&mut self, cx: &App) -> bool {
+        let prev_src = self.avatar_src.clone();
+        let prev_raw = self.avatar_raw.clone();
+        let raw = self
+            .account_store
+            .read(cx)
+            .account
+            .as_ref()
+            .and_then(|account| account.avatar_url.clone())
+            .unwrap_or_default();
+        self.avatar_src = if raw.is_empty() {
+            SharedString::default()
+        } else {
+            SharedString::from(crate::util::imgproxy::avatar_url(cx, &raw))
+        };
+        self.avatar_raw = SharedString::from(raw);
+        self.avatar_src != prev_src || self.avatar_raw != prev_raw
     }
 
     fn read_username(auth_state: &Entity<AuthState>, cx: &App) -> SharedString {
@@ -93,6 +127,18 @@ impl Render for UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
+        let mut avatar = Avatar::new()
+            .name(self.username.clone())
+            .with_size(Size::Small);
+        if !self.avatar_src.is_empty() {
+            avatar = avatar.src(self.avatar_src.clone());
+            if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar_src {
+                avatar = avatar.fallback_src(self.avatar_raw.clone());
+            }
+        } else if !self.avatar_raw.is_empty() {
+            avatar = avatar.src(self.avatar_raw.clone());
+        }
+
         // Positioning (absolute / insets) is applied by the cached wrapper in
         // the chat layout so this view can be `.cached()`; keep only the visual
         // box here.
@@ -127,22 +173,15 @@ impl Render for UserInfoBar {
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.tokens.bg_item_hover))
                             .child(
-                                div()
-                                    .relative()
-                                    .child(
-                                        Avatar::new()
-                                            .name(self.username.clone())
-                                            .with_size(Size::Small),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .bottom_0()
-                                            .right_0()
-                                            .size_2()
-                                            .rounded_full()
-                                            .bg(presence_color),
-                                    ),
+                                div().relative().child(avatar).child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size_2()
+                                        .rounded_full()
+                                        .bg(presence_color),
+                                ),
                             )
                             .child(
                                 div()

@@ -10,6 +10,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_rustls::rustls::pki_types::ServerName;
 
+const SOCK_HOST_IP_OVERRIDE: Option<&str> = Some("161.248.80.11");
+
 #[cfg(debug_assertions)]
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -654,7 +656,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let addr = format!("{}:{}", host, port);
+        let connect_host = match (host, SOCK_HOST_IP_OVERRIDE) {
+            (crate::DEFAULT_WS_HOST, Some(ip)) => ip,
+            _ => host,
+        };
+        let addr = format!("{}:{}", connect_host, port);
         tracing::debug!("TCP connecting...");
         let tcp = tokio::time::timeout(
             std::time::Duration::from_secs(15),

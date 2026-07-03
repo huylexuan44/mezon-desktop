@@ -1,4 +1,7 @@
-use gpui::{Anchor, AnyElement, SharedString, div, prelude::*, px};
+use gpui::{
+    Anchor, AnyElement, KeyDownEvent, MouseButton, MouseDownEvent, SharedString, div, prelude::*,
+    px,
+};
 use mezon_store::{Message, MessageCode};
 
 use super::content::render_message_content;
@@ -10,7 +13,7 @@ use super::parts::{
     render_reply,
 };
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{Icon, IconName, Input};
 
 const GROUP_MARGIN_TOP: f32 = 10.;
 const MESSAGE_ROW_MIN_HEIGHT: f32 = 30.;
@@ -19,7 +22,12 @@ fn message_pad_top(combined: bool, has_reply: bool, code: MessageCode) -> bool {
     !combined || (has_reply && !matches!(code, MessageCode::CreatePin))
 }
 
-pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyElement {
+pub fn render_user_message(
+    msg: &Message,
+    combined: bool,
+    is_different_day: bool,
+    ctx: &RowCtx,
+) -> AnyElement {
     let theme = ctx.theme;
     let has_reply = !msg.references.is_empty();
     let show_head = mezon_store::should_show_message_head(msg, combined);
@@ -57,7 +65,13 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
         body_column = body_column.child(render_head(msg, ctx, DEFAULT_DISPLAY_NAME_COLOR));
     }
 
-    body_column = body_column.child(render_message_content(msg, ctx));
+    let editing_input = (ctx.editing_id == Some(msg.id))
+        .then(|| ctx.edit_input.clone())
+        .flatten();
+    body_column = body_column.child(match editing_input {
+        Some(input) => render_edit_box(msg.id, input, ctx),
+        None => render_message_content(msg, ctx),
+    });
 
     if let Some(attachments) = render_attachments(msg, ctx) {
         body_column = body_column.child(attachments);
@@ -91,11 +105,21 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
         || mezon_store::message_row_highlight_roles(msg, ctx.current_role_ids);
     let mention_bg = theme.tokens.bg_highlight;
     let mention_border = theme.tokens.border_left_highlight;
+    let context_menu_id = msg.id;
+    let context_menu_host = ctx.video_host.clone();
+    let group_name = SharedString::from(format!("msg-{row_key}"));
     div()
         .id(("msg-row", row_key as usize))
-        .when(!ctx.suppress_hover, |d| {
-            d.group(SharedString::from(format!("msg-{row_key}")))
-        })
+        .when(!ctx.suppress_hover, |d| d.group(group_name.clone()))
+        .on_mouse_down(
+            MouseButton::Right,
+            move |event: &MouseDownEvent, _window, cx| {
+                let position = event.position;
+                let _ = context_menu_host.update(cx, |this, cx| {
+                    this.open_context_menu(context_menu_id, position, cx);
+                });
+            },
+        )
         .relative()
         .w_full()
         .min_h(px(MESSAGE_ROW_MIN_HEIGHT))
@@ -115,7 +139,76 @@ pub fn render_user_message(msg: &Message, combined: bool, ctx: &RowCtx) -> AnyEl
             d.child(render_reply(&msg.references[0], ctx))
         })
         .child(body)
-        .child(render_hover_actions(msg, theme, ctx.suppress_hover))
+        .child(render_hover_actions(
+            msg,
+            combined,
+            has_reply,
+            is_different_day,
+            group_name,
+            ctx,
+        ))
+        .into_any_element()
+}
+
+fn render_edit_box(
+    message_id: mezon_store::MessageId,
+    input: gpui::Entity<crate::components::primitives::InputState>,
+    ctx: &RowCtx,
+) -> AnyElement {
+    let theme = ctx.theme;
+    let save_host = ctx.video_host.clone();
+    let cancel_host = ctx.video_host.clone();
+    let escape_host = ctx.video_host.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+            if event.keystroke.key == "escape" {
+                let _ = escape_host.update(cx, |this, cx| this.cancel_edit(cx));
+            }
+        })
+        .child(Input::new(&input))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .id(("edit-save", message_id.0 as usize))
+                        .p_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .child(
+                            Icon::new(IconName::CheckIcon)
+                                .size_4()
+                                .text_color(theme.brand),
+                        )
+                        .on_click(move |_, window, cx| {
+                            let _ = save_host.update(cx, |this, cx| this.save_edit(window, cx));
+                        }),
+                )
+                .child(
+                    div()
+                        .id(("edit-cancel", message_id.0 as usize))
+                        .p_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .child(
+                            Icon::new(IconName::CloseIcon)
+                                .size_4()
+                                .text_color(theme.text_muted),
+                        )
+                        .on_click(move |_, _, cx| {
+                            let _ = cancel_host.update(cx, |this, cx| this.cancel_edit(cx));
+                        }),
+                ),
+        )
         .into_any_element()
 }
 
