@@ -5,8 +5,9 @@ use gpui::{
     Hsla, ListAlignment, ListState, MouseDownEvent, Window, div, img, list, prelude::*, px,
 };
 use mezon_store::{
-    ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore, MessagesStore, ProfileContext,
-    ThreadSummary, ThreadsStore, UserId, group_threads, resolve_user_profile,
+    ChannelId, ChannelMembersStore, ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore,
+    MessagesStore, ProfileContext, THREAD_STATUS_JOINED, ThreadSummary, ThreadsStore, UserId,
+    group_threads, resolve_user_profile,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 use ui::utils::{DateTimeType, format_distance_from_now};
@@ -25,6 +26,10 @@ const PANEL_MIN_HEIGHT: f32 = 400.;
 const LIST_BODY_HEIGHT: f32 = 500.;
 const PANEL_MAX_VIEWPORT_OFFSET: f32 = 180.;
 const THREAD_AVATAR_SIZE: f32 = 16.;
+const MEMBER_AVATAR_SIZE: f32 = 24.;
+const MEMBER_AVATAR_MAX: usize = 5;
+const MEMBER_AVATAR_OVERLAP: f32 = -6.;
+const MEMBERS_COLUMN_WIDTH: f32 = 120.;
 
 type ThreadPopoverOnOpen = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -61,6 +66,11 @@ impl ThreadsScrollBody {
         })
         .detach();
         cx.observe(&MessagesStore::global(cx), |this, _, cx| {
+            this.list_dirty = true;
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&ChannelMembersStore::global(cx), |this, _, cx| {
             this.list_dirty = true;
             cx.notify();
         })
@@ -610,10 +620,18 @@ fn thread_card(
     let tokens = &theme.tokens;
     let channel_id = thread.channel_id.clone();
     let clan_id = thread.clan_id.clone();
+    let parent_id = thread.parent_id.clone();
+    let thread_label = thread.channel_label.clone();
     let preview = resolve_thread_preview(thread, cx);
     let (sender_label, avatar_url) = resolve_thread_sender(thread, &preview, cx);
     let time_label = format_thread_time(preview.timestamp, locale);
     let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
+
+    let preview_text = if preview.content.trim().is_empty() && preview.has_attachment {
+        format!("[{}]", mezon_i18n::t(locale, "message.attachments.attachment"))
+    } else {
+        preview.content.clone()
+    };
 
     let mut avatar = Avatar::new()
         .name(&sender_label)
@@ -633,6 +651,7 @@ fn thread_card(
         .mb_2()
         .px_4()
         .items_center()
+        .justify_between()
         .gap_3()
         .rounded_lg()
         .cursor_pointer()
@@ -678,7 +697,7 @@ fn thread_card(
                                 .text_color(tokens.text_theme_message)
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(preview.content),
+                                .child(preview_text),
                         )
                         .when(!time_label.is_empty(), |this| {
                             this.child(
@@ -692,12 +711,93 @@ fn thread_card(
                         }),
                 ),
         )
+        .when_some(thread_member_avatars(thread, theme, cx), |this, avatars| {
+            this.child(avatars)
+        })
         .on_click(move |_: &ClickEvent, _window, cx| {
             layout.update(cx, |layout, cx| {
-                layout.navigate_to_thread(&channel_id, &clan_id, cx);
+                layout.navigate_to_thread(&channel_id, &clan_id, &parent_id, &thread_label, cx);
             });
         })
         .into_any_element()
+}
+
+fn thread_member_avatars(
+    thread: &ThreadSummary,
+    theme: &Theme,
+    cx: &App,
+) -> Option<gpui::AnyElement> {
+    if thread.active != THREAD_STATUS_JOINED {
+        return None;
+    }
+    let channel_id = thread.channel_id.parse::<ChannelId>().ok()?;
+    let member_ids = ChannelMembersStore::global(cx)
+        .read(cx)
+        .member_ids(channel_id);
+    if member_ids.is_empty() {
+        return None;
+    }
+
+    let clan_id = thread.clan_id.parse::<ClanId>().ok().or_else(|| {
+        ThreadsStore::global(cx)
+            .read(cx)
+            .list_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok())
+    });
+    let tokens = &theme.tokens;
+
+    let mut group = h_flex().items_center().justify_end();
+    for (ix, user_id) in member_ids.iter().take(MEMBER_AVATAR_MAX).enumerate() {
+        let (name, avatar_url) = clan_id
+            .and_then(|cid| resolve_user_profile(*user_id, ProfileContext::Clan(cid), cx))
+            .map(|profile| (profile.display_name, profile.avatar_url))
+            .unwrap_or_default();
+
+        let mut avatar = Avatar::new()
+            .name(&name)
+            .size_px(px(MEMBER_AVATAR_SIZE))
+            .border_color(tokens.bg_active_member_channel);
+        if !avatar_url.is_empty() {
+            let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_url);
+            avatar = avatar.src(proxied).fallback_src(avatar_url);
+        }
+
+        let mut wrap = div().flex_shrink_0();
+        if ix > 0 {
+            wrap = wrap.ml(px(MEMBER_AVATAR_OVERLAP));
+        }
+        group = group.child(wrap.child(avatar));
+    }
+
+    let extra = member_ids.len().saturating_sub(MEMBER_AVATAR_MAX);
+    if extra > 0 {
+        let shown = extra.min(50);
+        group = group.child(
+            div()
+                .ml(px(MEMBER_AVATAR_OVERLAP))
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .size(px(MEMBER_AVATAR_SIZE))
+                .rounded_full()
+                .border_2()
+                .border_color(tokens.bg_active_member_channel)
+                .bg(theme.bg_tertiary)
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(tokens.text_theme_message)
+                .child(format!("{shown}")),
+        );
+    }
+
+    Some(
+        div()
+            .w(px(MEMBERS_COLUMN_WIDTH))
+            .flex_shrink_0()
+            .child(group)
+            .into_any_element(),
+    )
 }
 
 struct ThreadCardPreview {
@@ -706,6 +806,7 @@ struct ThreadCardPreview {
     sender_name: String,
     sender_avatar: String,
     timestamp: i64,
+    has_attachment: bool,
 }
 
 fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview {
@@ -719,6 +820,7 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
             sender_name: message.sender_name.to_string(),
             sender_avatar: message.avatar_url.to_string(),
             timestamp: message.create_time,
+            has_attachment: !message.attachments.is_empty(),
         };
     }
 
@@ -734,6 +836,7 @@ fn resolve_thread_preview(thread: &ThreadSummary, cx: &App) -> ThreadCardPreview
         sender_name: thread.last_message_sender_name.clone(),
         sender_avatar: thread.last_message_sender_avatar.clone(),
         timestamp: thread.last_sent_timestamp,
+        has_attachment: false,
     }
 }
 
@@ -836,3 +939,4 @@ fn ensure_clan_members(clan_ids: Vec<ClanId>, cx: &mut App) {
         });
     }
 }
+

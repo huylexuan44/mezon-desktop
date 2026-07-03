@@ -72,7 +72,9 @@ pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
 pub use sticker::{Sticker, StickerEvent, StickerStore};
-pub use threads::{ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
+pub use threads::{
+    THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
+};
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar,
     resolve_user_profile,

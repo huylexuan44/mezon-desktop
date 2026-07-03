@@ -38,6 +38,7 @@ pub struct ChatLayout {
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
+    pending_open_threads_popover: bool,
 }
 
 struct ActiveChannelSlice {
@@ -184,6 +185,7 @@ impl ChatLayout {
             pin_popover_handle: PopoverMenuHandle::default(),
             displayed_active_channel: None,
             displayed_voice_mini: None,
+            pending_open_threads_popover: false,
         };
         this.sync_active_from_route(cx);
         this
@@ -427,6 +429,11 @@ impl Render for ChatLayout {
         self.chat_area.bind_window(window, cx);
         self.maybe_prefetch_voice_token(cx);
 
+        if std::mem::take(&mut self.pending_open_threads_popover) {
+            let handle = self.thread_popover_handle.clone();
+            window.defer(cx, move |window, cx| handle.show(window, cx));
+        }
+
         let nav_body = self.render_nav_body(cx);
         let locale = self.settings.read(cx).language.clone();
         let create_panel = self.build_create_thread_panel(&locale, window, cx);
@@ -607,6 +614,8 @@ impl ChatLayout {
         &mut self,
         channel_id: &str,
         clan_id: &str,
+        parent_id: &str,
+        label: &str,
         cx: &mut Context<Self>,
     ) {
         let Ok(channel_id) = channel_id.parse::<ChannelId>() else {
@@ -617,7 +626,14 @@ impl ChatLayout {
         };
         self.thread_popover_handle.hide(cx);
         self.clear_thread_search(cx);
+        let label = label.to_string();
+        let parent = parent_id.parse::<ChannelId>().ok();
         self.channel_list.update(cx, |list, cx| {
+            if let Some(parent) = parent {
+                list.ensure_thread_with_parent(channel_id, parent, clan_id, label.clone(), cx);
+            } else {
+                list.ensure_thread_channel(channel_id, label.clone(), cx);
+            }
             list.select_channel(channel_id, cx);
         });
         crate::router::navigate(
@@ -636,13 +652,17 @@ impl ChatLayout {
                 clan_id,
             } => {
                 self.close_create_thread(cx);
-                self.navigate_to_thread(channel_id, clan_id, cx);
+                self.navigate_to_thread(channel_id, clan_id, "", "", cx);
                 ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
             }
             ThreadsEvent::CreateFailed { message } => {
                 Shell::global(cx).update(cx, |shell, cx| {
                     shell.error(message.clone(), cx);
                 });
+                cx.notify();
+            }
+            ThreadsEvent::OpenPopoverRequested => {
+                self.pending_open_threads_popover = true;
                 cx.notify();
             }
         }

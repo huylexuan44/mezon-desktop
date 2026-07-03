@@ -54,6 +54,8 @@ pub enum ThreadsEvent {
     CreateFailed {
         message: String,
     },
+    /// Request the threads popover to open (e.g. from the "all threads" system-message link).
+    OpenPopoverRequested,
 }
 
 pub struct ThreadsStore {
@@ -350,6 +352,11 @@ impl ThreadsStore {
             return;
         }
         self.fetch(cx);
+    }
+
+    /// Ask any listening view (the chat layout) to open the threads popover.
+    pub fn request_open_popover(&mut self, cx: &mut Context<Self>) {
+        cx.emit(ThreadsEvent::OpenPopoverRequested);
     }
 
     pub fn open_popover(&mut self, cx: &mut Context<Self>) {

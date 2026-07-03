@@ -1,7 +1,7 @@
 use gpui::{AnyElement, App, FontWeight, IntoElement, SharedString, div, prelude::*, px};
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ClanMembersStore, Message, MessageCode,
-    MessageId, MessagesStore,
+    MessageId, MessagesStore, ThreadsStore,
 };
 
 use super::content::{append_system_mention_spans, render_system_message_content};
@@ -269,7 +269,7 @@ fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui
                 .child(system_link(
                     primary,
                     mezon_i18n::t(locale, "message.systemMessages.allThreads"),
-                    |_, _, _| {},
+                    open_threads_popover,
                 ))
                 .child(".")
             } else if !thread_content.is_empty() {
@@ -303,6 +303,12 @@ fn system_link(
 fn jump_to_message(message_id: MessageId, cx: &mut App) {
     MessagesStore::global(cx).update(cx, |store, cx| {
         store.jump_to_message(message_id, cx);
+    });
+}
+
+fn open_threads_popover(_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut App) {
+    ThreadsStore::global(cx).update(cx, |store, cx| {
+        store.request_open_popover(cx);
     });
 }
 
