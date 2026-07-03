@@ -47,14 +47,23 @@ pub fn handle() -> tokio::runtime::Handle {
 }
 
 pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
-    tracing::debug!("put_bytes_to_url: PUTting {} bytes", data.len());
+    put_bytes_to_content_type(url, data, "application/octet-stream").await
+}
+
+pub async fn put_bytes_to_content_type(
+    url: &str,
+    data: Vec<u8>,
+    content_type: &str,
+) -> Result<()> {
+    tracing::debug!("put_bytes_to_content_type: PUTting {} bytes", data.len());
     let url = url.to_string();
+    let content_type = content_type.to_string();
     runtime()
         .spawn(async move {
             let request = http::Request::builder()
                 .method(http::Method::PUT)
                 .uri(&url)
-                .header("Content-Type", "application/octet-stream")
+                .header("Content-Type", content_type)
                 .body(AsyncBody::from(data))?;
             let response =
                 match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, http_client().send(request)).await
@@ -66,9 +75,12 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
                     ),
                 };
             let status = response.status();
-            tracing::debug!("put_bytes_to_url: response status={}", status);
+            tracing::debug!("put_bytes_to_content_type: response status={}", status);
             if !status.is_success() {
-                tracing::error!("put_bytes_to_url: HTTP PUT failed with status {}", status);
+                tracing::error!(
+                    "put_bytes_to_content_type: HTTP PUT failed with status {}",
+                    status
+                );
                 anyhow::bail!("HTTP PUT failed with status {}", status);
             }
             Ok(())
@@ -422,6 +434,39 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn update_clan_desc(
+        &self,
+        request: mezon_proto::api::UpdateClanDescRequest,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_clan_desc(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_system_message_by_clan_id(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::SystemMessage> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_system_message_by_clan_id(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_system_message(
+        &self,
+        request: mezon_proto::api::SystemMessageRequest,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_system_message(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn ping_roundtrip(&self) -> Result<()> {
         tracing::debug!("TransportClient::ping_roundtrip() called");
 
@@ -722,6 +767,26 @@ impl TransportClient {
         let cursor = cursor.to_string();
         runtime()
             .spawn(async move { transport.list_roles(clan_id, limit, &cursor).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_list_permission().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_clan_user_role(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::RoleList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_role_of_user_in_clan(clan_id, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

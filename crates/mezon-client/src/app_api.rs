@@ -190,6 +190,27 @@ impl AppApi {
             .await
     }
 
+    pub async fn update_clan_desc(
+        &self,
+        request: mezon_proto::api::UpdateClanDescRequest,
+    ) -> Result<()> {
+        self.transport.update_clan_desc(request).await
+    }
+
+    pub async fn get_system_message_by_clan_id(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::SystemMessage> {
+        self.transport.get_system_message_by_clan_id(clan_id).await
+    }
+
+    pub async fn update_system_message(
+        &self,
+        request: mezon_proto::api::SystemMessageRequest,
+    ) -> Result<()> {
+        self.transport.update_system_message(request).await
+    }
+
     pub async fn is_open(&self) -> bool {
         self.transport.is_open().await
     }
@@ -473,6 +494,19 @@ impl AppApi {
         cursor: &str,
     ) -> Result<mezon_proto::api::RoleListEventResponse> {
         self.transport.list_roles(clan_id, limit, cursor).await
+    }
+
+    pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
+        self.transport.get_list_permission().await
+    }
+
+    pub async fn get_clan_user_role(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::RoleList> {
+        self.transport
+            .get_clan_user_role(clan_id, 0)
+            .await
     }
 
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
