@@ -6,10 +6,9 @@ use gpui::{
     SharedString, Subscription, Window, div, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore,
-    InboxCategory, InboxEvent, InboxNotification, InboxStore, MessageId, MessagesStore,
-    TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent,
-    UsersByUserStore,
+    ChannelId, ChannelList, ClanId, ClanList, ClanMembersEvent, ClanMembersStore, InboxCategory,
+    InboxEvent, InboxNotification, InboxStore, MessageId, MessagesStore, TopicBadgeEvent,
+    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -60,8 +59,7 @@ impl InboxPopoverPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let list_state =
-            ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
+        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
         let weak = cx.weak_entity();
         Self::attach_list_scroll_handler(&list_state, weak);
         let avatar_image_cache = cx.new(|cx| {
@@ -115,10 +113,12 @@ impl InboxPopoverPanel {
         }
 
         let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
-            if matches!(event, InboxEvent::Updated) {
-                this.sync_from_store(cx);
-                cx.notify();
+            let InboxEvent::Updated { clan_id } = event;
+            if clan_id.as_deref().is_some_and(|id| id != this.clan_id) {
+                return;
             }
+            this.sync_from_store(cx);
+            cx.notify();
         });
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
@@ -138,10 +138,12 @@ impl InboxPopoverPanel {
                 cx.notify();
             }
         });
-        let _topic_badge_sub = cx.subscribe(&topic_badge_store, |_, _, event, cx| {
-            if matches!(event, TopicBadgeEvent::Updated) {
-                cx.notify();
+        let _topic_badge_sub = cx.subscribe(&topic_badge_store, |this, _, event, cx| {
+            let TopicBadgeEvent::Updated { clan_id } = event;
+            if clan_id.as_deref().is_some_and(|id| id != this.clan_id) {
+                return;
             }
+            cx.notify();
         });
         let _users_sub = cx.subscribe(&users_store, |_, _, event, cx| {
             if matches!(event, UsersByUserEvent::Changed) {
@@ -222,9 +224,17 @@ impl InboxPopoverPanel {
         self.sync_list_state(false);
     }
 
-    fn build_items(tab: InboxTab, clan_id: &str, locale: &SharedString, cx: &App) -> Rc<Vec<ListRow>> {
+    fn build_items(
+        tab: InboxTab,
+        clan_id: &str,
+        locale: &SharedString,
+        cx: &App,
+    ) -> Rc<Vec<ListRow>> {
         if tab == InboxTab::Topics {
-            let topics = TopicsStore::global(cx).read(cx).topics().to_vec();
+            let topics = TopicsStore::global(cx)
+                .read(cx)
+                .topics_for(clan_id)
+                .to_vec();
             return Rc::new(
                 topics
                     .into_iter()
@@ -247,7 +257,10 @@ impl InboxPopoverPanel {
                 .into_iter()
                 .map(|notification| {
                     let view = build_notification_row_view(&notification, locale, cx);
-                    ListRow::Notification { notification, view }
+                    ListRow::Notification {
+                        notification: Box::new(notification),
+                        view,
+                    }
                 })
                 .collect(),
         )
@@ -295,7 +308,7 @@ impl InboxPopoverPanel {
 #[derive(Clone)]
 enum ListRow {
     Notification {
-        notification: InboxNotification,
+        notification: Box<InboxNotification>,
         view: NotificationRowView,
     },
     Topic {
@@ -373,8 +386,7 @@ impl Render for InboxPopoverPanel {
                     .size_full(),
                 )
                 .custom_scrollbars(
-                    Scrollbars::new(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.list_state),
+                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
                     window,
                     cx,
                 )
@@ -579,11 +591,7 @@ fn render_empty_icon_cluster(theme: &Theme, icon: IconName) -> impl IntoElement 
         .mb_4()
         .p(px(22.))
         .rounded_full()
-        .child(
-            Icon::new(icon)
-                .size(px(36.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(icon).size(px(36.)).text_color(theme.text_muted))
         .child(
             svg()
                 .path(IconName::EmptyUnreadStyle.path())
@@ -653,11 +661,7 @@ fn render_empty_simple(
         .justify_center()
         .gap_3()
         .p_8()
-        .child(
-            Icon::new(icon)
-                .size(px(36.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(icon).size(px(36.)).text_color(theme.text_muted))
         .child(
             div()
                 .text_lg()
@@ -690,7 +694,7 @@ fn render_row(
         ListRow::Notification { notification, view } => render_notification_item(
             theme,
             locale,
-            notification,
+            *notification,
             view,
             tab,
             avatar_cache,
@@ -710,13 +714,17 @@ fn schedule_inbox_jump(
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     route: Route,
     _clan_id: String,
-    _channel_id: String,
+    channel_id: String,
     message_id: String,
 ) {
+    let jump = channel_id
+        .parse::<ChannelId>()
+        .ok()
+        .zip(message_id.parse::<MessageId>().ok());
     navigate(cx, route);
-    if let Ok(jump_target) = message_id.parse::<MessageId>() {
+    if let Some((channel, target)) = jump {
         MessagesStore::global(cx).update(cx, |store, cx| {
-            store.jump_to_message(jump_target, cx);
+            store.request_jump(channel, target, cx);
         });
     }
     inbox_handle.hide(cx);
@@ -737,7 +745,10 @@ fn notification_jump_route(notification: &InboxNotification) -> Option<Route> {
         return None;
     };
     let clan_id = notification.effective_clan_id();
-    if clan_id.as_deref().is_none_or(|id| id.is_empty() || id == "0") {
+    if clan_id
+        .as_deref()
+        .is_none_or(|id| id.is_empty() || id == "0")
+    {
         return Some(Route::DirectMessage {
             direct_id: channel,
             message_type: "3".into(),
@@ -826,7 +837,11 @@ fn render_notification_item(
     let this_copy = this.clone();
     let inbox_handle_jump = inbox_handle.clone();
     let jump_label = mezon_i18n::t(locale, "channelTopbar.tooltips.jump");
-    let outer_py = if tab == InboxTab::ForYou { px(4.) } else { px(8.) };
+    let outer_py = if tab == InboxTab::ForYou {
+        px(4.)
+    } else {
+        px(8.)
+    };
 
     div()
         .flex()
@@ -1011,7 +1026,14 @@ fn render_topic_item(
                             }
                         }),
                 )
-                .child(render_topic_body(theme, locale, &topic, &view, avatar_cache, cx)),
+                .child(render_topic_body(
+                    theme,
+                    locale,
+                    &topic,
+                    &view,
+                    avatar_cache,
+                    cx,
+                )),
         )
         .into_any_element()
 }

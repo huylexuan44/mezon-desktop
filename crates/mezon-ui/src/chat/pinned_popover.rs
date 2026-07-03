@@ -2,8 +2,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list, prelude::*, px,
+    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list,
+    prelude::*, px,
 };
 use mezon_store::{
     ClanMembersStore, MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, ProfileContext,
@@ -147,7 +148,11 @@ impl Render for PinnedPopoverPanel {
             });
         }
 
-        if self.list_state.item_count() != cards.len() {
+        let current = self.list_state.item_count();
+        if cards.len() > current {
+            self.list_state
+                .splice(current..current, cards.len() - current);
+        } else if cards.len() < current {
             self.list_state.reset(cards.len());
         }
         let list_state = self.list_state.clone();

@@ -2,7 +2,9 @@ mod panel;
 mod row;
 
 pub use panel::{InboxPopoverPanel, clan_has_inbox_badge};
-pub use row::{FOR_YOU_ROW_HEIGHT, MENTION_ROW_HEIGHT, MESSAGE_ROW_HEIGHT, ROW_HEIGHT, TOPIC_ROW_HEIGHT};
+pub use row::{
+    FOR_YOU_ROW_HEIGHT, MENTION_ROW_HEIGHT, MESSAGE_ROW_HEIGHT, ROW_HEIGHT, TOPIC_ROW_HEIGHT,
+};
 
 use mezon_store::InboxCategory;
 

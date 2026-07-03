@@ -8,8 +8,8 @@ use mezon_store::{Settings, ThreadsStore};
 use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
-use crate::chat::layout::ChatLayout;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
 use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::components::primitives::{
@@ -118,7 +118,7 @@ impl ChannelHeader {
         self
     }
 
-    pub fn render(&self, theme: &Theme, window: &mut Window, cx: &App) -> impl IntoElement {
+    pub fn render(&self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
         let icon_color = theme.text_muted;
@@ -180,114 +180,109 @@ impl ChannelHeader {
                     .items_center()
                     .gap_1()
                     .children(actions.into_iter().filter_map(move |(id, icon)| {
-                    if id == "hdr-members" && !self.members_action {
-                        return None;
-                    }
-                    if id == "hdr-thread" {
-                        if !show_threads {
+                        if id == "hdr-members" && !self.members_action {
                             return None;
                         }
-                        let (Some(handle), Some(layout)) = (thread_handle.clone(), layout.clone())
-                        else {
-                            return None;
-                        };
-                        let menu_handle = handle.clone();
-                        return Some(
-                            PopoverMenu::new("hdr-thread-popover")
-                                .with_handle(handle)
-                                .anchor(Anchor::TopRight)
-                                .attach(Anchor::BottomRight)
-                                .offset(point(px(0.), px(9.)))
-                                .on_open(thread_popover_on_open(layout.clone()))
-                                .menu({
-                                    let layout = layout.clone();
-                                    move |window, cx| {
-                                        layout.update(cx, |layout, cx| {
-                                            layout.ensure_thread_search_input(window, cx);
-                                        });
-                                        let search_input =
-                                            layout.read(cx).thread_search_input.clone()?;
-                                        Some(cx.new(|cx| {
-                                            ThreadsPopoverPanel::new(
-                                                layout.clone(),
-                                                search_input,
-                                                menu_handle.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        }))
-                                    }
-                                })
-                                .trigger(ThreadPopoverTrigger::new(theme, false))
-                                .into_any_element(),
-                        );
-                    }
-                    if id == "hdr-pin"
-                        && let (Some(handle), Some(settings)) =
-                            (pin_handle.clone(), settings.clone())
-                    {
-                        let menu_handle = handle.clone();
-                        return Some(
-                            PopoverMenu::new("hdr-pin-popover")
-                                .with_handle(handle)
-                                .anchor(Anchor::TopRight)
-                                .attach(Anchor::BottomRight)
-                                .offset(point(px(0.), px(9.)))
-                                .on_open(pin_popover_on_open())
-                                .menu({
-                                    let settings = settings.clone();
-                                    move |window, cx| {
-                                        Some(cx.new(|cx| {
-                                            PinnedPopoverPanel::new(
-                                                settings.clone(),
-                                                menu_handle.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        }))
-                                    }
-                                })
-                                .trigger(PinPopoverTrigger::new(theme, false))
-                                .into_any_element(),
-                        );
-                    }
+                        if id == "hdr-thread" {
+                            if !show_threads {
+                                return None;
+                            }
+                            let (Some(handle), Some(layout)) =
+                                (thread_handle.clone(), layout.clone())
+                            else {
+                                return None;
+                            };
+                            let menu_handle = handle.clone();
+                            return Some(
+                                PopoverMenu::new("hdr-thread-popover")
+                                    .with_handle(handle)
+                                    .anchor(Anchor::TopRight)
+                                    .attach(Anchor::BottomRight)
+                                    .offset(point(px(0.), px(9.)))
+                                    .on_open(thread_popover_on_open(layout.clone()))
+                                    .menu({
+                                        let layout = layout.clone();
+                                        move |window, cx| {
+                                            layout.update(cx, |layout, cx| {
+                                                layout.ensure_thread_search_input(window, cx);
+                                            });
+                                            let search_input =
+                                                layout.read(cx).thread_search_input.clone()?;
+                                            Some(cx.new(|cx| {
+                                                ThreadsPopoverPanel::new(
+                                                    layout.clone(),
+                                                    search_input,
+                                                    menu_handle.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            }))
+                                        }
+                                    })
+                                    .trigger(ThreadPopoverTrigger::new(theme, false))
+                                    .into_any_element(),
+                            );
+                        }
+                        if id == "hdr-pin"
+                            && let (Some(handle), Some(settings)) =
+                                (pin_handle.clone(), settings.clone())
+                        {
+                            let menu_handle = handle.clone();
+                            return Some(
+                                PopoverMenu::new("hdr-pin-popover")
+                                    .with_handle(handle)
+                                    .anchor(Anchor::TopRight)
+                                    .attach(Anchor::BottomRight)
+                                    .offset(point(px(0.), px(9.)))
+                                    .on_open(pin_popover_on_open())
+                                    .menu({
+                                        let settings = settings.clone();
+                                        move |window, cx| {
+                                            Some(cx.new(|cx| {
+                                                PinnedPopoverPanel::new(
+                                                    settings.clone(),
+                                                    menu_handle.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            }))
+                                        }
+                                    })
+                                    .trigger(PinPopoverTrigger::new(theme, false))
+                                    .into_any_element(),
+                            );
+                        }
 
-                    let is_members = id == "hdr-members";
-                    let active = is_members && self.members_active;
-                    let tint = if active { icon_active } else { icon_color };
-                    let mut button = div()
-                        .id(id)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.))
-                        .h(px(32.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(bg_hover))
-                        .occlude()
-                        .child(Icon::new(icon).size(px(20.)).text_color(tint));
-                    if active {
-                        button = button.bg(bg_active);
-                    }
-                    if is_members && let Some(handler) = self.on_toggle_members.clone() {
-                        button = button.on_click(move |_, window, cx| handler(window, cx));
-                    }
-                    Some(button.into_any_element())
+                        let is_members = id == "hdr-members";
+                        let active = is_members && self.members_active;
+                        let tint = if active { icon_active } else { icon_color };
+                        let mut button = div()
+                            .id(id)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(32.))
+                            .h(px(32.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(bg_hover))
+                            .occlude()
+                            .child(Icon::new(icon).size(px(20.)).text_color(tint));
+                        if active {
+                            button = button.bg(bg_active);
+                        }
+                        if is_members && let Some(handler) = self.on_toggle_members.clone() {
+                            button = button.on_click(move |_, window, cx| handler(window, cx));
+                        }
+                        Some(button.into_any_element())
                     }))
                     .when(self.show_inbox && !self.dm, |row| {
-                        row.child(self.render_inbox_button(theme, window, cx))
+                        row.child(self.render_inbox_button(theme, cx))
                     }),
             )
     }
 
-    fn render_inbox_button(
-        &self,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &App,
-    ) -> gpui::AnyElement {
-        let _ = window;
+    fn render_inbox_button(&self, theme: &Theme, cx: &App) -> gpui::AnyElement {
         let Some(handle) = self.inbox_handle.clone() else {
             return div()
                 .id("hdr-inbox")
@@ -449,7 +444,7 @@ impl ChatHeader {
 }
 
 impl Render for ChatHeader {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
@@ -482,7 +477,7 @@ impl Render for ChatHeader {
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);
         }
-        header.render(theme, window, cx).into_any_element()
+        header.render(theme, cx).into_any_element()
     }
 }
 

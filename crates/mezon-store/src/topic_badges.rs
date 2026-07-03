@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
@@ -21,7 +21,7 @@ const MAX_PROCESSED_KEYS: usize = 500;
 
 #[derive(Debug, Clone)]
 pub enum TopicBadgeEvent {
-    Updated,
+    Updated { clan_id: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +34,7 @@ struct TopicParentEntry {
 pub struct TopicBadgeStore {
     topic_parent_map: HashMap<String, TopicParentEntry>,
     processed_keys: HashSet<String>,
+    processed_order: VecDeque<String>,
     auth_state: Entity<AuthState>,
     _api: Arc<AppApi>,
 }
@@ -62,7 +63,8 @@ impl TopicBadgeStore {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.topic_parent_map.clear();
         self.processed_keys.clear();
-        cx.emit(TopicBadgeEvent::Updated);
+        self.processed_order.clear();
+        cx.emit(TopicBadgeEvent::Updated { clan_id: None });
         cx.notify();
     }
 
@@ -71,6 +73,7 @@ impl TopicBadgeStore {
         Self {
             topic_parent_map: HashMap::new(),
             processed_keys: HashSet::new(),
+            processed_order: VecDeque::new(),
             auth_state,
             _api: api,
         }
@@ -105,33 +108,37 @@ impl TopicBadgeStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
-        let changed = match event {
+        let changed_clans = match event {
             RealtimeEvent::ChannelMessage(m) => self.handle_channel_message(m, cx),
             RealtimeEvent::Notifications(batch) => self.handle_notifications(batch, cx),
             RealtimeEvent::MarkAsRead(e) => self.handle_mark_as_read(e.channel_id, cx),
-            _ => false,
+            _ => Vec::new(),
         };
-        if changed {
-            cx.emit(TopicBadgeEvent::Updated);
+        if !changed_clans.is_empty() {
+            for clan_id in changed_clans {
+                cx.emit(TopicBadgeEvent::Updated {
+                    clan_id: Some(clan_id),
+                });
+            }
             cx.notify();
         }
     }
 
-    fn handle_channel_message(&mut self, m: &api::ChannelMessage, cx: &App) -> bool {
+    fn handle_channel_message(&mut self, m: &api::ChannelMessage, cx: &App) -> Vec<String> {
         if m.code == CHAT_UPDATE || m.code == CHAT_REMOVE {
-            return false;
+            return Vec::new();
         }
         if m.topic_id == 0 {
-            return false;
+            return Vec::new();
         }
         let Some(user_id) = self.current_user_id(cx) else {
-            return false;
+            return Vec::new();
         };
         let topic_id = m.topic_id.to_string();
         let parent_channel_id = m.channel_id.to_string();
         let clan_id = m.clan_id.to_string();
         if is_viewing_channel(&topic_id, cx) {
-            return false;
+            return Vec::new();
         }
         if is_already_seen(
             ClanId(m.clan_id),
@@ -139,31 +146,36 @@ impl TopicBadgeStore {
             m.create_time_seconds,
             cx,
         ) {
-            return false;
+            return Vec::new();
         }
         let topic_message = api::ChannelMessage {
             channel_id: m.topic_id,
             ..m.clone()
         };
         if !is_message_mention_or_reply(&topic_message, user_id, cx) {
-            return false;
+            return Vec::new();
         }
-        let dedupe_key = format!("{parent_channel_id}_{}", m.message_id);
-        self.increment_topic_for_message(
+        let message_id = m.message_id.to_string();
+        let dedupe_key = format!("{parent_channel_id}_{message_id}");
+        if self.increment_topic_for_message(
             &clan_id,
             &parent_channel_id,
             &topic_id,
-            Some(m.message_id.to_string()),
+            Some(&message_id),
             &dedupe_key,
-        )
+        ) {
+            vec![clan_id]
+        } else {
+            Vec::new()
+        }
     }
 
     fn handle_notifications(
         &mut self,
         batch: &mezon_proto::realtime::Notifications,
         cx: &App,
-    ) -> bool {
-        let mut changed = false;
+    ) -> Vec<String> {
+        let mut changed_clans: Vec<String> = Vec::new();
         for n in &batch.notifications {
             if n.channel_type == ChannelType::App.as_raw() as i32
                 || n.channel_type == ChannelType::Voice.as_raw() as i32
@@ -193,37 +205,24 @@ impl TopicBadgeStore {
                 continue;
             }
             let dedupe_key = format!("{parent_channel_id}_{message_id}");
-            changed |= self.increment_topic_for_message(
+            if self.increment_topic_for_message(
                 &clan_id,
                 &parent_channel_id,
                 &topic_id,
-                Some(message_id),
+                Some(&message_id),
                 &dedupe_key,
-            );
+            ) && !changed_clans.contains(&clan_id)
+            {
+                changed_clans.push(clan_id);
+            }
         }
-        changed
+        changed_clans
     }
 
-    fn handle_mark_as_read(&mut self, channel_id: i64, cx: &App) -> bool {
-        let topic_id = channel_id.to_string();
-        if self.reset_topic(&topic_id) {
-            return true;
-        }
-        let channel_id = ChannelId(channel_id);
-        let Some(clan_id) = ChannelList::global(cx)
-            .read(cx)
-            .clan_id_for_channel(channel_id)
-        else {
-            return false;
-        };
-        if ChannelList::global(cx)
-            .read(cx)
-            .find_channel_in_clan(clan_id, channel_id)
-            .is_some_and(|ch| ch.channel_type == ChannelType::Thread)
-        {
-            return self.reset_topic(&topic_id);
-        }
-        false
+    fn handle_mark_as_read(&mut self, channel_id: i64, _cx: &App) -> Vec<String> {
+        self.reset_topic(&channel_id.to_string())
+            .into_iter()
+            .collect()
     }
 
     fn increment_topic_for_message(
@@ -231,13 +230,16 @@ impl TopicBadgeStore {
         clan_id: &str,
         parent_channel_id: &str,
         topic_id: &str,
-        _message_id: Option<String>,
+        message_id: Option<&str>,
         dedupe_key: &str,
     ) -> bool {
-        if self.processed_keys.contains(dedupe_key) {
-            return false;
+        let dedupable = message_id.is_some_and(|id| !id.is_empty());
+        if dedupable {
+            if self.processed_keys.contains(dedupe_key) {
+                return false;
+            }
+            self.track_processed(dedupe_key.to_string());
         }
-        self.track_processed(dedupe_key.to_string());
         let entry = self
             .topic_parent_map
             .entry(topic_id.to_string())
@@ -250,15 +252,24 @@ impl TopicBadgeStore {
         true
     }
 
-    fn reset_topic(&mut self, topic_id: &str) -> bool {
-        self.topic_parent_map.remove(topic_id).is_some()
+    fn reset_topic(&mut self, topic_id: &str) -> Option<String> {
+        self.topic_parent_map
+            .remove(topic_id)
+            .map(|entry| entry.clan_id)
     }
 
     fn track_processed(&mut self, key: String) {
-        if self.processed_keys.len() >= MAX_PROCESSED_KEYS {
-            self.processed_keys.clear();
+        if !self.processed_keys.insert(key.clone()) {
+            return;
         }
-        self.processed_keys.insert(key);
+        self.processed_order.push_back(key);
+        if self.processed_order.len() > MAX_PROCESSED_KEYS {
+            while self.processed_order.len() > MAX_PROCESSED_KEYS / 2 {
+                if let Some(evicted) = self.processed_order.pop_front() {
+                    self.processed_keys.remove(&evicted);
+                }
+            }
+        }
     }
 
     fn current_user_id(&self, cx: &App) -> Option<UserId> {
@@ -291,7 +302,7 @@ fn is_viewing_channel(channel_id: &str, cx: &App) -> bool {
 fn is_already_seen(clan_id: ClanId, channel_id: ChannelId, msg_time: u32, cx: &App) -> bool {
     let Some(ch) = ChannelList::global(cx)
         .read(cx)
-        .find_channel_in_clan(clan_id, channel_id)
+        .channel(clan_id, channel_id)
     else {
         return false;
     };

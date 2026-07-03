@@ -15,7 +15,7 @@ const REALTIME_BUCKET_CAP: usize = (INBOX_PAGE_LIMIT as usize) * 4;
 
 #[derive(Debug, Clone)]
 pub enum InboxEvent {
-    Updated,
+    Updated { clan_id: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +52,7 @@ pub struct InboxStore {
     active_clan_id: Option<String>,
     active_channel_id: Option<String>,
     api: Arc<AppApi>,
+    reset_generation: u64,
     _conn_watch: Task<()>,
 }
 
@@ -79,7 +80,8 @@ impl InboxStore {
         self.buckets.clear();
         self.active_clan_id = None;
         self.active_channel_id = None;
-        cx.emit(InboxEvent::Updated);
+        self.reset_generation = self.reset_generation.wrapping_add(1);
+        cx.emit(InboxEvent::Updated { clan_id: None });
         cx.notify();
     }
 
@@ -91,6 +93,7 @@ impl InboxStore {
             active_clan_id: None,
             active_channel_id: None,
             api,
+            reset_generation: 0,
             _conn_watch: conn_watch,
         }
     }
@@ -235,6 +238,7 @@ impl InboxStore {
 
         let api = self.api.clone();
         let clan_id = clan_id.to_string();
+        let reset_gen = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_notifications(
@@ -246,6 +250,9 @@ impl InboxStore {
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != reset_gen {
+                    return;
+                }
                 this.apply_fetch_result(&clan_id, category, generation, result, cx);
             });
         })
@@ -268,9 +275,6 @@ impl InboxStore {
         match result {
             Ok(items) => {
                 bucket.has_more = items.len() >= INBOX_PAGE_LIMIT as usize;
-                if let Some(last) = items.last() {
-                    bucket.last_id = Some(last.id.clone());
-                }
                 if bucket.items.is_empty() {
                     bucket.items = items;
                 } else {
@@ -283,12 +287,18 @@ impl InboxStore {
                         .items
                         .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
                 }
+                bucket.last_id = bucket.items.last().map(|n| n.id.clone());
                 bucket.fetched_at = Some(Instant::now());
-                cx.emit(InboxEvent::Updated);
+                cx.emit(InboxEvent::Updated {
+                    clan_id: Some(clan_id.to_string()),
+                });
                 cx.notify();
             }
             Err(e) => {
                 tracing::error!("list_notifications failed: {e}");
+                cx.emit(InboxEvent::Updated {
+                    clan_id: Some(clan_id.to_string()),
+                });
                 cx.notify();
             }
         }
@@ -301,15 +311,18 @@ impl InboxStore {
         category: InboxCategory,
         cx: &mut Context<Self>,
     ) {
-        let bucket = self.bucket_mut(clan_id, category);
-        let prev = bucket.items.clone();
-        bucket.items.retain(|n| n.id != id);
-        cx.emit(InboxEvent::Updated);
+        let Some(removed) = self.remove_item(clan_id, category, id) else {
+            return;
+        };
+        cx.emit(InboxEvent::Updated {
+            clan_id: Some(clan_id.to_string()),
+        });
         cx.notify();
 
         let api = self.api.clone();
         let id = id.to_string();
         let clan_id = clan_id.to_string();
+        let reset_gen = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .delete_notifications(&[id.as_str()], category as i32)
@@ -317,9 +330,13 @@ impl InboxStore {
             if let Err(e) = result {
                 tracing::error!("delete_notifications failed: {e}");
                 let _ = this.update(cx, |this, cx| {
-                    let bucket = this.bucket_mut(&clan_id, category);
-                    bucket.items = prev;
-                    cx.emit(InboxEvent::Updated);
+                    if this.reset_generation != reset_gen {
+                        return;
+                    }
+                    this.reinsert_item(&clan_id, category, removed);
+                    cx.emit(InboxEvent::Updated {
+                        clan_id: Some(clan_id.clone()),
+                    });
                     cx.notify();
                 });
             }
@@ -327,11 +344,43 @@ impl InboxStore {
         .detach();
     }
 
+    fn remove_item(
+        &mut self,
+        clan_id: &str,
+        category: InboxCategory,
+        id: &str,
+    ) -> Option<InboxNotification> {
+        let key = BucketKey {
+            clan_id: clan_id.to_string(),
+            category,
+        };
+        let bucket = self.buckets.get_mut(&key)?;
+        let pos = bucket.items.iter().position(|n| n.id == id)?;
+        Some(bucket.items.remove(pos))
+    }
+
+    fn reinsert_item(&mut self, clan_id: &str, category: InboxCategory, item: InboxNotification) {
+        let key = BucketKey {
+            clan_id: clan_id.to_string(),
+            category,
+        };
+        let Some(bucket) = self.buckets.get_mut(&key) else {
+            return;
+        };
+        if bucket.items.iter().any(|n| n.id == item.id) {
+            return;
+        }
+        bucket.items.push(item);
+        bucket
+            .items
+            .sort_by_key(|n| std::cmp::Reverse(n.create_time_seconds));
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::Notifications(batch) = event else {
             return;
         };
-        let mut changed = false;
+        let mut changed_clans: std::collections::HashSet<String> = std::collections::HashSet::new();
         for raw in &batch.notifications {
             let Ok(notification) = inbox_notification_from_api(raw.clone()) else {
                 continue;
@@ -343,7 +392,7 @@ impl InboxStore {
                 continue;
             };
             let key = BucketKey {
-                clan_id,
+                clan_id: clan_id.clone(),
                 category: notification.category,
             };
             let Some(bucket) = self.buckets.get_mut(&key) else {
@@ -359,10 +408,14 @@ impl InboxStore {
             if bucket.items.len() > REALTIME_BUCKET_CAP {
                 bucket.items.truncate(REALTIME_BUCKET_CAP);
             }
-            changed = true;
+            changed_clans.insert(clan_id);
         }
-        if changed {
-            cx.emit(InboxEvent::Updated);
+        if !changed_clans.is_empty() {
+            for clan_id in changed_clans {
+                cx.emit(InboxEvent::Updated {
+                    clan_id: Some(clan_id),
+                });
+            }
             cx.notify();
         }
     }
@@ -384,7 +437,14 @@ impl InboxStore {
         }
     }
 
+    fn mark_all_stale(&mut self) {
+        for bucket in self.buckets.values_mut() {
+            bucket.fetched_at = None;
+        }
+    }
+
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
+        self.mark_all_stale();
         let Some(active_clan_id) = self.active_clan_id.clone() else {
             return;
         };
@@ -430,6 +490,8 @@ mod tests {
             api: Arc::new(AppApi::new(Arc::new(mezon_client::TransportClient::new(
                 String::new(),
             )))),
+            reset_generation: 0,
+            _conn_watch: Task::ready(()),
         };
         assert!(store.should_skip_realtime(&sample_notification("7")));
         assert!(!store.should_skip_realtime(&sample_notification("8")));

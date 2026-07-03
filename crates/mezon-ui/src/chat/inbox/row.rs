@@ -2,9 +2,8 @@ use chrono::{Local, TimeZone};
 use gpui::{App, Entity, FontWeight, SharedString, div, img, prelude::*, px, rgb};
 use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, InboxCategory,
-    InboxMentionSpan, InboxNotification, ProfileContext, TopicDiscussion, UserId,
-    UsersByUserStore, attachment_link_is_image, message_content_is_attachment,
-    resolve_user_profile,
+    InboxMentionSpan, InboxNotification, ProfileContext, TopicDiscussion, UserId, UsersByUserStore,
+    attachment_link_is_image, message_content_is_attachment, resolve_user_profile,
 };
 
 use crate::components::primitives::{Avatar, Sizable, Size, h_flex, v_flex};
@@ -97,7 +96,11 @@ fn resolve_for_you_profile(
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .or_else(|| store_user.map(|user| user.username.clone()))
-        .or_else(|| clan_profile.as_ref().map(|profile| profile.username.clone()))
+        .or_else(|| {
+            clan_profile
+                .as_ref()
+                .map(|profile| profile.username.clone())
+        })
         .unwrap_or_default();
 
     let display_name = store_user
@@ -124,9 +127,7 @@ fn resolve_for_you_profile(
 
     let avatar = message
         .and_then(|m| (!m.avatar.is_empty()).then(|| m.avatar.clone()))
-        .or_else(|| {
-            (!notification.avatar_url.is_empty()).then(|| notification.avatar_url.clone())
-        })
+        .or_else(|| (!notification.avatar_url.is_empty()).then(|| notification.avatar_url.clone()))
         .or_else(|| {
             store_user
                 .map(|user| user.avatar_url.clone())
@@ -154,17 +155,14 @@ fn resolve_for_you_profile(
 
 fn find_mention_channel(clan_id: ClanId, channel_id: ChannelId, cx: &App) -> Option<Channel> {
     let list = ChannelList::global(cx).read(cx);
-    if let Some(channel) = list.find_channel_in_clan(clan_id, channel_id) {
+    if let Some(channel) = list.channel(clan_id, channel_id) {
         return Some(channel.clone());
     }
     if let Some(channel) = list.find_channel_in_active_clan(channel_id) {
         return Some(channel.clone());
     }
     list.clan_id_for_channel(channel_id)
-        .and_then(|resolved_clan| {
-            list.find_channel_in_clan(resolved_clan, channel_id)
-                .cloned()
-        })
+        .and_then(|resolved_clan| list.channel(resolved_clan, channel_id).cloned())
 }
 
 fn clan_name(clan_id: ClanId, cx: &App) -> Option<String> {
@@ -339,8 +337,8 @@ pub(crate) fn build_notification_row_view(
     } else {
         None
     };
-    let show_direct_message =
-        notification.category == InboxCategory::Mentions && is_direct_message_mention(notification, cx);
+    let show_direct_message = notification.category == InboxCategory::Mentions
+        && is_direct_message_mention(notification, cx);
 
     let messages_clan_name = match notification.category {
         InboxCategory::Messages => clan_id.and_then(|id| clan_name(id, cx)).map(Into::into),

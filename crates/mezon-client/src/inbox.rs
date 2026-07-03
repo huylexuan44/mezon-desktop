@@ -113,7 +113,6 @@ pub struct TopicDiscussion {
     pub creator_id: String,
     pub last_sender_id: String,
     pub content: String,
-    pub last_message_preview: String,
     pub last_message_timestamp: u32,
 }
 
@@ -462,16 +461,6 @@ pub fn inbox_notifications_from_list(
 }
 
 pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
-    let last_raw = t
-        .last_sent_message
-        .as_ref()
-        .map(|m| m.content.as_str())
-        .unwrap_or("");
-    let last_message_preview = if message_content_is_attachment(last_raw) {
-        String::new()
-    } else {
-        display_text_from_message_content(last_raw)
-    };
     let last_message_timestamp = t
         .last_sent_message
         .as_ref()
@@ -490,8 +479,7 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
         channel_id: id_str(t.channel_id),
         creator_id: id_str(t.creator_id),
         last_sender_id: id_str(last_sender_id),
-        content: display_text_from_message_content(&t.content),
-        last_message_preview,
+        content: t.content.clone(),
         last_message_timestamp,
     }
 }
@@ -557,5 +545,7 @@ mod tests {
         assert_eq!(topic.id, "10");
         assert_eq!(topic.message_id, "20");
         assert_eq!(topic.content, "topic title");
+        assert_eq!(topic.reply_preview_text(), "topic title");
+        assert!(!topic.reply_is_attachment());
     }
 }

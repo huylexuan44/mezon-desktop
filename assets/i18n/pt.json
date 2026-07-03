@@ -3272,6 +3272,8 @@
   "notifications.empty.messages.description": "Abra a caixa de entrada pressionando CTRL+I e marque a primeira mensagem como lida com CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Dica:",
   "notifications.empty.messages.title": "Você já viu tudo!",
+  "notifications.empty.topics.description": "Quando alguém responder a um tópico do qual você participa, aparecerá aqui.",
+  "notifications.empty.topics.title": "Ainda não há atualizações de tópicos",
   "notifications.inbox": "Caixa de entrada",
   "notifications.tabs.forYou": "Para você",
   "notifications.tabs.mentions": "Menções",

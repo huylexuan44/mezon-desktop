@@ -63,6 +63,14 @@ impl TopicsStore {
         &self.topics
     }
 
+    pub fn topics_for(&self, clan_id: &str) -> &[TopicDiscussion] {
+        if self.clan_id.as_deref() == Some(clan_id) {
+            &self.topics
+        } else {
+            &[]
+        }
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }
@@ -80,8 +88,13 @@ impl TopicsStore {
     }
 
     pub fn fetch(&mut self, clan_id: &str, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.loading && self.clan_id.as_deref() == Some(clan_id) {
             return;
+        }
+        if self.clan_id.as_deref() != Some(clan_id) {
+            self.topics.clear();
+            self.clan_id = Some(clan_id.to_string());
+            self.fetched_at = None;
         }
         self.loading = true;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -121,6 +134,7 @@ impl TopicsStore {
             }
             Err(e) => {
                 tracing::error!("list_sd_topics failed: {e}");
+                cx.emit(TopicsEvent::Updated);
                 cx.notify();
             }
         }
