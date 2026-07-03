@@ -158,6 +158,18 @@ fn maybe_show_desktop_notification(cx: &App, notif: &Notification, channel_id: C
     });
 }
 
+fn dm_message_preview(m: &ChannelMessage) -> String {
+    let text = serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&m.content)
+        .map(|c| c.t)
+        .unwrap_or_default();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        "New message".to_string()
+    } else {
+        trimmed.chars().take(140).collect()
+    }
+}
+
 fn is_message_already_seen(
     cx: &App,
     clan_id: ClanId,
@@ -262,6 +274,57 @@ impl BadgeService {
         )
     }
 
+    fn maybe_show_dm_notification(
+        &mut self,
+        cx: &App,
+        m: &ChannelMessage,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) {
+        if cx.active_window().is_some() {
+            return;
+        }
+        let Some(settings) = Settings::try_global(cx) else {
+            return;
+        };
+        let (enabled, hide_content) = {
+            let s = settings.read(cx);
+            (s.notifications_enabled, s.notifications_hide_content)
+        };
+        if !enabled {
+            return;
+        }
+        if !mark_badge_processed(
+            &mut self.processed_badge_messages,
+            &mut self.processed_badge_order,
+            (channel_id, message_id),
+        ) {
+            return;
+        }
+        let Some(platform) = PlatformStore::try_global(cx) else {
+            return;
+        };
+        let title = if !m.display_name.is_empty() {
+            m.display_name.clone()
+        } else if !m.username.is_empty() {
+            m.username.clone()
+        } else if !m.channel_label.is_empty() {
+            m.channel_label.clone()
+        } else {
+            "Mezon".to_string()
+        };
+        let body = if hide_content {
+            "New message".to_string()
+        } else {
+            dm_message_preview(m)
+        };
+        platform.read(cx).show_notification(DesktopNotification {
+            title,
+            body,
+            channel_id: Some(channel_id.to_string()),
+        });
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ChannelMessage(m) => {
@@ -281,6 +344,9 @@ impl BadgeService {
                         DirectMessageStore::global(cx).update(cx, |dm, cx| {
                             dm.note_message(channel_id, ts, from_me, increment_unread, cx);
                         });
+                        if !from_me && increment_unread {
+                            self.maybe_show_dm_notification(cx, m, channel_id, message_id);
+                        }
                     }
                 } else {
                     let clan_id = ClanId(m.clan_id);

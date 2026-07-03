@@ -16,10 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let realtime_proto = proto_root.join("rtapi/realtime.proto");
 
     if !api_proto.is_file() || !realtime_proto.is_file() {
-        return Err(
-            "mezon-protocol submodule is missing or incomplete"
-                .into(),
-        );
+        return Err("mezon-protocol submodule is missing or incomplete".into());
     }
 
     let previous_dir = env::current_dir()?;

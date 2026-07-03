@@ -1,5 +1,7 @@
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
-use gpui::{App, Context, Entity, ScrollHandle, SharedString, Window, deferred, div, point, prelude::*, px};
+use gpui::{
+    App, Context, Entity, ScrollHandle, SharedString, Window, deferred, div, point, prelude::*, px,
+};
 use mezon_store::{
     ChannelList, ClanId, ClanList, ClanSettingsPermissions, PermissionStore, Settings,
 };
@@ -167,10 +169,11 @@ impl ClanSettingScreen {
     ) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
-        cx.observe(&PermissionStore::global(cx), |_, _, cx| cx.notify()).detach();
-        PermissionStore::global(cx).update(cx, |store, cx| {
-            store.load_clan_permissions(clan_id, cx);
-        });
+        cx.observe(&PermissionStore::global(cx), |this, _, cx| {
+            this.reresolve_page(cx);
+            cx.notify();
+        })
+        .detach();
         let mut this = Self {
             clan_id,
             settings,
@@ -181,13 +184,42 @@ impl ClanSettingScreen {
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
         };
-        this.activate_page(page, cx);
+        if !clan_id.is_zero() {
+            PermissionStore::global(cx).update(cx, |store, cx| {
+                store.load_clan_permissions(clan_id, cx);
+            });
+            this.activate_page(page, cx);
+        }
         this
     }
 
     pub fn release_active_page(&mut self, cx: &mut Context<Self>) {
         self.release_page(self.current_page, cx);
         self.reset_content_scroll();
+    }
+
+    fn reresolve_page(&mut self, cx: &mut Context<Self>) {
+        if self.clan_id.is_zero() {
+            return;
+        }
+        let resolved = {
+            let store = PermissionStore::global(cx);
+            let store = store.read(cx);
+            if !store.has_clan_permissions_loaded(self.clan_id, cx) {
+                return;
+            }
+            self.current_page
+                .resolve_accessible(store.clan_settings_permissions(self.clan_id, cx))
+        };
+        if resolved != self.current_page {
+            crate::router::replace(
+                cx,
+                crate::router::Route::ClanSettings {
+                    clan_id: self.clan_id,
+                    page: resolved,
+                },
+            );
+        }
     }
 
     pub fn set_clan_and_page(
@@ -198,13 +230,18 @@ impl ClanSettingScreen {
     ) {
         let clan_changed = self.clan_id != clan_id;
         self.clan_id = clan_id;
-        PermissionStore::global(cx).update(cx, |store, cx| {
-            store.load_clan_permissions(clan_id, cx);
-        });
-        let perms = PermissionStore::global(cx)
-            .read(cx)
-            .clan_settings_permissions(clan_id, cx);
-        let resolved = page.resolve_accessible(perms);
+        let resolved = {
+            let store = PermissionStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.load_clan_permissions(clan_id, cx);
+            });
+            let store = store.read(cx);
+            if store.has_clan_permissions_loaded(clan_id, cx) {
+                page.resolve_accessible(store.clan_settings_permissions(clan_id, cx))
+            } else {
+                page
+            }
+        };
         if resolved != page {
             crate::router::replace(
                 cx,
@@ -229,13 +266,10 @@ impl ClanSettingScreen {
     }
 
     fn release_page(&mut self, page: ClanSettingsPage, cx: &mut Context<Self>) {
-        match page {
-            ClanSettingsPage::Overview => {
-                if let Some(entity) = self.overview_page.take() {
-                    entity.update(cx, |page, _| page.release());
-                }
-            }
-            _ => {}
+        if page == ClanSettingsPage::Overview
+            && let Some(entity) = self.overview_page.take()
+        {
+            entity.update(cx, |page, _| page.release());
         }
     }
 
@@ -360,17 +394,15 @@ impl Render for ClanSettingScreen {
         }
 
         let clan_name_upper = clan_name.to_uppercase();
-        let mut nav = v_flex()
-            .w(px(220.0))
-            .child(
-                div()
-                    .pl(px(10.0))
-                    .pb(px(6.0))
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(theme.text_primary)
-                    .child(clan_name_upper),
-            );
+        let mut nav = v_flex().w(px(220.0)).child(
+            div()
+                .pl(px(10.0))
+                .pb(px(6.0))
+                .text_sm()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(theme.text_primary)
+                .child(clan_name_upper),
+        );
 
         for section in SIDEBAR_SECTIONS {
             let visible_pages: Vec<ClanSettingsPage> = section
@@ -397,12 +429,7 @@ impl Render for ClanSettingScreen {
                     path,
                 ));
             }
-            nav = nav.child(
-                div()
-                    .mt(px(4.0))
-                    .border_b_1()
-                    .border_color(theme.border),
-            );
+            nav = nav.child(div().mt(px(4.0)).border_b_1().border_color(theme.border));
         }
 
         let locale_for_delete = locale.clone();
@@ -493,10 +520,7 @@ impl Render for ClanSettingScreen {
             )
             .when_some(overview_save_bar, |panel, overview| {
                 panel.child(deferred(render_clan_overview_save_bar(
-                    overview,
-                    &locale,
-                    &theme,
-                    cx,
+                    overview, &locale, &theme, cx,
                 )))
             })
             .child(

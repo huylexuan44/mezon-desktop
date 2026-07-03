@@ -1,22 +1,23 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, ListAlignment, ListState, MouseDownEvent, Window, div, img, list, prelude::*, px,
+    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, ListAlignment, ListState, MouseDownEvent, Subscription, Window, div, img,
+    list, prelude::*, px,
 };
 use mezon_store::{
     ChannelId, ChannelMembersStore, ChannelPermissionsStore, ClanId, ClanList, ClanMembersStore,
     MessagesStore, ProfileContext, THREAD_STATUS_JOINED, ThreadSummary, ThreadsStore, UserId,
     group_threads, resolve_user_profile,
 };
-use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 use ui::utils::{DateTimeType, format_distance_from_now};
+use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::chat::layout::ChatLayout;
 use crate::chat::message::DEFAULT_DISPLAY_NAME_COLOR;
 use crate::components::primitives::{
-    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size,
-    Spinner, h_flex, v_flex,
+    Avatar, Button, ButtonVariants, Icon, IconName, Input, InputState, Sizable, Size, Spinner,
+    h_flex, v_flex,
 };
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -42,6 +43,7 @@ pub struct ThreadsPopoverPanel {
     popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
     scroll_body: Entity<ThreadsScrollBody>,
     focus_handle: FocusHandle,
+    _subs: [Subscription; 2],
 }
 
 enum ThreadRowIndex {
@@ -55,6 +57,9 @@ struct ThreadsScrollBody {
     layout: Entity<ChatLayout>,
     avatar_image_cache: Entity<LruImageCache>,
     list_dirty: bool,
+    cached_rows: Option<Rc<Vec<ThreadRowIndex>>>,
+    cached_locale: String,
+    _store_sub: Subscription,
 }
 
 impl ThreadsScrollBody {
@@ -63,11 +68,10 @@ impl ThreadsScrollBody {
         avatar_image_cache: Entity<LruImageCache>,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&ThreadsStore::global(cx), |this, _, cx| {
+        let store_sub = cx.observe(&ThreadsStore::global(cx), |this, _, cx| {
             this.list_dirty = true;
             cx.notify();
-        })
-        .detach();
+        });
         let list_state = ListState::new(0, ListAlignment::Top, px(400.));
         list_state.set_scroll_handler(move |event, _window, cx| {
             let visible_end = event.visible_range.end;
@@ -80,14 +84,23 @@ impl ThreadsScrollBody {
             layout,
             avatar_image_cache,
             list_dirty: true,
+            cached_rows: None,
+            cached_locale: String::new(),
+            _store_sub: store_sub,
         }
     }
 
     fn sync_list(&mut self, row_count: usize) {
-        if row_count != self.list_state.item_count() {
+        let current = self.list_state.item_count();
+        if row_count == current {
+            if self.list_dirty {
+                self.list_state.remeasure();
+            }
+        } else if row_count > current {
+            self.list_state
+                .splice(current..current, row_count - current);
+        } else {
             self.list_state.reset(row_count);
-        } else if self.list_dirty {
-            self.list_state.remeasure();
         }
         self.list_dirty = false;
     }
@@ -113,7 +126,15 @@ impl Render for ThreadsScrollBody {
             let show_search_no_results = !query.is_empty()
                 && !store_ref.is_searching()
                 && search_results.is_some_and(|results| results.is_empty());
-            let rows = build_row_index(threads, search_results, query, &locale, loading_more);
+            let rows = if self.list_dirty || self.cached_locale != locale {
+                let fresh = build_row_index(threads, search_results, query, &locale, loading_more)
+                    .map(Rc::new);
+                self.cached_locale = locale.clone();
+                self.cached_rows = fresh.clone();
+                fresh
+            } else {
+                self.cached_rows.clone()
+            };
             let show_spinner = (!query.is_empty()
                 && (store_ref.is_searching() || search_results.is_none()))
                 || (query.is_empty() && loading && threads.is_empty());
@@ -133,7 +154,6 @@ impl Render for ThreadsScrollBody {
 
         if let Some(rows) = rows {
             self.sync_list(rows.len());
-            let rows = Rc::new(rows);
             return div()
                 .w_full()
                 .h(px(LIST_BODY_HEIGHT))
@@ -166,8 +186,7 @@ impl Render for ThreadsScrollBody {
                     .size_full(),
                 )
                 .custom_scrollbars(
-                    Scrollbars::new(ScrollAxes::Vertical)
-                        .tracked_scroll_handle(&self.list_state),
+                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
                     _window,
                     cx,
                 )
@@ -205,12 +224,13 @@ impl ThreadsPopoverPanel {
                 cx,
             )
         });
-        let scroll_body = cx.new(|cx| {
-            ThreadsScrollBody::new(layout.clone(), avatar_image_cache.clone(), cx)
-        });
+        let scroll_body =
+            cx.new(|cx| ThreadsScrollBody::new(layout.clone(), avatar_image_cache.clone(), cx));
 
-        cx.observe(&ThreadsStore::global(cx), |_, _, cx| cx.notify()).detach();
-        cx.observe(&ChannelPermissionsStore::global(cx), |_, _, cx| cx.notify()).detach();
+        let subs = [
+            cx.observe(&ThreadsStore::global(cx), |_, _, cx| cx.notify()),
+            cx.observe(&ChannelPermissionsStore::global(cx), |_, _, cx| cx.notify()),
+        ];
 
         Self {
             layout,
@@ -218,6 +238,7 @@ impl ThreadsPopoverPanel {
             popover_handle,
             scroll_body,
             focus_handle,
+            _subs: subs,
         }
     }
 }
@@ -311,10 +332,7 @@ fn render_header(
                 .text_base()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(tokens.text_theme_message)
-                .child(mezon_i18n::t(
-                    locale,
-                    "channelTopbar.modals.threads.title",
-                )),
+                .child(mezon_i18n::t(locale, "channelTopbar.modals.threads.title")),
         );
 
     let search_icon = Icon::new(if searching {
@@ -451,16 +469,11 @@ fn build_row_index(
             mezon_i18n::t(locale, key).to_uppercase(),
             bucket.len()
         )));
-        for thread in bucket {
-            if let Some(index) = threads
-                .iter()
-                .position(|candidate| candidate.channel_id == thread.channel_id)
-            {
-                rows.push(ThreadRowIndex::Card {
-                    search: false,
-                    index,
-                });
-            }
+        for index in bucket {
+            rows.push(ThreadRowIndex::Card {
+                search: false,
+                index,
+            });
         }
     }
 
@@ -499,16 +512,12 @@ fn render_empty_body(
                 .bg(tokens.bg_active_member_channel)
                 .child(img("icons/thread-empty.svg").size(px(36.)).flex_none())
                 .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(px(-10.))
-                        .child(
-                            img("icons/empty-unread-style.svg")
-                                .w(px(104.))
-                                .h(px(80.))
-                                .flex_none(),
-                        ),
+                    div().absolute().top_0().left(px(-10.)).child(
+                        img("icons/empty-unread-style.svg")
+                            .w(px(104.))
+                            .h(px(80.))
+                            .flex_none(),
+                    ),
                 ),
         )
         .child(
@@ -620,14 +629,7 @@ fn render_row(
             div()
                 .w_full()
                 .px_4()
-                .child(thread_card(
-                    thread,
-                    theme,
-                    locale,
-                    layout,
-                    avatar_cache,
-                    cx,
-                ))
+                .child(thread_card(thread, theme, locale, layout, avatar_cache, cx))
                 .into_any_element()
         }
         ThreadRowIndex::LoadingMore => div()
@@ -678,7 +680,10 @@ fn thread_card(
     let sender_color = Hsla::from(gpui::rgb(DEFAULT_DISPLAY_NAME_COLOR));
 
     let preview_text = if preview.content.trim().is_empty() && preview.has_attachment {
-        format!("[{}]", mezon_i18n::t(locale, "message.attachments.attachment"))
+        format!(
+            "[{}]",
+            mezon_i18n::t(locale, "message.attachments.attachment")
+        )
     } else {
         preview.content.clone()
     };
@@ -693,10 +698,7 @@ fn thread_card(
     }
 
     h_flex()
-        .id(format!(
-            "thread-item-{}-{}-{}",
-            thread.channel_id, preview.timestamp, preview.sender_id_raw
-        ))
+        .id(format!("thread-item-{}", thread.channel_id))
         .w_full()
         .h(px(72.))
         .mb_2()
@@ -784,9 +786,9 @@ fn thread_member_avatars(
         return None;
     }
     let channel_id = thread.channel_id.parse::<ChannelId>().ok()?;
-    let member_ids = ChannelMembersStore::global(cx)
+    let (member_ids, member_total) = ChannelMembersStore::global(cx)
         .read(cx)
-        .member_ids(channel_id);
+        .member_ids_preview(channel_id, MEMBER_AVATAR_MAX);
     if member_ids.is_empty() {
         return None;
     }
@@ -800,7 +802,7 @@ fn thread_member_avatars(
     let tokens = &theme.tokens;
 
     let mut group = h_flex().items_center().justify_end();
-    for (ix, user_id) in member_ids.iter().take(MEMBER_AVATAR_MAX).enumerate() {
+    for (ix, user_id) in member_ids.iter().enumerate() {
         let (name, avatar_url) = clan_id
             .and_then(|cid| resolve_user_profile(*user_id, ProfileContext::Clan(cid), cx))
             .map(|profile| (profile.display_name, profile.avatar_url))
@@ -823,7 +825,7 @@ fn thread_member_avatars(
         group = group.child(wrap.child(avatar));
     }
 
-    let extra = member_ids.len().saturating_sub(MEMBER_AVATAR_MAX);
+    let extra = member_total.saturating_sub(MEMBER_AVATAR_MAX);
     if extra > 0 {
         let shown = extra.min(50);
         group = group.child(
@@ -899,30 +901,21 @@ fn resolve_thread_sender(
     preview: &ThreadCardPreview,
     cx: &App,
 ) -> (String, String) {
-    let clan_id = thread
-        .clan_id
-        .parse::<ClanId>()
-        .ok()
-        .or_else(|| {
-            ThreadsStore::global(cx)
-                .read(cx)
-                .list_clan_id()
-                .and_then(|id| id.parse::<ClanId>().ok())
-        });
+    let clan_id = thread.clan_id.parse::<ClanId>().ok().or_else(|| {
+        ThreadsStore::global(cx)
+            .read(cx)
+            .list_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok())
+    });
 
-    if let (Some(user_id), Some(clan_id)) = (
-        preview.sender_id_raw.parse::<UserId>().ok(),
-        clan_id,
-    ) && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
+    if let (Some(user_id), Some(clan_id)) = (preview.sender_id_raw.parse::<UserId>().ok(), clan_id)
+        && let Some(profile) = resolve_user_profile(user_id, ProfileContext::Clan(clan_id), cx)
     {
         return (profile.display_name, profile.avatar_url);
     }
 
     if !preview.sender_name.is_empty() {
-        return (
-            preview.sender_name.clone(),
-            preview.sender_avatar.clone(),
-        );
+        return (preview.sender_name.clone(), preview.sender_avatar.clone());
     }
 
     (String::new(), String::new())
@@ -966,9 +959,7 @@ pub fn thread_popover_on_open(layout: Entity<ChatLayout>) -> ThreadPopoverOnOpen
         {
             ClanMembersStore::global(cx).update(cx, |store, cx| {
                 store.ensure_loaded(clan_id, cx);
-                cx.notify();
             });
         }
     })
 }
-

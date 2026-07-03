@@ -18,8 +18,8 @@ pub mod login;
 pub mod message;
 pub mod message_time;
 pub mod messages;
-pub mod pinned;
 pub mod permissions;
+pub mod pinned;
 pub mod platform;
 pub mod presence;
 pub mod realtime;
@@ -63,25 +63,22 @@ pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use message::*;
 pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
-    same_message_sender, should_show_message_head,
-    recompute_message_grouping,
+    recompute_message_grouping, same_message_sender, should_show_message_head,
 };
 pub use messages::*;
-pub use pinned::{PinnedMessage, PinnedMessagesStore};
 pub use permissions::{
-    ClanSettingsPermissions, PermissionEvent, PermissionStore, PERMISSION_ADMINISTRATOR,
-    PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN,
+    ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,
+    PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
 };
+pub use pinned::{PinnedMessage, PinnedMessagesStore};
 pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
 pub use sticker::{Sticker, StickerEvent, StickerStore};
-pub use threads::{
-    THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads,
-};
+pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use user_profile::{
-    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar,
+    ProfileContext, UserProfileView, active_clan_id, current_user_clan_avatar, resolve_avatar_url,
     resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};

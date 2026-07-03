@@ -554,4 +554,3 @@ fn opt_bool(value: Option<&'static str>, default: bool) -> bool {
         None => default,
     }
 }
-

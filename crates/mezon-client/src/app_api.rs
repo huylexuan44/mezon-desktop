@@ -500,13 +500,8 @@ impl AppApi {
         self.transport.get_list_permission().await
     }
 
-    pub async fn get_clan_user_role(
-        &self,
-        clan_id: i64,
-    ) -> Result<mezon_proto::api::RoleList> {
-        self.transport
-            .get_clan_user_role(clan_id, 0)
-            .await
+    pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
+        self.transport.get_clan_user_role(clan_id, 0).await
     }
 
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {

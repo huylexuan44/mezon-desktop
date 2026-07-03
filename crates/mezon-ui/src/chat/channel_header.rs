@@ -158,8 +158,7 @@ impl ChannelHeader {
                         if !show_threads {
                             return None;
                         }
-                        let (Some(handle), Some(layout)) =
-                            (thread_handle.clone(), layout.clone())
+                        let (Some(handle), Some(layout)) = (thread_handle.clone(), layout.clone())
                         else {
                             return None;
                         };
@@ -256,6 +255,7 @@ pub struct ChatHeader {
     dm: bool,
     members_action: bool,
     members_active: bool,
+    show_threads: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
@@ -274,6 +274,7 @@ impl ChatHeader {
             dm: false,
             members_action: true,
             members_active: false,
+            show_threads: false,
             pin_handle: None,
             layout,
             settings: settings.clone(),
@@ -292,10 +293,12 @@ impl ChatHeader {
     ) {
         let name = name.unwrap_or_else(|| self.name.clone());
         self.pin_handle = pin_handle;
+        let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
         if self.name == name
             && self.dm == dm
             && self.members_action == members_action
             && self.members_active == members_active
+            && self.show_threads == show_threads
         {
             return;
         }
@@ -303,6 +306,7 @@ impl ChatHeader {
         self.dm = dm;
         self.members_action = members_action;
         self.members_active = members_active;
+        self.show_threads = show_threads;
         cx.notify();
     }
 }
@@ -312,7 +316,7 @@ impl Render for ChatHeader {
         let theme = cx.theme();
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
-        let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
+        let show_threads = self.show_threads;
         let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
         });
@@ -328,9 +332,7 @@ impl Render for ChatHeader {
                 .read_with(cx, |layout, _| layout.thread_popover_handle.clone())
             && let Some(layout) = self.layout.upgrade()
         {
-            header = header
-                .layout(layout)
-                .thread_popover(thread_handle);
+            header = header.layout(layout).thread_popover(thread_handle);
         }
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);
@@ -370,10 +372,7 @@ impl Toggleable for ThreadPopoverTrigger {
 }
 
 impl Clickable for ThreadPopoverTrigger {
-    fn on_click(
-        mut self,
-        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(handler));
         self
     }
