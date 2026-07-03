@@ -1,9 +1,10 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, MouseDownEvent, ScrollHandle, SharedString, Window, div, point, prelude::*,
-    px,
+    FontWeight, Hsla, ListAlignment, ListState, MouseDownEvent, SharedString, Window, div, list,
+    prelude::*, px,
 };
 use mezon_store::{
     ClanMembersStore, MessageId, MessagesStore, PinnedMessage, PinnedMessagesStore, ProfileContext,
@@ -23,8 +24,11 @@ use crate::theme::{ActiveTheme, Theme};
 const POPOVER_WIDTH: f32 = 420.;
 const HEADER_HEIGHT: f32 = 48.;
 const MIN_BODY_HEIGHT: f32 = 144.;
+const LIST_BODY_HEIGHT: f32 = 520.;
+const LIST_OVERDRAW: f32 = 200.;
 const MAX_VH: f32 = 0.8;
 
+#[derive(Clone)]
 struct PinCardVm {
     pin_id: SharedString,
     message_id: SharedString,
@@ -54,7 +58,7 @@ impl PinCardVm {
 pub struct PinnedPopoverPanel {
     settings: Entity<Settings>,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
-    scroll: ScrollHandle,
+    list_state: ListState,
     focus_handle: FocusHandle,
     avatar_image_cache: Entity<LruImageCache>,
     pin_cards: Vec<PinCardVm>,
@@ -94,11 +98,12 @@ impl PinnedPopoverPanel {
         });
 
         let pin_cards = Self::compute_pin_cards(cx);
+        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
         Self {
             settings,
             popover_handle,
-            scroll: ScrollHandle::new(),
+            list_state,
             focus_handle,
             avatar_image_cache,
             pin_cards,
@@ -130,11 +135,27 @@ impl Render for PinnedPopoverPanel {
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let store = PinnedMessagesStore::global(cx);
+        let cards = Rc::new(self.pin_cards.clone());
         let loading = store.read(cx).is_loading();
+        let clan_id = store.read(cx).clan_id();
         let handle = self.popover_handle.clone();
-        let scroll = self.scroll.clone();
         let avatar_cache = self.avatar_image_cache.clone();
         let tokens = &theme.tokens;
+
+        if let Some(clan_id) = clan_id {
+            ClanMembersStore::global(cx).update(cx, |members, cx| {
+                members.ensure_loaded(clan_id, cx);
+            });
+        }
+
+        let current = self.list_state.item_count();
+        if cards.len() > current {
+            self.list_state
+                .splice(current..current, cards.len() - current);
+        } else if cards.len() < current {
+            self.list_state.reset(cards.len());
+        }
+        let list_state = self.list_state.clone();
 
         v_flex()
             .key_context("menu")
@@ -154,12 +175,12 @@ impl Render for PinnedPopoverPanel {
             .text_color(tokens.text_theme_message)
             .child(render_header(&theme, &locale))
             .child(render_body(
-                &self.pin_cards,
+                cards,
                 loading,
-                &theme,
-                &locale,
+                theme.clone(),
+                locale,
                 handle,
-                &scroll,
+                list_state,
                 avatar_cache,
                 window,
                 cx,
@@ -197,141 +218,91 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
 
 #[allow(clippy::too_many_arguments)]
 fn render_body(
-    cards: &[PinCardVm],
+    cards: Rc<Vec<PinCardVm>>,
     loading: bool,
-    theme: &Theme,
-    locale: &str,
+    theme: Arc<Theme>,
+    locale: String,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
-    scroll: &ScrollHandle,
+    list_state: ListState,
     avatar_cache: Entity<LruImageCache>,
     window: &mut Window,
     cx: &mut Context<PinnedPopoverPanel>,
 ) -> impl IntoElement {
     let tokens = &theme.tokens;
 
-    let content = if cards.is_empty() {
-        if loading {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size_full()
-                .min_h(px(MIN_BODY_HEIGHT))
-                .child(Spinner::new().with_size(Size::Small))
-                .into_any_element()
+    let viewport_h = f32::from(window.viewport_size().height);
+    let max_body = (viewport_h * MAX_VH - HEADER_HEIGHT).max(MIN_BODY_HEIGHT);
+    let estimated_content_h = if cards.is_empty() {
+        MIN_BODY_HEIGHT
+    } else {
+        (cards.len() as f32 * 88.) + 16.
+    };
+    let body_h = px(estimated_content_h.min(LIST_BODY_HEIGHT).min(max_body));
+
+    let body: gpui::AnyElement = if cards.is_empty() {
+        let inner = if loading {
+            Spinner::new().with_size(Size::Small).into_any_element()
         } else {
             div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size_full()
-                .min_h(px(MIN_BODY_HEIGHT))
                 .text_sm()
                 .text_color(tokens.text_secondary)
                 .child(mezon_i18n::t(
-                    locale,
+                    &locale,
                     "channelTopbar.pinnedMessages.emptyTitle",
                 ))
                 .into_any_element()
-        }
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .child(inner)
+            .into_any_element()
     } else {
-        v_flex()
-            .w_full()
-            .gap_2()
-            .py(px(8.))
-            .children(cards.iter().enumerate().map(|(index, vm)| {
-                pin_card(
-                    index,
-                    vm,
-                    theme,
-                    locale,
-                    popover_handle.clone(),
-                    avatar_cache.clone(),
-                )
-            }))
+        let cards_for_list = cards.clone();
+        let theme_for_list = theme.clone();
+        let locale_for_list = locale.clone();
+        let handle_for_list = popover_handle.clone();
+        let avatar_for_list = avatar_cache.clone();
+        div()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                list(list_state.clone(), move |ix, _window, _cx| {
+                    let Some(vm) = cards_for_list.get(ix) else {
+                        return div().into_any_element();
+                    };
+                    div()
+                        .w_full()
+                        .pt(if ix == 0 { px(8.) } else { px(0.) })
+                        .pb(px(8.))
+                        .child(pin_card(
+                            ix,
+                            vm,
+                            &theme_for_list,
+                            &locale_for_list,
+                            handle_for_list.clone(),
+                            avatar_for_list.clone(),
+                        ))
+                        .into_any_element()
+                })
+                .size_full(),
+            )
+            .custom_scrollbars(
+                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&list_state),
+                window,
+                cx,
+            )
             .into_any_element()
     };
 
-    let viewport_h = f32::from(window.viewport_size().height);
-    let max_body = px((viewport_h * MAX_VH - HEADER_HEIGHT).max(MIN_BODY_HEIGHT));
-
-    let scroll_body = div()
-        .id("pin-body")
+    div()
         .w_full()
-        .flex_1()
-        .min_h_0()
-        .pr(px(6.))
-        .overflow_y_scroll()
-        .track_scroll(scroll)
+        .h(body_h)
+        .overflow_hidden()
         .bg(tokens.theme_setting_primary)
-        .child(content)
-        .custom_scrollbars(
-            Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(scroll),
-            window,
-            cx,
-        );
-
-    let scrollable = f32::from(scroll.max_offset().y) > 0.5;
-    let mut body_children: Vec<gpui::AnyElement> = Vec::new();
-    if scrollable {
-        body_children.push(scroll_arrow("pin-scroll-up", "⌃", true, scroll, theme));
-    }
-    body_children.push(scroll_body.into_any_element());
-    if scrollable {
-        body_children.push(scroll_arrow("pin-scroll-down", "⌄", false, scroll, theme));
-    }
-
-    v_flex()
-        .w_full()
-        .min_h(px(MIN_BODY_HEIGHT))
-        .max_h(max_body)
-        .bg(tokens.theme_setting_primary)
-        .children(body_children)
-}
-
-fn scroll_arrow(
-    id: &'static str,
-    glyph: &'static str,
-    up: bool,
-    scroll: &ScrollHandle,
-    theme: &Theme,
-) -> gpui::AnyElement {
-    let tokens = &theme.tokens;
-    let handle = scroll.clone();
-    h_flex()
-        .w_full()
-        .h(px(13.))
-        .flex_shrink_0()
-        .justify_end()
-        .pr(px(2.))
-        .bg(tokens.theme_setting_primary)
-        .child(
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(13.))
-                .h(px(13.))
-                .text_size(px(8.))
-                .text_color(tokens.text_secondary)
-                .cursor_pointer()
-                .hover(|s| s.text_color(tokens.text_theme_primary))
-                .child(glyph)
-                .on_click(move |_: &ClickEvent, _window, _cx| {
-                    let off = handle.offset();
-                    let y = f32::from(off.y);
-                    let max_y = f32::from(handle.max_offset().y);
-                    const STEP: f32 = 64.;
-                    let new_y = if up {
-                        (y + STEP).min(0.)
-                    } else {
-                        (y - STEP).max(-max_y)
-                    };
-                    handle.set_offset(point(off.x, px(new_y)));
-                }),
-        )
-        .into_any_element()
+        .child(body)
 }
 
 fn resolve_pin_sender(

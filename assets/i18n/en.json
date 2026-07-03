@@ -3362,6 +3362,8 @@
   "notifications.empty.messages.description": "Open the Inbox by pressing CTRL+I, and mark your top message as read with CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Protip:",
   "notifications.empty.messages.title": "You're all caught up!",
+  "notifications.empty.topics.description": "When someone replies to a topic you're in, it will show up here.",
+  "notifications.empty.topics.title": "No topic updates yet",
   "notifications.inbox": "Inbox",
   "notifications.tabs.forYou": "For you",
   "notifications.tabs.mentions": "Mentions",
