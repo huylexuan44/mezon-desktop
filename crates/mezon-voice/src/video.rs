@@ -198,25 +198,47 @@ pub fn i420_to_bgra_into(
     if out.len() < needed {
         return;
     }
+    let cw = width / 2;
     for y in 0..height {
-        for x in 0..width {
-            let yi = y * stride_y + x;
-            let ui = (y / 2) * stride_u + (x / 2);
-            let vi = (y / 2) * stride_v + (x / 2);
-            if yi >= y_plane.len() || ui >= u_plane.len() || vi >= v_plane.len() {
-                continue;
-            }
-            let c = y_plane[yi] as i32 - 16;
-            let d = u_plane[ui] as i32 - 128;
-            let e = v_plane[vi] as i32 - 128;
-            let r = clamp_u8((298 * c + 409 * e + 128) >> 8);
-            let g = clamp_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
-            let b = clamp_u8((298 * c + 516 * d + 128) >> 8);
-            let o = (y * width + x) * 4;
-            out[o] = b;
-            out[o + 1] = g;
-            out[o + 2] = r;
-            out[o + 3] = 255;
+        let c_row = y / 2;
+        let y_start = y * stride_y;
+        let u_start = c_row * stride_u;
+        let v_start = c_row * stride_v;
+        if y_start + width > y_plane.len()
+            || u_start + cw > u_plane.len()
+            || v_start + cw > v_plane.len()
+        {
+            continue;
+        }
+        let y_row = &y_plane[y_start..y_start + width];
+        let u_row = &u_plane[u_start..u_start + cw];
+        let v_row = &v_plane[v_start..v_start + cw];
+        let out_start = y * width * 4;
+        let out_row = &mut out[out_start..out_start + cw * 8];
+
+        for (((out_px, y_px), &u), &v) in out_row
+            .chunks_exact_mut(8)
+            .zip(y_row.chunks_exact(2))
+            .zip(u_row)
+            .zip(v_row)
+        {
+            let d = u as i32 - 128;
+            let e = v as i32 - 128;
+            let r_off = 409 * e + 128;
+            let g_off = -100 * d - 208 * e + 128;
+            let b_off = 516 * d + 128;
+
+            let c0 = 298 * (y_px[0] as i32 - 16);
+            out_px[0] = clamp_u8((c0 + b_off) >> 8);
+            out_px[1] = clamp_u8((c0 + g_off) >> 8);
+            out_px[2] = clamp_u8((c0 + r_off) >> 8);
+            out_px[3] = 255;
+
+            let c1 = 298 * (y_px[1] as i32 - 16);
+            out_px[4] = clamp_u8((c1 + b_off) >> 8);
+            out_px[5] = clamp_u8((c1 + g_off) >> 8);
+            out_px[6] = clamp_u8((c1 + r_off) >> 8);
+            out_px[7] = 255;
         }
     }
 }
@@ -286,6 +308,68 @@ pub fn yuyv422_to_i420(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_i420_to_bgra(
+        y_plane: &[u8],
+        u_plane: &[u8],
+        v_plane: &[u8],
+        stride_y: usize,
+        stride_u: usize,
+        stride_v: usize,
+        width: usize,
+        height: usize,
+    ) -> Vec<u8> {
+        let mut out = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let c = y_plane[y * stride_y + x] as i32 - 16;
+                let d = u_plane[(y / 2) * stride_u + (x / 2)] as i32 - 128;
+                let e = v_plane[(y / 2) * stride_v + (x / 2)] as i32 - 128;
+                let o = (y * width + x) * 4;
+                out[o] = clamp_u8((298 * c + 516 * d + 128) >> 8);
+                out[o + 1] = clamp_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
+                out[o + 2] = clamp_u8((298 * c + 409 * e + 128) >> 8);
+                out[o + 3] = 255;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn i420_to_bgra_matches_reference() {
+        let width = 8usize;
+        let height = 6usize;
+        let stride_y = width + 3;
+        let cw = width / 2;
+        let ch = height / 2;
+        let stride_u = cw + 2;
+        let stride_v = cw + 1;
+
+        let y_plane: Vec<u8> = (0..stride_y * height)
+            .map(|i| (i * 7 % 256) as u8)
+            .collect();
+        let u_plane: Vec<u8> = (0..stride_u * ch).map(|i| (i * 13 % 256) as u8).collect();
+        let v_plane: Vec<u8> = (0..stride_v * ch).map(|i| (i * 29 % 256) as u8).collect();
+
+        let expected = reference_i420_to_bgra(
+            &y_plane, &u_plane, &v_plane, stride_y, stride_u, stride_v, width, height,
+        );
+
+        let mut actual = vec![0u8; width * height * 4];
+        i420_to_bgra_into(
+            &mut actual,
+            &y_plane,
+            &u_plane,
+            &v_plane,
+            stride_y,
+            stride_u,
+            stride_v,
+            width,
+            height,
+        );
+
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn take_new_moves_frame_out_and_clears() {

@@ -26,7 +26,8 @@ use crate::channel::{ChannelEvent, ChannelList, ChannelType};
 use crate::clan_members::ClanMembersStore;
 use crate::direct::DirectMessageStore;
 use crate::message::{
-    MentionTarget, Message, MessageAttachment, MessageCode, MessageReference, ViewerMedia,
+    MentionTarget, Message, MessageAttachment, MessageCode, MessageReference, OgpPreview,
+    PollAnswerView, PollData, PollDetail, PollLabelSegment, PollVoter, ViewerMedia,
     aggregate_reactions, apply_reaction_event, message_combined_with_prev, message_sort_key,
     parse_spans, reaction_key, recompute_message_grouping, rollback_reaction, sort_messages,
 };
@@ -440,6 +441,20 @@ pub struct MessagesStore {
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
     queued_last_seen: Vec<PendingLastSeen>,
+    /// Transient per-poll UI state (selected answers, results toggle, in-flight
+    /// vote), keyed by poll message id — mezon-react component-local state.
+    poll_ui: HashMap<MessageId, PollUiState>,
+    /// My submitted answer indices per poll (React `pollsSlice.myVote`), set from
+    /// `VotePollResponse.my_answer_indices`.
+    poll_my_vote: HashMap<MessageId, Vec<i32>>,
+}
+
+/// Transient UI state for a single poll card.
+#[derive(Debug, Default, Clone)]
+pub struct PollUiState {
+    pub selected: Vec<i32>,
+    pub show_results: bool,
+    pub voting: bool,
 }
 
 struct GlobalMessagesStore(Entity<MessagesStore>);
@@ -460,6 +475,34 @@ impl MessagesStore {
 
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.close(cx);
+        self.cache.clear();
+        self.last_message_by_channel.clear();
+        self.last_read_message_by_channel.clear();
+        self.viewing_older_by_channel.clear();
+        self.active_channel_id = None;
+        self.active_clan_id = None;
+        self.is_public = true;
+        self.is_dm = false;
+        self.mode = STREAM_MODE_CHANNEL;
+        self.loading = false;
+        self.loading_more = false;
+        self.last_load_more = None;
+        self.consecutive_loads = 0;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.reply_target = None;
+        self.editing = None;
+        self.joined_channels.clear();
+        self.pending_self_adds.clear();
+        self.pending_last_seen = None;
+        self.last_seen_fingerprint.clear();
+        self.queued_last_seen.clear();
+        self.poll_ui.clear();
+        self.poll_my_vote.clear();
+        cx.notify();
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -499,6 +542,8 @@ impl MessagesStore {
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
             queued_last_seen: Vec::new(),
+            poll_ui: HashMap::new(),
+            poll_my_vote: HashMap::new(),
         }
     }
 
@@ -590,7 +635,7 @@ impl MessagesStore {
     /// cap. `old_len` is the buffer length before the push.
     fn emit_appended(&mut self, old_len: usize, cx: &mut Context<Self>) {
         let new_len = self.messages().len();
-        if new_len <= old_len {
+        if new_len < old_len {
             cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
             return;
@@ -820,6 +865,7 @@ impl MessagesStore {
                     "write_last_seen_message failed: {e}"
                 );
                 this.update(cx, |this, _| {
+                    this.last_seen_fingerprint.remove(&ChannelId(channel_id));
                     this.queued_last_seen.push(PendingLastSeen {
                         clan_id: ClanId(clan_id),
                         channel_id: ChannelId(channel_id),
@@ -1569,7 +1615,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send_channel_message failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, temp_id, cx);
+                        this.mark_temp_failed(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1651,7 +1697,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send sticker failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.remove_temp(channel_id, temp_id, cx);
+                        this.mark_temp_failed(channel_id, temp_id, cx);
                     });
                 }
             }
@@ -1913,6 +1959,16 @@ impl MessagesStore {
                     return;
                 }
                 if self.is_viewing_older(storage_id) {
+                    self.set_last_message(parent_id, message_id);
+                    return;
+                }
+                let tail_loaded = self.cache.get(&storage_id).is_some_and(|channel| {
+                    !has_more_bottom_for(
+                        self.last_message_by_channel.get(&storage_id).copied(),
+                        &channel.messages,
+                    )
+                });
+                if !tail_loaded {
                     self.set_last_message(parent_id, message_id);
                     return;
                 }
@@ -2191,6 +2247,140 @@ impl MessagesStore {
         cx.notify();
     }
 
+    pub fn active_message(&self, message_id: MessageId) -> Option<&Message> {
+        let channel_id = self.active_channel_id?;
+        self.cache.get(&channel_id)?.messages.get_by_id(message_id)
+    }
+
+    pub fn poll_ui_state(&self, message_id: MessageId) -> Option<&PollUiState> {
+        self.poll_ui.get(&message_id)
+    }
+
+    pub fn poll_my_vote(&self, message_id: MessageId) -> Option<&[i32]> {
+        self.poll_my_vote.get(&message_id).map(Vec::as_slice)
+    }
+
+    pub fn toggle_poll_answer(
+        &mut self,
+        message_id: MessageId,
+        index: i32,
+        allow_multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.poll_ui.entry(message_id).or_default();
+        if allow_multiple {
+            if let Some(pos) = state.selected.iter().position(|&i| i == index) {
+                state.selected.remove(pos);
+            } else {
+                state.selected.push(index);
+            }
+        } else {
+            state.selected = vec![index];
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_poll_results(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let state = self.poll_ui.entry(message_id).or_default();
+        state.show_results = !state.show_results;
+        cx.notify();
+    }
+
+    pub fn submit_poll_vote(
+        &mut self,
+        poll_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .poll_ui
+            .get(&message_id)
+            .map(|s| s.selected.clone())
+            .unwrap_or_default();
+        if selected.is_empty() {
+            return;
+        }
+        self.send_poll_vote(poll_id, message_id, selected, cx);
+    }
+
+    pub fn remove_poll_vote(
+        &mut self,
+        poll_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_poll_vote(poll_id, message_id, Vec::new(), cx);
+    }
+
+    fn send_poll_vote(
+        &mut self,
+        poll_id: i64,
+        message_id: MessageId,
+        answer_indices: Vec<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        self.poll_ui.entry(message_id).or_default().voting = true;
+        cx.notify();
+        let api = self.api.clone();
+        let cid = channel_id.get();
+        let mid = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let result = api.vote_poll(poll_id, mid, cid, answer_indices).await;
+            let _ = this.update(cx, |store, cx| {
+                if let Some(state) = store.poll_ui.get_mut(&message_id) {
+                    state.voting = false;
+                    state.selected.clear();
+                    state.show_results = false;
+                }
+                match result {
+                    Ok(resp) => {
+                        store
+                            .poll_my_vote
+                            .insert(message_id, resp.my_answer_indices);
+                    }
+                    Err(e) => tracing::error!("vote_poll failed: {e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn close_poll(&mut self, poll_id: i64, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.active_channel_id else {
+            return;
+        };
+        let api = self.api.clone();
+        let cid = channel_id.get();
+        let mid = message_id.get();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api.close_poll(poll_id, mid, cid).await {
+                tracing::error!("close_poll failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn fetch_poll_detail(
+        &self,
+        poll_id: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<PollDetail>> {
+        let api = self.api.clone();
+        let cid = self.active_channel_id.map_or(0, |c| c.get());
+        let clan_id = self.active_clan_id.unwrap_or(ClanId(0));
+        let mid = message_id.get();
+        cx.spawn(async move |this, cx| {
+            let resp = api.get_poll(poll_id, mid, cid).await?;
+            let detail = this.update(cx, |_store, cx| map_poll_detail(&resp, clan_id, cx))?;
+            Ok(detail)
+        })
+    }
+
     fn handle_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::MessageReaction(r) = event else {
             return;
@@ -2303,20 +2493,26 @@ impl MessagesStore {
         }
     }
 
-    fn remove_temp(&mut self, channel_id: ChannelId, temp_id: MessageId, cx: &mut Context<Self>) {
-        let removed = {
+    fn mark_temp_failed(
+        &mut self,
+        channel_id: ChannelId,
+        temp_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let marked = {
             let Some(channel) = self.cache.get_mut(&channel_id) else {
                 return;
             };
-            channel.messages.remove_id(temp_id)
+            match channel.messages.get_mut_by_id(temp_id) {
+                Some(message) => {
+                    message.send_failed = true;
+                    true
+                }
+                None => false,
+            }
         };
-        if removed && self.active_channel_id == Some(channel_id) {
-            cx.emit(MessagesEvent::Shifted {
-                added_top: 0,
-                removed_top: 0,
-                added_bottom: 0,
-                removed_bottom: 1,
-            });
+        if marked && self.active_channel_id == Some(channel_id) {
+            cx.emit(MessagesEvent::Updated { message_id: None });
             cx.notify();
         }
     }
@@ -2495,7 +2691,15 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.references = incoming.references.clone();
     existing.update_time = incoming.update_time;
     existing.is_edited = incoming.is_edited;
-    existing.code = MessageCode::Chat;
+    existing.ogp = incoming.ogp.clone();
+    if incoming.poll.is_some() {
+        existing.poll = incoming.poll.clone();
+    }
+    existing.code = if existing.poll.is_some() {
+        MessageCode::Poll
+    } else {
+        MessageCode::Chat
+    };
 }
 
 fn patch_reply_previews_after_update(
@@ -2729,6 +2933,10 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         .map(|a| MessageAttachment::from_api(a, cfg))
         .collect();
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
+    let is_forwarded = m.content_tokens.fwd;
+    let ogp = build_ogp_preview(&m.content_tokens, cfg);
+    let code = MessageCode::from_raw(m.code);
+    let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
     if !mention_targets.is_empty() {
         tracing::debug!(
             message_id = m.message_id,
@@ -2747,16 +2955,219 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>) -> Message {
         m.sender_name,
         m.create_time,
     )
-    .with_code(MessageCode::from_raw(m.code))
+    .with_code(code)
     .with_spans(spans)
     .with_mention_targets(mention_targets)
     .with_references(references)
     .with_reactions(reactions)
     .with_edited(m.update_time, m.hide_editted)
+    .with_forwarded(is_forwarded)
+    .with_ogp(ogp)
+    .with_poll(poll)
     .with_avatar(m.avatar)
     .with_avatar_proxied(avatar_proxied)
     .with_attachments(attachments)
     .with_media_presentation(album_layout, viewer_media)
+}
+
+fn map_poll_detail(
+    resp: &mezon_proto::api::GetPollResponse,
+    clan_id: ClanId,
+    cx: &App,
+) -> PollDetail {
+    let members_entity = ClanMembersStore::global(cx);
+    let members = members_entity.read(cx);
+    let cfg = AppConfig::try_global(cx);
+    let answer_count = resp.answers.len().max(resp.answer_counts.len());
+    let mut voters_by_answer: Vec<Vec<PollVoter>> = vec![Vec::new(); answer_count];
+    for detail in &resp.voter_details {
+        let idx = detail.answer_index.max(0) as usize;
+        let Some(slot) = voters_by_answer.get_mut(idx) else {
+            continue;
+        };
+        for &uid in &detail.user_ids {
+            let user_id = UserId(uid);
+            let voter = match members.member(clan_id, user_id) {
+                Some(member) => {
+                    let avatar = member.avatar();
+                    let avatar_proxied = cfg
+                        .map(|c| c.avatar_proxy(avatar))
+                        .unwrap_or_else(|| avatar.to_string());
+                    PollVoter {
+                        user_id,
+                        display_name: member.name().to_string().into(),
+                        username: member.user.username.clone().into(),
+                        avatar_proxied: avatar_proxied.into(),
+                    }
+                }
+                None => PollVoter {
+                    user_id,
+                    display_name: uid.to_string().into(),
+                    username: SharedString::default(),
+                    avatar_proxied: SharedString::default(),
+                },
+            };
+            slot.push(voter);
+        }
+    }
+    PollDetail {
+        total_votes: resp.total_votes,
+        answer_counts: resp.answer_counts.clone(),
+        voters_by_answer,
+    }
+}
+
+fn build_ogp_preview(content: &ApiMessageContent, cfg: Option<&AppConfig>) -> Option<OgpPreview> {
+    let token = content.mk.iter().find(|tok| {
+        tok.kind.as_deref() == Some("lk_ogp")
+            && tok
+                .url
+                .as_deref()
+                .is_some_and(|url| !url.to_ascii_lowercase().contains("/invite/"))
+    })?;
+    let url = token.url.clone().unwrap_or_default();
+    if url.is_empty() {
+        return None;
+    }
+    let image = token.image.as_deref().unwrap_or_default();
+    let image_proxied = cfg
+        .map(|c| c.imgproxy_url(image, 350, 200, "fit"))
+        .unwrap_or_else(|| image.to_string());
+    Some(OgpPreview {
+        url,
+        title: token.title.clone().unwrap_or_default().into(),
+        description: token.description.clone().unwrap_or_default().into(),
+        image_proxied: image_proxied.into(),
+    })
+}
+
+fn poll_label_segments(label: &str, cfg: Option<&AppConfig>) -> Vec<PollLabelSegment> {
+    let mut segments = Vec::new();
+    let mut rest = label;
+    while let Some(start) = rest.find("[e:") {
+        if start > 0 {
+            segments.push(PollLabelSegment::Text(rest[..start].into()));
+        }
+        let after = &rest[start + 3..];
+        let Some(end) = after.find(']') else {
+            segments.push(PollLabelSegment::Text(rest[start..].into()));
+            return segments;
+        };
+        let emoji_id = &after[..end];
+        let src = cfg.map(|c| c.emoji_src(emoji_id)).unwrap_or_default();
+        segments.push(PollLabelSegment::Emoji(src.into()));
+        rest = &after[end + 1..];
+    }
+    if !rest.is_empty() {
+        segments.push(PollLabelSegment::Text(rest.into()));
+    }
+    segments
+}
+
+fn build_poll_data(
+    content: &ApiMessageContent,
+    text: &str,
+    cfg: Option<&AppConfig>,
+) -> Option<PollData> {
+    let (question, raw_answers, allow_multiple) =
+        if content.question.is_some() || !content.answers.is_empty() {
+            let answers: Vec<(Option<i64>, String)> = content
+                .answers
+                .iter()
+                .map(|a| (a.index, a.label.clone()))
+                .collect();
+            (
+                content.question.clone().unwrap_or_default(),
+                answers,
+                content.poll_type == Some(1),
+            )
+        } else {
+            let parsed = parse_poll_markdown(text)?;
+            let answers = parsed.answers.into_iter().map(|l| (None, l)).collect();
+            (parsed.question, answers, parsed.allow_multiple)
+        };
+    if raw_answers.is_empty() {
+        return None;
+    }
+    let answers: Vec<PollAnswerView> = raw_answers
+        .into_iter()
+        .enumerate()
+        .map(|(i, (index, label))| PollAnswerView {
+            index: index.map(|v| v as i32).unwrap_or(i as i32),
+            segments: poll_label_segments(&label, cfg),
+            label: label.into(),
+        })
+        .collect();
+    let answer_counts = normalise_answer_counts(&content.answer_counts, answers.len());
+    let total_votes = content
+        .total_votes
+        .unwrap_or_else(|| answer_counts.iter().sum());
+    let percentages = answer_counts
+        .iter()
+        .map(|&count| poll_percentage(count, total_votes))
+        .collect();
+    Some(PollData {
+        poll_id: content.poll_id.unwrap_or(0),
+        question: question.into(),
+        answers,
+        answer_counts,
+        total_votes,
+        percentages,
+        expire_at: content.expire_at,
+        is_closed: content.is_closed,
+        allow_multiple,
+    })
+}
+
+fn normalise_answer_counts(counts: &[i32], len: usize) -> Vec<i32> {
+    let mut out = vec![0; len];
+    for (slot, &count) in out.iter_mut().zip(counts.iter()) {
+        *slot = count.max(0);
+    }
+    out
+}
+
+fn poll_percentage(count: i32, total: i32) -> u8 {
+    if total <= 0 {
+        return 0;
+    }
+    ((count.max(0) as f64 / total as f64) * 100.0).round() as u8
+}
+
+struct ParsedPollMarkdown {
+    question: String,
+    answers: Vec<String>,
+    allow_multiple: bool,
+}
+
+fn parse_poll_markdown(text: &str) -> Option<ParsedPollMarkdown> {
+    if !text.starts_with('📊') {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let question = lines
+        .first()
+        .map(|l| l.replace('📊', "").replace("**", "").trim().to_string())
+        .unwrap_or_default();
+    let mut answers = Vec::new();
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if let Some(dot) = trimmed.find('.')
+            && trimmed[..dot].chars().all(|c| c.is_ascii_digit())
+            && dot > 0
+        {
+            let answer = trimmed[dot + 1..].trim();
+            if !answer.is_empty() {
+                answers.push(answer.to_string());
+            }
+        }
+    }
+    let allow_multiple = text.contains("☑️ Multiple answers allowed");
+    Some(ParsedPollMarkdown {
+        question,
+        answers,
+        allow_multiple,
+    })
 }
 
 fn build_media_presentation(
@@ -2774,7 +3185,7 @@ fn build_media_presentation(
         .iter()
         .map(|a| {
             let viewer_src = cfg
-                .map(|c| c.imgproxy_url(&a.url, 0, 0, "force"))
+                .map(|c| c.imgproxy_url(&a.url, 1600, 900, "fit"))
                 .unwrap_or_else(|| a.url.clone());
             ViewerMedia {
                 url: a.url.clone().into(),
@@ -2870,6 +3281,79 @@ mod tests {
     use super::*;
     use crate::ids::UserId;
     use crate::message::MessageSpan;
+
+    #[test]
+    fn poll_percentage_rounds_ratio_and_guards_zero_total() {
+        assert_eq!(poll_percentage(1, 4), 25);
+        assert_eq!(poll_percentage(1, 3), 33);
+        assert_eq!(poll_percentage(2, 3), 67);
+        assert_eq!(poll_percentage(0, 0), 0);
+        assert_eq!(poll_percentage(-5, 10), 0);
+    }
+
+    #[test]
+    fn normalise_answer_counts_pads_and_clamps_negatives() {
+        assert_eq!(normalise_answer_counts(&[5, -2], 3), vec![5, 0, 0]);
+        assert_eq!(normalise_answer_counts(&[1, 2, 3], 2), vec![1, 2]);
+    }
+
+    #[test]
+    fn parse_poll_markdown_extracts_question_answers_and_multiple_flag() {
+        let text = "📊 **Favourite colour?**\n1. Red\n2. Blue\n☑️ Multiple answers allowed";
+        let parsed = parse_poll_markdown(text).expect("poll markdown");
+        assert_eq!(parsed.question, "Favourite colour?");
+        assert_eq!(parsed.answers, vec!["Red".to_string(), "Blue".to_string()]);
+        assert!(parsed.allow_multiple);
+    }
+
+    #[test]
+    fn parse_poll_markdown_rejects_non_poll_text() {
+        assert!(parse_poll_markdown("just a normal message").is_none());
+    }
+
+    #[test]
+    fn build_poll_data_from_structured_content_computes_percentages() {
+        let content = ApiMessageContent {
+            question: Some("Q?".into()),
+            answers: vec![
+                mezon_client::transport::ApiPollAnswer {
+                    index: Some(0),
+                    label: "A".into(),
+                },
+                mezon_client::transport::ApiPollAnswer {
+                    index: Some(1),
+                    label: "B".into(),
+                },
+            ],
+            answer_counts: vec![3, 1],
+            total_votes: Some(4),
+            poll_id: Some(77),
+            poll_type: Some(1),
+            ..Default::default()
+        };
+        let poll = build_poll_data(&content, "", None).expect("poll data");
+        assert_eq!(poll.poll_id, 77);
+        assert_eq!(poll.total_votes, 4);
+        assert_eq!(poll.percentages, vec![75, 25]);
+        assert_eq!(poll.answer_counts, vec![3, 1]);
+        assert_eq!(poll.answers.len(), 2);
+        assert!(poll.allow_multiple);
+    }
+
+    #[test]
+    fn build_poll_data_falls_back_to_markdown_content() {
+        let text = "📊 Pick one\n1. Yes\n2. No";
+        let poll =
+            build_poll_data(&ApiMessageContent::default(), text, None).expect("markdown poll");
+        assert_eq!(poll.question, "Pick one");
+        assert_eq!(poll.answers.len(), 2);
+        assert!(!poll.allow_multiple);
+    }
+
+    #[test]
+    fn build_poll_data_none_without_answers() {
+        assert!(build_poll_data(&ApiMessageContent::default(), "no poll here", None).is_none());
+    }
 
     #[test]
     fn channel_join_params_thread_by_type_joins_as_thread() {
@@ -3259,8 +3743,6 @@ mod tests {
             Message::new(MessageId(100), "first", "u9", "Me", 200),
             Message::new(MessageId(101), "second", "u9", "Me", 201),
         ]);
-        // Server echo of the second message: a fresh row (so `combined_with_prev`
-        // defaults to false) with a sparse "0" sender, same id as the existing row.
         let echo = Message::new(MessageId(101), "second", "0", "", 201);
         assert!(list.merge_existing(MessageId(101), echo));
         assert!(

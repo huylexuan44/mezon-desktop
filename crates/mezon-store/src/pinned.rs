@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, Global, SharedString, Subscription};
+use gpui::{App, AppContext, Context, Entity, Global, SharedString, Subscription, Task};
 use mezon_client::AppApi;
+use mezon_client::ConnectionStatus;
 use mezon_client::RealtimeEvent;
 use mezon_client::transport::ApiPinMessage;
 use mezon_proto::realtime::LastPinMessageEvent;
@@ -32,6 +33,7 @@ pub struct PinnedMessagesStore {
     loading: bool,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
+    _conn_watch: Task<()>,
 }
 
 struct GlobalPinnedMessagesStore(Entity<PinnedMessagesStore>);
@@ -53,6 +55,15 @@ impl PinnedMessagesStore {
             .map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.channel_id = None;
+        self.clan_id = None;
+        self.messages.clear();
+        self.loaded_channel = None;
+        self.loading = false;
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -61,6 +72,7 @@ impl PinnedMessagesStore {
                 this.on_active_channel_changed(*channel_id, cx);
             }
         });
+        let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         let mut store = Self {
             channel_id: None,
             clan_id: None,
@@ -69,6 +81,7 @@ impl PinnedMessagesStore {
             loading: false,
             api,
             _channel_sub: channel_sub,
+            _conn_watch: conn_watch,
         };
         if let Some(channel) = ChannelList::global(cx).read(cx).active_channel() {
             store.channel_id = Some(channel.id.to_string());
@@ -92,6 +105,27 @@ impl PinnedMessagesStore {
                 }
             });
         });
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
+                }
+            }
+        })
     }
 
     pub fn pinned(&self) -> &[PinnedMessage] {

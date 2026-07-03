@@ -15,6 +15,8 @@ use tokio::runtime::Runtime;
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<ReqwestClient> = OnceLock::new();
 
+const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) fn http_client() -> &'static ReqwestClient {
     HTTP_CLIENT.get_or_init(new_http_client)
 }
@@ -53,45 +55,80 @@ pub async fn put_bytes_to_content_type(
     data: Vec<u8>,
     content_type: &str,
 ) -> Result<()> {
-    let client = http_client();
-    let request = http::Request::builder()
-        .method(http::Method::PUT)
-        .uri(url)
-        .header("Content-Type", content_type)
-        .body(AsyncBody::from(data))?;
-    let response = client.send(request).await?;
-    let status = response.status();
-    if !status.is_success() {
-        anyhow::bail!("HTTP PUT failed with status {}", status);
-    }
-    Ok(())
+    tracing::debug!("put_bytes_to_content_type: PUTting {} bytes", data.len());
+    let url = url.to_string();
+    let content_type = content_type.to_string();
+    runtime()
+        .spawn(async move {
+            let request = http::Request::builder()
+                .method(http::Method::PUT)
+                .uri(&url)
+                .header("Content-Type", content_type)
+                .body(AsyncBody::from(data))?;
+            let response =
+                match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, http_client().send(request)).await
+                {
+                    Ok(result) => result?,
+                    Err(_) => anyhow::bail!(
+                        "HTTP PUT timed out after {}s",
+                        HTTP_REQUEST_TIMEOUT.as_secs()
+                    ),
+                };
+            let status = response.status();
+            tracing::debug!("put_bytes_to_content_type: response status={}", status);
+            if !status.is_success() {
+                tracing::error!(
+                    "put_bytes_to_content_type: HTTP PUT failed with status {}",
+                    status
+                );
+                anyhow::bail!("HTTP PUT failed with status {}", status);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("upload task failed: {e}"))?
 }
 
 const MAX_FETCH_BYTES: u64 = 64 * 1024 * 1024;
 
 pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
-    let client = http_client();
-    let request = http::Request::builder()
-        .method(http::Method::GET)
-        .uri(url)
-        .body(AsyncBody::empty())?;
-    let mut response = client.send(request).await?;
-    let status = response.status();
-    if !status.is_success() {
-        anyhow::bail!("HTTP GET failed with status {}", status);
-    }
-    let content_type = response
-        .headers()
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut limited = response.body_mut().take(MAX_FETCH_BYTES + 1);
-    limited.read_to_end(&mut bytes).await?;
-    if bytes.len() as u64 > MAX_FETCH_BYTES {
-        anyhow::bail!("response exceeds {MAX_FETCH_BYTES}-byte cap");
-    }
-    Ok((bytes, content_type))
+    let url = url.to_string();
+    runtime()
+        .spawn(async move {
+            let request = http::Request::builder()
+                .method(http::Method::GET)
+                .uri(&url)
+                .body(AsyncBody::empty())?;
+            match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, async move {
+                let mut response = http_client().send(request).await?;
+                let status = response.status();
+                if !status.is_success() {
+                    anyhow::bail!("HTTP GET failed with status {}", status);
+                }
+                let content_type = response
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut limited = response.body_mut().take(MAX_FETCH_BYTES + 1);
+                limited.read_to_end(&mut bytes).await?;
+                if bytes.len() as u64 > MAX_FETCH_BYTES {
+                    anyhow::bail!("response exceeds {MAX_FETCH_BYTES}-byte cap");
+                }
+                Ok((bytes, content_type))
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!(
+                    "HTTP GET timed out after {}s",
+                    HTTP_REQUEST_TIMEOUT.as_secs()
+                ),
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch task failed: {e}"))?
 }
 
 pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
@@ -662,6 +699,19 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn list_user_online(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ListUserOnlineResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.list_user_online(clan_id, limit, page).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn list_roles(
         &self,
         clan_id: i64,
@@ -1035,6 +1085,45 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.remove_channel_favorite(channel_id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn vote_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+        answer_indices: Vec<i32>,
+    ) -> Result<mezon_proto::api::VotePollResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .vote_poll(poll_id, message_id, channel_id, answer_indices)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::GetPollResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_poll(poll_id, message_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn close_poll(&self, poll_id: i64, message_id: i64, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.close_poll(poll_id, message_id, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

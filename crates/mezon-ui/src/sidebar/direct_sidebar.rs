@@ -14,6 +14,7 @@ use crate::theme::{ActiveTheme, Theme};
 
 const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 
+#[derive(PartialEq)]
 struct DmItem {
     channel_id: ChannelId,
     id: SharedString,
@@ -29,37 +30,33 @@ pub struct DirectSidebar {
     settings: Entity<Settings>,
     list_scroll: UniformListScrollHandle,
     dm_items: Rc<Vec<DmItem>>,
+    pending_rebuild: bool,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
     _hover_release_task: Option<Task<()>>,
 }
 
+fn is_dm_route(cx: &App) -> bool {
+    matches!(
+        Router::global(cx).read(cx).route(),
+        Route::Direct | Route::DirectMessage { .. } | Route::Friends
+    )
+}
+
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
-    let raw: Vec<(ChannelId, String, DirectKind, bool, bool, String)> = store
-        .channels()
-        .iter()
-        .map(|ch| {
-            (
-                ch.id,
-                ch.label.clone(),
-                ch.kind,
-                ch.is_unread(),
-                ch.online,
-                ch.avatar.clone(),
-            )
-        })
-        .collect();
     Rc::new(
-        raw.into_iter()
-            .map(|(channel_id, label, kind, unread, online, avatar)| DmItem {
-                channel_id,
-                id: SharedString::from(channel_id.to_string()),
-                label: SharedString::from(label),
-                kind,
-                unread,
-                online,
-                avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar)),
-                avatar_raw: SharedString::from(avatar),
+        store
+            .channels()
+            .iter()
+            .map(|ch| DmItem {
+                channel_id: ch.id,
+                id: SharedString::from(ch.id.to_string()),
+                label: SharedString::from(ch.label.clone()),
+                kind: ch.kind,
+                unread: ch.is_unread(),
+                online: ch.online,
+                avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
+                avatar_raw: SharedString::from(ch.avatar.clone()),
             })
             .collect(),
     )
@@ -70,12 +67,26 @@ impl DirectSidebar {
         let direct_store = DirectMessageStore::global(cx);
 
         cx.observe(&direct_store, |this, store, cx| {
-            this.dm_items = build_dm_items(store.read(cx), cx);
+            if is_dm_route(cx) {
+                let items = build_dm_items(store.read(cx), cx);
+                if this.dm_items != items {
+                    this.dm_items = items;
+                    cx.notify();
+                }
+            } else {
+                this.pending_rebuild = true;
+            }
+        })
+        .detach();
+        cx.observe(&Router::global(cx), |this, _, cx| {
+            if this.pending_rebuild && is_dm_route(cx) {
+                this.pending_rebuild = false;
+                let store = DirectMessageStore::global(cx);
+                this.dm_items = build_dm_items(store.read(cx), cx);
+            }
             cx.notify();
         })
         .detach();
-        cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
-            .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let dm_items = build_dm_items(direct_store.read(cx), cx);
@@ -84,6 +95,7 @@ impl DirectSidebar {
             settings,
             list_scroll: UniformListScrollHandle::new(),
             dm_items,
+            pending_rebuild: false,
             suppress_hover: false,
             last_scroll_at: None,
             _hover_release_task: None,
@@ -168,7 +180,7 @@ impl DirectSidebar {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_base()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(locale, "directMessage.friends")),

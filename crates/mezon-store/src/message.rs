@@ -1,8 +1,3 @@
-//! Message domain model — the native counterpart of React's `messages.slice`
-//! message entity and its derived helpers. Kept separate from `channel.rs`
-//! (which mirrors `channel.slice`) so message logic does not leak into the
-//! channel module.
-
 use std::sync::Arc;
 
 use gpui::SharedString;
@@ -81,8 +76,6 @@ pub fn tenor_mp4_url(gif_url: &str) -> Option<String> {
     ))
 }
 
-/// Message type/category, mirroring React `TypeMessage`. Drives how a row is
-/// rendered by the UI dispatcher (normal chat vs system vs welcome, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageCode {
     Chat,
@@ -133,7 +126,6 @@ impl MessageCode {
         }
     }
 
-    /// True for codes rendered by `MessageWithSystem` in React (icon + text row).
     pub fn is_system(self) -> bool {
         matches!(
             self,
@@ -145,7 +137,6 @@ impl MessageCode {
         )
     }
 
-    /// Rows rendered by React `MessageWithUser` (eligible for `isCombine`).
     pub fn is_user_timeline(self) -> bool {
         !matches!(
             self,
@@ -170,17 +161,12 @@ pub struct MessageReference {
     pub has_attachment: bool,
 }
 
-/// A single reacting user and how many times they reacted with an emoji
-/// (cf. React `SenderInfoOptionals`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReactionSender {
     pub sender_id: String,
     pub count: u32,
 }
 
-/// An aggregated emoji reaction (grouped by emoji across all reacting users).
-/// `emoji_proxied`/`count`/`count_label` are derived fields refreshed via
-/// `refresh` on every mutation so the render path does no per-frame work.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {
     /// Aggregation key (emoji id when present, else shortname).
@@ -283,6 +269,61 @@ pub enum MessageSpan {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OgpPreview {
+    pub url: String,
+    pub title: SharedString,
+    pub description: SharedString,
+    pub image_proxied: SharedString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollLabelSegment {
+    Text(SharedString),
+    Emoji(SharedString),
+}
+
+#[derive(Debug, Clone)]
+pub struct PollAnswerView {
+    pub index: i32,
+    pub label: SharedString,
+    pub segments: Vec<PollLabelSegment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollData {
+    pub poll_id: i64,
+    pub question: SharedString,
+    pub answers: Vec<PollAnswerView>,
+    pub answer_counts: Vec<i32>,
+    pub total_votes: i32,
+    pub percentages: Vec<u8>,
+    pub expire_at: Option<i64>,
+    pub is_closed: bool,
+    pub allow_multiple: bool,
+}
+
+impl PollData {
+    pub fn is_expired(&self, now_secs: i64) -> bool {
+        self.expire_at.is_some_and(|exp| exp > 0 && exp < now_secs)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PollVoter {
+    pub user_id: UserId,
+    pub display_name: SharedString,
+    pub username: SharedString,
+    pub avatar_proxied: SharedString,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollDetail {
+    pub total_votes: i32,
+    pub answer_counts: Vec<i32>,
+    pub voters_by_answer: Vec<Vec<PollVoter>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
@@ -302,8 +343,12 @@ pub struct Message {
     pub code: MessageCode,
     pub is_edited: bool,
     pub is_forwarded: bool,
+    pub show_forwarded_label: bool,
     pub combined_with_prev: bool,
     pub highlights_viewer_direct: bool,
+    pub send_failed: bool,
+    pub ogp: Option<OgpPreview>,
+    pub poll: Option<PollData>,
     pub spans: Vec<MessageSpan>,
     pub mention_targets: Vec<MentionTarget>,
     pub references: Vec<MessageReference>,
@@ -322,8 +367,6 @@ pub struct ViewerMedia {
 
 pub const COMBINE_TIME_WINDOW: i64 = 600;
 
-/// Whether two rows are from the same author (React `message.user.id` parity).
-/// Treats ack rows with `sender_id == "0"` as matching when the resolved user id agrees.
 pub fn same_message_sender(a: &Message, b: &Message) -> bool {
     if let (Some(au), Some(bu)) = (resolved_sender_user_id(a), resolved_sender_user_id(b))
         && au == bu
@@ -349,7 +392,6 @@ fn resolved_sender_user_id(m: &Message) -> Option<UserId> {
         .map(UserId)
 }
 
-/// Mirrors React `ChannelMessage.tsx` `isCombine` against the immediate previous row.
 pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool {
     if !msg.code.is_user_timeline() {
         return false;
@@ -364,7 +406,6 @@ pub fn message_combined_with_prev(prev: Option<&Message>, msg: &Message) -> bool
     same_message_sender(prev, msg) && delta < COMBINE_TIME_WINDOW
 }
 
-/// Mirrors React `MessageWithUser` `showMessageHead`.
 pub fn should_show_message_head(msg: &Message, is_combine: bool) -> bool {
     !msg.references.is_empty() || !is_combine
 }
@@ -435,8 +476,6 @@ fn mention_user_id_targets_viewer(uid: &str, viewer_id: UserId) -> bool {
             || uid.parse::<i64>().ok().map(UserId) == Some(viewer_id))
 }
 
-/// Aggregate raw per-user reaction entries into per-emoji totals (cf. React
-/// `combineMessageReactions`).
 pub fn aggregate_reactions(raw: &[ApiMessageReaction], cfg: Option<&AppConfig>) -> Vec<Reaction> {
     let mut out: Vec<Reaction> = Vec::new();
     for r in raw {
@@ -469,9 +508,6 @@ pub fn aggregate_reactions(raw: &[ApiMessageReaction], cfg: Option<&AppConfig>) 
     out
 }
 
-/// Apply a single realtime reaction add/remove to a message's aggregated
-/// reaction list (cf. React reaction socket handling). `removed` mirrors the
-/// proto `action` flag.
 pub fn apply_reaction_event(
     reactions: &mut Vec<Reaction>,
     emoji_id: &str,
@@ -511,7 +547,6 @@ pub fn apply_reaction_event(
     }
 }
 
-/// Undo one optimistic reaction after a failed send (cf. `send_message` rollback).
 pub fn rollback_reaction(
     reactions: &mut Vec<Reaction>,
     emoji_id: &str,
@@ -542,8 +577,6 @@ pub fn rollback_reaction(
     }
 }
 
-/// Parse a message's content tokens into ordered, non-overlapping inline spans
-/// (mirrors React `MessageLine` token interleaving).
 pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     let text = &content.t;
     if text.is_empty() {
@@ -651,6 +684,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                             url,
                         });
                     }
+                    "lk_ogp" => {}
                     _ => spans.push(MessageSpan::Text(inner.into())),
                 }
             }
@@ -675,24 +709,31 @@ fn strip_marker(s: &str, marker: &str) -> String {
 pub fn recompute_message_grouping(messages: &mut [Message]) {
     for i in 0..messages.len() {
         let prev = if i > 0 { Some(&messages[i - 1]) } else { None };
-        messages[i].combined_with_prev = message_combined_with_prev(prev, &messages[i]);
+        let combined = message_combined_with_prev(prev, &messages[i]);
+        let show_forwarded_label = compute_show_forwarded_label(prev, &messages[i]);
+        messages[i].combined_with_prev = combined;
+        messages[i].show_forwarded_label = show_forwarded_label;
     }
 }
 
-/// Ordering key mirroring React `orderMessageByIDAscending` (`messages.slice.ts`
-/// `sortComparer`): the `FIRST_MESSAGE` sentinel (mapped to
-/// [`MessageCode::Indicator`]) always sorts first, then by numeric (Snowflake)
-/// id ascending. Snowflake ids are monotonic in time, so this is stable and
-/// sub-second accurate — unlike `create_time`, which has only second
-/// granularity and can mis-order (and pick the wrong newest/oldest anchor for
-/// pagination). Optimistic ids occupy the high band (>= `MessageId::OPTIMISTIC_BASE`)
-/// so they sort last — they are the just-sent, pending rows.
+fn compute_show_forwarded_label(prev: Option<&Message>, msg: &Message) -> bool {
+    if !msg.is_forwarded {
+        return false;
+    }
+    let Some(prev) = prev else {
+        return true;
+    };
+    if !prev.is_forwarded {
+        return true;
+    }
+    !same_message_sender(prev, msg) || (msg.create_time - prev.create_time).abs() > 600_000
+}
+
 pub fn message_sort_key(m: &Message) -> (u8, i64) {
     let not_first = u8::from(m.code != MessageCode::Indicator);
     (not_first, m.id.get())
 }
 
-/// Sort a message buffer in place into React's id-ascending order.
 pub fn sort_messages(messages: &mut [Message]) {
     messages.sort_by_key(message_sort_key);
 }
@@ -730,8 +771,12 @@ impl Message {
             code: MessageCode::Chat,
             is_edited: false,
             is_forwarded: false,
+            show_forwarded_label: false,
             combined_with_prev: false,
             highlights_viewer_direct: false,
+            send_failed: false,
+            ogp: None,
+            poll: None,
             spans,
             mention_targets: Vec::new(),
             references: Vec::new(),
@@ -798,6 +843,16 @@ impl Message {
         self
     }
 
+    pub fn with_ogp(mut self, ogp: Option<OgpPreview>) -> Self {
+        self.ogp = ogp;
+        self
+    }
+
+    pub fn with_poll(mut self, poll: Option<PollData>) -> Self {
+        self.poll = poll;
+        self
+    }
+
     pub fn with_avatar(mut self, avatar_url: impl Into<SharedString>) -> Self {
         self.avatar_url = avatar_url.into();
         self
@@ -812,6 +867,48 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forwarded(id: i64, sender: &str, time: i64) -> Message {
+        Message::new(MessageId(id), "m", sender, "U", time).with_forwarded(true)
+    }
+
+    #[test]
+    fn forwarded_label_hidden_for_non_forwarded_message() {
+        let msg = Message::new(MessageId(1), "m", "42", "U", 100);
+        assert!(!compute_show_forwarded_label(None, &msg));
+    }
+
+    #[test]
+    fn forwarded_label_shown_when_no_previous_row() {
+        assert!(compute_show_forwarded_label(None, &forwarded(2, "42", 100)));
+    }
+
+    #[test]
+    fn forwarded_label_shown_after_non_forwarded_previous() {
+        let prev = Message::new(MessageId(1), "m", "42", "U", 100);
+        assert!(compute_show_forwarded_label(
+            Some(&prev),
+            &forwarded(2, "42", 110)
+        ));
+    }
+
+    #[test]
+    fn forwarded_label_grouped_for_same_sender_burst() {
+        let prev = forwarded(1, "42", 100);
+        assert!(!compute_show_forwarded_label(
+            Some(&prev),
+            &forwarded(2, "42", 110)
+        ));
+    }
+
+    #[test]
+    fn forwarded_label_shown_for_different_sender() {
+        let prev = forwarded(1, "42", 100);
+        assert!(compute_show_forwarded_label(
+            Some(&prev),
+            &forwarded(2, "7", 110)
+        ));
+    }
 
     fn token(s: i64, e: i64) -> ContentToken {
         ContentToken {

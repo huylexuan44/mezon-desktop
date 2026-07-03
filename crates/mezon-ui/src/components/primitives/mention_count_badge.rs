@@ -18,7 +18,7 @@ pub fn mention_count_badge(count: u32) -> gpui::Div {
         .when(!wide, |s| s.w(px(16.)))
         .rounded_full()
         .bg(rgb(0xda373c))
-        .text_size(px(10.))
+        .text_size(px(12.))
         .font_weight(FontWeight::BOLD)
         .text_color(white())
         .child(label)

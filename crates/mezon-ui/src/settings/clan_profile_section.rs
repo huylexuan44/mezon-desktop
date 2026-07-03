@@ -211,19 +211,6 @@ impl ClanProfileSection {
             }
         }));
 
-        self._subscriptions.push(cx.observe(&nick, {
-            move |this: &mut Self, input: Entity<InputState>, cx| {
-                let value = input.read(cx).value().to_string();
-                if let Some(state) = &mut this.profile
-                    && !state.saving
-                    && state.nick_name.as_ref() != value
-                {
-                    state.nick_name = value.into();
-                    cx.notify();
-                }
-            }
-        }));
-
         self.nick_name_input = Some(nick);
     }
 

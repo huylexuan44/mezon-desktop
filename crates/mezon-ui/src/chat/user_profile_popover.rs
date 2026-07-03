@@ -7,9 +7,7 @@ use mezon_store::{ProfileContext, RolesStore, Settings, UserId, resolve_user_pro
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::components::primitives::Avatar;
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 
 pub struct UserProfilePopover {
@@ -25,6 +23,7 @@ impl UserProfilePopover {
         user_id: UserId,
         context: ProfileContext,
         settings: gpui::Entity<Settings>,
+        avatar_image_cache: gpui::Entity<LruImageCache>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -34,15 +33,6 @@ impl UserProfilePopover {
         if let Some(roles_store) = RolesStore::try_global(cx) {
             cx.observe(&roles_store, |_, _, cx| cx.notify()).detach();
         }
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "profile-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
         Self {
             focus_handle,
             user_id,
@@ -384,14 +374,20 @@ pub(crate) fn profile_popover_menu(
     user_id: UserId,
     context: ProfileContext,
     settings: gpui::Entity<Settings>,
+    avatar_image_cache: gpui::Entity<LruImageCache>,
 ) -> PopoverMenu<UserProfilePopover> {
     PopoverMenu::new(id)
         .menu(move |window, cx| {
-            Some(
-                cx.new(|cx| {
-                    UserProfilePopover::new(user_id, context, settings.clone(), window, cx)
-                }),
-            )
+            Some(cx.new(|cx| {
+                UserProfilePopover::new(
+                    user_id,
+                    context,
+                    settings.clone(),
+                    avatar_image_cache.clone(),
+                    window,
+                    cx,
+                )
+            }))
         })
         .anchor(Anchor::TopRight)
         .attach(Anchor::TopLeft)

@@ -13,12 +13,12 @@ use mezon_store::{
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Avatar, ContextMenu, Icon, IconName, context_menu_at};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
+
+const DEFAULT_ROLE_COLOR: u32 = 0x99aab5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemberSource {
@@ -46,6 +46,7 @@ struct MemberRow {
     avatar_src: SharedString,
     avatar_raw: SharedString,
     online: bool,
+    user_status: SharedString,
     is_owner: bool,
     rcm_id: SharedString,
     popover_id: SharedString,
@@ -57,6 +58,7 @@ struct RawMember {
     name: String,
     avatar_raw: String,
     online: bool,
+    user_status: String,
 }
 
 pub struct MemberListPanel {
@@ -66,13 +68,37 @@ pub struct MemberListPanel {
     list_scroll: UniformListScrollHandle,
     avatar_image_cache: Entity<LruImageCache>,
     active_context: Option<ProfileContext>,
+    route_key: RouteKey,
     open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
+    rebuild_pending: bool,
+}
+
+#[derive(PartialEq, Eq)]
+enum RouteKey {
+    None,
+    Channel {
+        clan_id: ClanId,
+        channel_id: Option<ChannelId>,
+        filtered: bool,
+    },
+    Group(ChannelId),
 }
 
 impl MemberListPanel {
-    pub fn new(source: MemberSource, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&Router::global(cx), |this, _, cx| this.rebuild(cx))
-            .detach();
+    pub fn new(
+        source: MemberSource,
+        settings: Entity<Settings>,
+        avatar_image_cache: Entity<LruImageCache>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&Router::global(cx), |this, _, cx| {
+            let key = route_key(this.source, cx);
+            if key != this.route_key {
+                this.route_key = key;
+                this.rebuild(cx);
+            }
+        })
+        .detach();
         cx.subscribe(
             &PresenceStore::global(cx),
             |this, _, event, cx| match event {
@@ -130,15 +156,6 @@ impl MemberListPanel {
             }
         }
 
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "member-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
         let mut this = Self {
             source,
             settings,
@@ -146,13 +163,29 @@ impl MemberListPanel {
             list_scroll: UniformListScrollHandle::new(),
             avatar_image_cache,
             active_context: None,
+            route_key: route_key(source, cx),
             open_menu: None,
+            rebuild_pending: false,
         };
-        this.rebuild(cx);
+        this.recompute(cx);
         this
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        if self.rebuild_pending {
+            return;
+        }
+        self.rebuild_pending = true;
+        let handle = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |this, cx| {
+                this.rebuild_pending = false;
+                this.recompute(cx);
+            });
+        });
+    }
+
+    fn recompute(&mut self, cx: &mut Context<Self>) {
         self.active_context = match self.source {
             MemberSource::Channel => {
                 active_channel_context(cx).map(|ctx| ProfileContext::Clan(ctx.clan_id))
@@ -174,6 +207,51 @@ fn shows_channel(channel_id: ChannelId, cx: &App) -> bool {
 
 fn shows_group(channel_id: ChannelId, cx: &App) -> bool {
     active_group_dm(cx) == Some(channel_id)
+}
+
+fn route_key(source: MemberSource, cx: &App) -> RouteKey {
+    match source {
+        MemberSource::Group => match active_group_dm(cx) {
+            Some(id) => RouteKey::Group(id),
+            None => RouteKey::None,
+        },
+        MemberSource::Channel => {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::DirectMessage { .. } | Route::Direct | Route::Friends
+            ) {
+                return RouteKey::None;
+            }
+            let channels = ChannelList::global(cx);
+            let channels = channels.read(cx);
+            let (channel_id, filtered, clan_id) = match channels.active_channel() {
+                Some(channel) => {
+                    let is_thread = channel.parent_id.map(|p| !p.is_zero()).unwrap_or(false);
+                    (
+                        Some(channel.id),
+                        channel.private || is_thread,
+                        channel.clan_id,
+                    )
+                }
+                None => (
+                    None,
+                    false,
+                    ClanList::global(cx)
+                        .read(cx)
+                        .active_clan_id
+                        .unwrap_or_default(),
+                ),
+            };
+            if clan_id.is_zero() {
+                return RouteKey::None;
+            }
+            RouteKey::Channel {
+                clan_id,
+                channel_id,
+                filtered,
+            }
+        }
+    }
 }
 
 fn compute_rows(source: MemberSource, cx: &mut Context<MemberListPanel>) -> Vec<Row> {
@@ -315,6 +393,7 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
                 name: member.name().to_string(),
                 avatar_raw: member.avatar().to_string(),
                 online: is_online,
+                user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
             })
             .collect()
     };
@@ -336,6 +415,7 @@ fn group_raw_members(cx: &App, direct_id: ChannelId) -> Vec<RawMember> {
             name: member.name().to_string(),
             avatar_raw: member.avatar().to_string(),
             online: member.online || presence_online.contains(&member.id()),
+            user_status: presence.user_status(member.id()).unwrap_or("").to_string(),
         })
         .collect()
 }
@@ -418,6 +498,7 @@ fn make_member_row(cx: &App, raw: RawMember, owner_id: Option<UserId>) -> Row {
         avatar_src,
         avatar_raw: raw.avatar_raw.into(),
         online: raw.online,
+        user_status: raw.user_status.into(),
         is_owner: owner_id == Some(raw.user_id),
     })
 }
@@ -434,6 +515,10 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
             .replace("{{count}}", &count.to_string())
             .to_uppercase(),
     };
+    let label_size = match kind {
+        HeaderKind::Members => px(12.),
+        HeaderKind::Online | HeaderKind::Offline => px(14.),
+    };
     div()
         .flex()
         .items_center()
@@ -441,7 +526,7 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
         .h(px(48.))
         .child(
             div()
-                .text_xs()
+                .text_size(label_size)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
                 .child(label),
@@ -497,21 +582,38 @@ fn render_member(
         .child(
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
+                .flex_col()
+                .min_w_0()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_primary)
-                        .child(member.name.clone()),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(DEFAULT_ROLE_COLOR))
+                                .child(member.name.clone()),
+                        )
+                        .when(member.is_owner, |this| {
+                            this.child(
+                                Icon::new(IconName::OwnerIcon)
+                                    .size(px(14.))
+                                    .text_color(rgb(0xF0B132)),
+                            )
+                        }),
                 )
-                .when(member.is_owner, |this| {
+                .when(!member.user_status.is_empty(), |this| {
                     this.child(
-                        Icon::new(IconName::OwnerIcon)
-                            .size(px(14.))
-                            .text_color(rgb(0xF0B132)),
+                        div()
+                            .max_w(px(100.))
+                            .text_xs()
+                            .text_color(theme.text_primary)
+                            .opacity(0.6)
+                            .truncate()
+                            .child(member.user_status.clone()),
                     )
                 }),
         );
@@ -520,19 +622,23 @@ fn render_member(
     let rcm_id = member.rcm_id.clone();
 
     let inner = match context {
-        Some(ctx) => {
-            profile_popover_menu(member.popover_id.clone(), user_id, ctx, settings.clone())
-                .anchor(Anchor::TopRight)
-                .attach(Anchor::TopLeft)
-                .trigger(
-                    ClickableContainer::new(member.trigger_id.clone())
-                        .flex()
-                        .flex_1()
-                        .cursor_pointer()
-                        .child(row_content),
-                )
-                .into_any_element()
-        }
+        Some(ctx) => profile_popover_menu(
+            member.popover_id.clone(),
+            user_id,
+            ctx,
+            settings.clone(),
+            avatar_image_cache.clone(),
+        )
+        .anchor(Anchor::TopRight)
+        .attach(Anchor::TopLeft)
+        .trigger(
+            ClickableContainer::new(member.trigger_id.clone())
+                .flex()
+                .flex_1()
+                .cursor_pointer()
+                .child(row_content),
+        )
+        .into_any_element(),
         None => row_content.into_any_element(),
     };
 

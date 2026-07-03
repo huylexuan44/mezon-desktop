@@ -77,25 +77,40 @@ impl ChannelRow {
 
     pub fn render(self, theme: &Theme) -> impl IntoElement {
         let icon = channel_type_icon(self.channel_type, self.private);
-        let text_color = if self.muted {
-            theme.text_muted
-        } else if self.selected || self.unread {
-            theme.text_primary
+        let highlight_type = shows_left_unread_nub(self.channel_type);
+        let text_bright =
+            self.selected || ((self.unread || self.badge_count > 0) && highlight_type);
+        let bold = (self.selected || self.unread) && highlight_type;
+        let icon_active = self.selected || self.unread || self.badge_count > 0;
+
+        let text_base = if text_bright {
+            theme.tokens.text_secondary
         } else {
-            theme.text_secondary
+            theme.tokens.text_theme_primary
         };
-        let selected_bg = theme.bg_primary;
+        let text_hover = theme.tokens.text_secondary;
+        let icon_base = if icon_active {
+            theme.tokens.bg_icon_theme_active
+        } else {
+            theme.tokens.bg_icon_theme
+        };
+        let icon_hover = theme.tokens.bg_icon_theme_active;
+        let name_weight = if bold {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        };
+
+        let selected_bg = theme.tokens.bg_active_member_channel;
         let hover_bg = theme.bg_hover;
-        let secondary = theme.text_secondary;
-        let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0 && !self.muted;
+        let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0;
         let group_name = self.row_id.clone();
-        let unread_nub = self.unread
-            && !self.selected
-            && !self.muted
-            && shows_left_unread_nub(self.channel_type);
+        let unread_nub = self.unread && !self.selected && highlight_type;
         let nub_color = theme.tokens.text_secondary;
 
-        let suppress_hover = self.suppress_hover;
+        let muted = self.muted;
+        let selected = self.selected;
+        let hoverable = !self.selected && !self.suppress_hover;
         div()
             .w_full()
             .relative()
@@ -130,23 +145,41 @@ impl ChannelRow {
                     .py_1()
                     .rounded_lg()
                     .cursor_pointer()
-                    .when(self.selected, move |el| el.bg(selected_bg))
-                    .when(!self.selected && !suppress_hover, move |el| {
-                        el.hover(|s| s.bg(hover_bg))
-                    })
-                    .text_color(text_color)
-                    .child(Icon::new(icon).size(px(16.0)).text_color(secondary))
+                    .when(selected, move |el| el.bg(selected_bg))
+                    .when(hoverable, move |el| el.hover(|s| s.bg(hover_bg)))
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
                             .flex_1()
-                            .ml_2()
-                            .mr_6()
-                            .text_sm()
-                            .overflow_hidden()
-                            .when(self.unread && !self.muted, |el| {
-                                el.font_weight(FontWeight::BOLD)
-                            })
-                            .child(self.name),
+                            .min_w_0()
+                            .when(muted, |el| el.opacity(0.7))
+                            .child(Icon::new(icon).size(px(16.0)).text_color(icon_base).when(
+                                hoverable,
+                                |ic| {
+                                    ic.group_hover(group_name.clone(), move |s| {
+                                        s.text_color(icon_hover)
+                                    })
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .ml_2()
+                                    .mr_6()
+                                    .text_base()
+                                    .overflow_hidden()
+                                    .text_color(text_base)
+                                    .font_weight(name_weight)
+                                    .when(hoverable, |el| {
+                                        el.group_hover(group_name.clone(), move |s| {
+                                            s.text_color(text_hover)
+                                        })
+                                    })
+                                    .when(muted, |el| el.opacity(0.7))
+                                    .child(self.name),
+                            ),
                     ),
             )
     }

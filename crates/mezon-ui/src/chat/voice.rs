@@ -1,9 +1,10 @@
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, ObjectFit, SharedString, StyledImage, div, img,
-    prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla, ObjectFit, SharedString,
+    StyledImage, div, img, prelude::*, px,
 };
 use mezon_store::{
-    Channel, Settings, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
+    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, NetworkQuality, Settings, UserId,
+    VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
 };
 
 use crate::ChatLayout;
@@ -33,7 +34,7 @@ pub fn render_voice_channel(
     );
 
     if store.is_connected_to(&channel.id.to_string()) || connecting {
-        return render_in_call(theme, locale, channel, voice, settings, store, connecting);
+        return render_in_call(theme, locale, channel, voice, settings, store, connecting, cx);
     }
 
     let error = match store.connection() {
@@ -52,101 +53,300 @@ pub fn render_voice_channel(
         input_device_id,
         output_device_id,
         error,
+        cx,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_mini_bar(
     theme: &Theme,
     locale: &str,
-    channel_name: &str,
+    channel_label: &str,
+    clan_name: &str,
+    channel_id: &str,
+    clan_id: &str,
     voice: &Entity<VoiceStore>,
+    settings: &Entity<Settings>,
     mic_enabled: bool,
+    camera_enabled: bool,
+    screen_enabled: bool,
+    link_copied: bool,
 ) -> AnyElement {
-    let mic_icon = if mic_enabled {
-        IconName::Mic
+    let neutral_bg = theme.bg_secondary;
+    let neutral_hover = darken(theme.bg_secondary, 0.1);
+
+    let header_key = if camera_enabled {
+        "channelVoice.videoConnected"
     } else {
-        IconName::MicDisable
+        "channelVoice.voiceConnected"
     };
 
-    let mic_btn = {
-        let voice = voice.clone();
-        small_icon_button("voice-minibar-mic", mic_icon, theme.bg_hover)
-            .text_color(if mic_enabled {
-                theme.text_primary
-            } else {
-                theme.status_dnd
-            })
+    let address = format!("{channel_label} / {clan_name}");
+    let address = if address.chars().count() > 30 {
+        format!("{}...", address.chars().take(30).collect::<String>())
+    } else {
+        address
+    };
+
+    let subtitle = {
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+        let hover_color = theme.text_primary;
+        div()
+            .id("voice-panel-jump")
+            .cursor_pointer()
+            .text_xs()
+            .text_color(theme.text_secondary)
+            .hover(move |s| s.text_color(hover_color))
+            .child(address)
             .on_click(move |_, _, cx| {
-                voice.update(cx, |store, cx| store.toggle_mic(cx));
+                let (Ok(cid), Ok(clan)) =
+                    (channel_id.parse::<ChannelId>(), clan_id.parse::<ClanId>())
+                else {
+                    return;
+                };
+                crate::router::navigate(
+                    cx,
+                    crate::router::Route::Channel {
+                        clan_id: clan,
+                        channel_id: cid,
+                    },
+                );
             })
     };
 
-    let leave_btn = {
+    let copy_button = {
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
         let voice = voice.clone();
-        small_icon_button("voice-minibar-leave", IconName::PhoneOff, theme.bg_hover)
-            .text_color(theme.status_dnd)
+        div()
+            .id("voice-panel-copy")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(neutral_hover))
+            .tooltip(Tooltip::text(mezon_i18n::t(locale, "contextMenu.copyLink")))
+            .child(
+                Icon::new(if link_copied {
+                    IconName::Check
+                } else {
+                    IconName::CopyIcon
+                })
+                .size(px(16.))
+                .text_color(if link_copied {
+                    theme.status_online
+                } else {
+                    theme.text_secondary
+                }),
+            )
             .on_click(move |_, _, cx| {
-                voice.update(cx, |store, cx| store.leave(cx));
+                let link = AppConfig::try_global(cx)
+                    .map(|cfg| cfg.voice_link(&clan_id, &channel_id))
+                    .unwrap_or_default();
+                if !link.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                    voice.update(cx, |store, cx| store.mark_link_copied(cx));
+                }
             })
     };
 
-    div()
+    let header = div()
         .flex()
         .flex_row()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .bg(theme.bg_tertiary)
-        .border_t_1()
-        .border_color(theme.border)
-        .child(
-            Icon::new(IconName::Speaker)
-                .size(px(18.))
-                .text_color(theme.status_online),
-        )
+        .items_start()
+        .justify_between()
         .child(
             div()
                 .flex()
                 .flex_col()
-                .flex_1()
-                .min_w_0()
                 .child(
                     div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.status_online)
-                        .child(mezon_i18n::t(locale, "channelVoice.voiceConnected").to_string()),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::Speaker)
+                                .size(px(16.))
+                                .text_color(theme.status_online),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.status_online)
+                                .child(mezon_i18n::t(locale, header_key).to_string()),
+                        ),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .child(channel_name.to_string()),
-                ),
+                .child(div().flex().flex_row().child(subtitle)),
         )
-        .child(mic_btn)
-        .child(leave_btn)
+        .child(copy_button);
+
+    let mic_button = {
+        let voice = voice.clone();
+        panel_control_button(
+            "voice-panel-mic",
+            if mic_enabled {
+                IconName::VoiceMicIcon
+            } else {
+                IconName::VoiceMicDisabledIcon
+            },
+            neutral_bg,
+            neutral_hover,
+            if mic_enabled {
+                theme.text_primary
+            } else {
+                theme.status_dnd
+            },
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            if mic_enabled {
+                "channelVoice.turnOffMicrophone"
+            } else {
+                "channelVoice.turnOnMicrophone"
+            },
+        )))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_mic(cx)))
+    };
+
+    let camera_button = {
+        let voice = voice.clone();
+        panel_control_button(
+            "voice-panel-camera",
+            if camera_enabled {
+                IconName::VoiceCameraIcon
+            } else {
+                IconName::VoiceCameraDisabledIcon
+            },
+            neutral_bg,
+            neutral_hover,
+            if camera_enabled {
+                theme.text_primary
+            } else {
+                theme.status_dnd
+            },
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            if camera_enabled {
+                "channelVoice.turnOffCamera"
+            } else {
+                "channelVoice.turnOnCamera"
+            },
+        )))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.toggle_camera(cx)))
+    };
+
+    let screen_button = {
+        let voice = voice.clone();
+        let settings = settings.clone();
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if screen_enabled {
+            (
+                gpui::rgb(ACCENT_BLUE).into(),
+                darken(gpui::rgb(ACCENT_BLUE), 0.1),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        panel_control_button(
+            "voice-panel-screen",
+            if screen_enabled {
+                IconName::VoiceScreenShareStopIcon
+            } else {
+                IconName::VoiceScreenShareIcon
+            },
+            bg,
+            hover,
+            color,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            if screen_enabled {
+                "channelVoice.stopScreenShare"
+            } else {
+                "channelVoice.shareYourScreen"
+            },
+        )))
+        .on_click(move |_, window, cx| {
+            if screen_enabled {
+                voice.update(cx, |store, cx| store.stop_screen_share(cx));
+            } else {
+                crate::chat::screen_share_modal::open_screen_share_modal(
+                    voice.clone(),
+                    settings.clone(),
+                    window,
+                    cx,
+                );
+            }
+        })
+    };
+
+    let leave_button = {
+        let voice = voice.clone();
+        panel_control_button(
+            "voice-panel-leave",
+            IconName::CancelCall,
+            theme.status_dnd,
+            darken(theme.status_dnd, 0.12),
+            gpui::rgb(0xffffff),
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.disconnect",
+        )))
+        .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(header)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(mic_button)
+                .child(camera_button)
+                .child(screen_button)
+                .child(leave_button),
+        )
         .into_any_element()
 }
 
-fn small_icon_button(
+fn panel_control_button(
     id: &'static str,
     icon: IconName,
+    bg: impl Into<Hsla>,
     bg_hover: impl Into<Hsla>,
+    icon_color: impl Into<Hsla>,
 ) -> gpui::Stateful<gpui::Div> {
+    let bg = bg.into();
     let bg_hover = bg_hover.into();
+    let icon_color = icon_color.into();
     div()
         .id(id)
         .flex()
+        .flex_1()
         .items_center()
         .justify_center()
-        .w(px(30.))
-        .h(px(30.))
+        .h(px(36.))
         .rounded_md()
+        .bg(bg)
         .cursor_pointer()
         .hover(move |s| s.bg(bg_hover))
-        .child(Icon::new(icon).size(px(18.)))
+        .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
 }
 
 fn voice_header(
@@ -220,6 +420,7 @@ fn decorative_icon(theme: &Theme, icon: IconName) -> AnyElement {
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_pre_join(
     theme: &Theme,
     locale: &str,
@@ -228,6 +429,7 @@ fn render_pre_join(
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     error: Option<String>,
+    cx: &App,
 ) -> AnyElement {
     let members = &channel.voice_members;
     let subtitle = if members.is_empty() {
@@ -244,9 +446,10 @@ fn render_pre_join(
             .justify_center()
             .gap_2()
             .children(members.iter().take(12).map(|m| {
-                let mut avatar = Avatar::new().name(m.display_name.clone()).size_px(px(56.));
-                if !m.avatar_url.is_empty() {
-                    avatar = avatar.src(m.avatar_url.clone());
+                let (name, avatar_url) = resolve_voice_member(cx, channel.clan_id, m);
+                let mut avatar = Avatar::new().name(name).size_px(px(56.));
+                if !avatar_url.is_empty() {
+                    avatar = avatar.src(avatar_url);
                 }
                 avatar
             }))
@@ -268,7 +471,7 @@ fn render_pre_join(
             let channel_label = channel_label.clone();
             let input_device_id = input_device_id.clone();
             let output_device_id = output_device_id.clone();
-            move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+            move |_: &gpui::ClickEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
                 voice.update(cx, |store, cx| {
                     store.join(
                         channel_id.clone(),
@@ -276,6 +479,7 @@ fn render_pre_join(
                         channel_label.clone(),
                         input_device_id.clone(),
                         output_device_id.clone(),
+                        window,
                         cx,
                     );
                 });
@@ -345,36 +549,89 @@ fn render_pre_join(
 struct VideoCell {
     id: String,
     name: String,
+    avatar_url: String,
     key: Option<u64>,
     is_screen: bool,
     speaking: bool,
     muted: bool,
+    quality: NetworkQuality,
 }
 
 impl VideoCell {
-    fn camera(p: &VoiceParticipant) -> Self {
+    fn camera(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
-            id: format!("{}\u{1}camera", p.identity),
-            name: p.name.clone(),
+            id: mezon_store::camera_tile_id(&p.identity),
+            name,
+            avatar_url,
             key: p.camera,
             is_screen: false,
             speaking: p.speaking,
             muted: p.muted,
+            quality: p.quality,
         }
     }
 
-    fn screen(p: &VoiceParticipant) -> Self {
+    fn screen(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
-            id: format!("{}\u{1}screen", p.identity),
-            name: p.name.clone(),
+            id: mezon_store::screen_tile_id(&p.identity),
+            name,
+            avatar_url,
             key: p.screenshare,
             is_screen: true,
             speaking: p.speaking,
             muted: p.muted,
+            quality: p.quality,
         }
     }
 }
 
+fn resolve_voice_identity(
+    cx: &App,
+    clan_id: ClanId,
+    identity: &str,
+    fallback_name: &str,
+) -> (String, String) {
+    if let Ok(uid) = identity.parse::<UserId>()
+        && let Some(store) = ClanMembersStore::try_global(cx)
+        && let Some(member) = store.read(cx).member(clan_id, uid)
+    {
+        let name = if member.name().is_empty() {
+            fallback_name.to_string()
+        } else {
+            member.name().to_string()
+        };
+        let avatar = member.avatar();
+        let avatar_url = if avatar.is_empty() {
+            String::new()
+        } else {
+            crate::util::imgproxy::proxied(cx, avatar, 320, 320, "fit")
+        };
+        return (name, avatar_url);
+    }
+    (fallback_name.to_string(), String::new())
+}
+
+fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, String) {
+    if let Some(store) = ClanMembersStore::try_global(cx)
+        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
+    {
+        let name = if member.name().is_empty() {
+            m.display_name.clone()
+        } else {
+            member.name().to_string()
+        };
+        let avatar = member.avatar();
+        let avatar_url = if avatar.is_empty() {
+            m.avatar_url.clone()
+        } else {
+            crate::util::imgproxy::avatar_url(cx, avatar)
+        };
+        return (name, avatar_url);
+    }
+    (m.display_name.clone(), m.avatar_url.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_in_call(
     theme: &Theme,
     locale: &str,
@@ -383,34 +640,44 @@ fn render_in_call(
     settings: &Entity<Settings>,
     store: &VoiceStore,
     connecting: bool,
+    cx: &App,
 ) -> AnyElement {
-    let participants = store.participants();
-    let focused = store.focused_tile();
+    let fullscreen_active = store.fullscreen_screen().is_some();
 
-    let mut cells: Vec<VideoCell> = Vec::new();
-    for p in participants {
-        if p.screenshare.is_some() {
-            cells.push(VideoCell::screen(p));
+    let body = (!fullscreen_active).then(|| {
+        let participants = store.participants();
+        let focused = store.focused_tile();
+
+        let mut cells: Vec<VideoCell> = Vec::new();
+        for p in participants {
+            if p.screenshare.is_some() {
+                let (name, avatar) =
+                    resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+                cells.push(VideoCell::screen(p, name, avatar));
+            }
         }
-    }
-    for p in participants {
-        cells.push(VideoCell::camera(p));
-    }
+        for p in participants {
+            let (name, avatar) = resolve_voice_identity(cx, channel.clan_id, &p.identity, &p.name);
+            cells.push(VideoCell::camera(p, name, avatar));
+        }
 
-    let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
+        let focused_idx = focused.and_then(|id| cells.iter().position(|c| c.id == id));
 
-    let body = match focused_idx {
-        Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
-        None => render_grid(
-            theme,
-            locale,
-            store,
-            voice,
-            &cells,
-            &channel.voice_members,
-            connecting,
-        ),
-    };
+        match focused_idx {
+            Some(idx) => render_focus_layout(theme, locale, store, voice, &cells, idx),
+            None => render_grid(
+                theme,
+                locale,
+                store,
+                voice,
+                &cells,
+                &channel.voice_members,
+                connecting,
+                channel.clan_id,
+                cx,
+            ),
+        }
+    });
 
     let status_badge = if connecting {
         Some((
@@ -445,8 +712,8 @@ fn render_in_call(
         .flex_1()
         .min_h_0()
         .child(voice_header(theme, &channel.name, true, status_badge))
-        .child(body)
-        .when(store.fullscreen_screen().is_none(), |this| {
+        .children(body)
+        .when(!fullscreen_active, |this| {
             this.child(control_bar(theme, locale, voice, settings, store))
         })
         .children(mic_modal)
@@ -653,6 +920,7 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_grid(
     theme: &Theme,
     locale: &str,
@@ -661,6 +929,8 @@ fn render_grid(
     cells: &[VideoCell],
     room_members: &[VoiceMember],
     connecting: bool,
+    clan_id: ClanId,
+    cx: &App,
 ) -> AnyElement {
     if cells.is_empty() {
         if !room_members.is_empty() {
@@ -676,11 +946,10 @@ fn render_grid(
                 .p_3()
                 .bg(theme.bg_tertiary)
                 .children(room_members.iter().map(|member| {
-                    let mut avatar = Avatar::new()
-                        .name(member.display_name.clone())
-                        .size_px(px(80.));
-                    if !member.avatar_url.is_empty() {
-                        avatar = avatar.src(member.avatar_url.clone());
+                    let (name, avatar_url) = resolve_voice_member(cx, clan_id, member);
+                    let mut avatar = Avatar::new().name(name.clone()).size_px(px(80.));
+                    if !avatar_url.is_empty() {
+                        avatar = avatar.src(avatar_url);
                     }
                     div()
                         .flex()
@@ -697,7 +966,7 @@ fn render_grid(
                             div()
                                 .text_sm()
                                 .text_color(theme.text_primary)
-                                .child(member.display_name.clone()),
+                                .child(name),
                         )
                 }))
                 .into_any_element();
@@ -799,12 +1068,9 @@ fn focus_main_tile(
 ) -> AnyElement {
     let voice = voice.clone();
     let inner = tile_inner(theme, store, cell, true);
-    let group = SharedString::from(format!("screen-ctl-{}", cell.id));
-    let screen_key = cell.key.filter(|_| cell.is_screen);
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
-        .group(group.clone())
         .relative()
         .flex()
         .flex_1()
@@ -818,9 +1084,7 @@ fn focus_main_tile(
         .cursor_pointer()
         .child(inner)
         .child(tile_label(theme, locale, cell))
-        .when_some(screen_key, |this, key| {
-            this.child(screen_tile_controls(&voice, key, group.clone()))
-        })
+        .child(tile_quality(cell))
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.clear_focus(cx));
         })
@@ -838,6 +1102,13 @@ fn strip_tile(
     let voice = voice.clone();
     let id = cell.id.clone();
     let inner = tile_inner(theme, store, cell, false);
+    let border_color: Hsla = if is_focused {
+        gpui::rgb(ACCENT_BLUE).into()
+    } else if cell.speaking && !cell.is_screen {
+        theme.status_online.into()
+    } else {
+        gpui::transparent_black()
+    };
 
     div()
         .id(SharedString::from(format!("strip-{}", cell.id)))
@@ -851,14 +1122,11 @@ fn strip_tile(
         .overflow_hidden()
         .bg(theme.bg_secondary)
         .cursor_pointer()
-        .when(is_focused, |this| {
-            this.border_2().border_color(gpui::rgb(ACCENT_BLUE))
-        })
-        .when(cell.speaking && !cell.is_screen && !is_focused, |this| {
-            this.border_2().border_color(theme.status_online)
-        })
+        .border_2()
+        .border_color(border_color)
         .child(inner)
         .child(tile_label(theme, locale, cell))
+        .child(tile_quality(cell))
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.set_focus(id.clone(), cx));
         })
@@ -877,12 +1145,14 @@ fn video_tile(
     let voice = voice.clone();
     let id = cell.id.clone();
     let inner = tile_inner(theme, store, cell, false);
-    let group = SharedString::from(format!("screen-ctl-{}", cell.id));
-    let screen_key = cell.key.filter(|_| cell.is_screen);
+    let border_color: Hsla = if cell.speaking && !cell.is_screen {
+        theme.status_online.into()
+    } else {
+        gpui::transparent_black()
+    };
 
     div()
         .id(SharedString::from(format!("tile-{}", cell.id)))
-        .group(group.clone())
         .relative()
         .flex()
         .items_center()
@@ -893,14 +1163,11 @@ fn video_tile(
         .overflow_hidden()
         .bg(theme.bg_secondary)
         .cursor_pointer()
-        .when(cell.speaking && !cell.is_screen, |this| {
-            this.border_2().border_color(theme.status_online)
-        })
+        .border_2()
+        .border_color(border_color)
         .child(inner)
         .child(tile_label(theme, locale, cell))
-        .when_some(screen_key, |this, key| {
-            this.child(screen_tile_controls(&voice, key, group.clone()))
-        })
+        .child(tile_quality(cell))
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.toggle_focus(id.clone(), cx));
         })
@@ -930,6 +1197,9 @@ fn tile_inner(theme: &Theme, store: &VoiceStore, cell: &VideoCell, large: bool) 
         Avatar::new()
             .name(cell.name.clone())
             .size_px(if large { px(120.) } else { px(80.) });
+    if !cell.avatar_url.is_empty() {
+        avatar = avatar.src(cell.avatar_url.clone());
+    }
     if cell.speaking {
         avatar = avatar.border_color(theme.status_online);
     }
@@ -970,6 +1240,33 @@ fn tile_label(theme: &Theme, locale: &str, cell: &VideoCell) -> AnyElement {
             )
         })
         .child(div().text_xs().text_color(gpui::rgb(0xffffff)).child(label))
+        .into_any_element()
+}
+
+fn tile_quality(cell: &VideoCell) -> AnyElement {
+    let icon = match cell.quality {
+        NetworkQuality::Excellent => IconName::SvgQualityExcellentIcon,
+        NetworkQuality::Good => IconName::SvgQualityGoodIcon,
+        NetworkQuality::Poor => IconName::SvgQualityPoorIcon,
+        NetworkQuality::Unknown => IconName::SvgQualityUnknownIcon,
+    };
+
+    div()
+        .absolute()
+        .right_2()
+        .bottom_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(6.))
+        .py(px(2.))
+        .rounded_md()
+        .bg(gpui::rgba(0x000000b0))
+        .child(
+            Icon::new(icon)
+                .size(px(16.))
+                .text_color(gpui::rgb(0xffffff)),
+        )
         .into_any_element()
 }
 
@@ -1103,8 +1400,65 @@ fn control_bar(
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(leave_tooltip))
-        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.leave(cx)))
+        .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
     };
+
+    let mut right = div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .items_center()
+        .justify_end()
+        .gap_1();
+    if let Some(key) = store.primary_screen_key() {
+        let pip_active = store.pip_key() == Some(key);
+        let is_fullscreen = store.fullscreen_screen() == Some(key);
+        let pip_color: Hsla = if pip_active {
+            gpui::rgb(ACCENT_BLUE).into()
+        } else {
+            theme.text_secondary.into()
+        };
+
+        let pip_button = {
+            let voice = voice.clone();
+            circle_button(
+                "voice-pip-btn",
+                gpui::transparent_black(),
+                theme.bg_secondary.into(),
+                IconName::VoicePopOutIcon,
+                pip_color,
+            )
+            .on_click(move |_, _, cx| {
+                if pip_active {
+                    voice.update(cx, |store, cx| store.close_pip(cx));
+                } else if let Some(handle) =
+                    crate::chat::screen_share_pip::open_screen_share_pip(voice.clone(), key, cx)
+                {
+                    voice.update(cx, |store, cx| store.set_pip(key, handle, cx));
+                }
+            })
+        };
+
+        let fs_button = {
+            let voice = voice.clone();
+            circle_button(
+                "voice-fullscreen-btn",
+                gpui::transparent_black(),
+                theme.bg_secondary.into(),
+                if is_fullscreen {
+                    IconName::ExitFullScreen
+                } else {
+                    IconName::FullScreen
+                },
+                theme.text_secondary,
+            )
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| store.toggle_fullscreen_screen(key, cx));
+            })
+        };
+
+        right = right.child(pip_button).child(fs_button);
+    }
 
     let left = div()
         .flex()
@@ -1138,7 +1492,7 @@ fn control_bar(
         .border_color(theme.border)
         .child(left)
         .child(center)
-        .child(div().flex_1())
+        .child(right)
         .into_any_element()
 }
 
@@ -1155,72 +1509,6 @@ fn decorative_circle(theme: &Theme, icon: IconName) -> AnyElement {
         .cursor_default()
         .bg(theme.bg_secondary)
         .child(Icon::new(icon).size(px(20.)).text_color(theme.text_muted))
-        .into_any_element()
-}
-
-fn screen_tile_controls(voice: &Entity<VoiceStore>, key: u64, group: SharedString) -> AnyElement {
-    let pip_voice = voice.clone();
-    let fs_voice = voice.clone();
-    let btn_bg = gpui::rgba(0x000000a6);
-    let btn_hover = gpui::rgba(0x000000d9);
-    div()
-        .absolute()
-        .bottom_2()
-        .right_2()
-        .flex()
-        .gap_2()
-        .opacity(0.)
-        .group_hover(group, |s| s.opacity(1.))
-        .child(
-            div()
-                .id(SharedString::from(format!("screen-pip-{key}")))
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(36.))
-                .h(px(36.))
-                .rounded_full()
-                .bg(btn_bg)
-                .cursor_pointer()
-                .hover(move |s| s.bg(btn_hover))
-                .child(
-                    Icon::new(IconName::VoicePopOutIcon)
-                        .size(px(18.))
-                        .text_color(gpui::rgb(0xffffff)),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    if let Some(handle) = crate::chat::screen_share_pip::open_screen_share_pip(
-                        pip_voice.clone(),
-                        key,
-                        cx,
-                    ) {
-                        pip_voice.update(cx, |store, cx| store.set_pip(key, handle, cx));
-                    }
-                }),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("screen-fs-{key}")))
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(36.))
-                .h(px(36.))
-                .rounded_full()
-                .bg(btn_bg)
-                .cursor_pointer()
-                .hover(move |s| s.bg(btn_hover))
-                .child(
-                    Icon::new(IconName::FullScreen)
-                        .size(px(18.))
-                        .text_color(gpui::rgb(0xffffff)),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    fs_voice.update(cx, |store, cx| store.toggle_fullscreen_screen(key, cx));
-                }),
-        )
         .into_any_element()
 }
 

@@ -67,7 +67,7 @@ pub use permissions::{
     ClanSettingsPermissions, PermissionEvent, PermissionStore, PERMISSION_ADMINISTRATOR,
     PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN,
 };
-pub use platform::{OpenUrlFn, PlatformStore};
+pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
@@ -75,9 +75,10 @@ pub use sticker::{Sticker, StickerEvent, StickerStore};
 pub use user_profile::{ProfileContext, UserProfileView, resolve_user_profile};
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
-    VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant, VoiceStore,
-    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
+    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant,
+    VoiceStore, camera_tile_id, capture_screen_share_preview, list_screen_share_options,
+    peek_screen_share_options, screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
@@ -240,7 +241,18 @@ impl Settings {
         tracing::debug!("Saved settings to {}", path.display());
         Ok(())
     }
+
+    pub fn init_global(entity: &gpui::Entity<Self>, cx: &mut gpui::App) {
+        cx.set_global(GlobalSettings(entity.clone()));
+    }
+
+    pub fn try_global(cx: &gpui::App) -> Option<gpui::Entity<Self>> {
+        cx.try_global::<GlobalSettings>().map(|g| g.0.clone())
+    }
 }
+
+struct GlobalSettings(gpui::Entity<Settings>);
+impl gpui::Global for GlobalSettings {}
 
 /// Which login method is currently shown in the `LoginView`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

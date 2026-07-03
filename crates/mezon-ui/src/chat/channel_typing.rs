@@ -45,7 +45,7 @@ impl ChannelTyping {
         let label = match users.len() {
             0 => return None,
             1 => {
-                let name = users.iter().next()?;
+                let name = users.first()?;
                 format!("{name} {}", mezon_i18n::t(&locale, "common.isTyping"))
             }
             _ => mezon_i18n::t(&locale, "common.severalPeopleTyping").to_string(),
