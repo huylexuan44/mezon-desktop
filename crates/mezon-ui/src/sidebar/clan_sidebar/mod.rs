@@ -219,7 +219,6 @@ impl Render for ClanSidebar {
             .w_full()
             .h_full()
             .pb(px(68.))
-            .bg(theme.bg_tertiary)
             .items_center()
             .child(
                 div()

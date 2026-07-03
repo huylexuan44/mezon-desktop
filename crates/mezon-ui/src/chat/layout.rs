@@ -5,6 +5,7 @@ use mezon_store::{
     VoiceStore,
 };
 use ui::PopoverMenuHandle;
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::chat::area::ChatArea;
 use crate::chat::pinned_popover::PinnedPopoverPanel;
@@ -509,7 +510,6 @@ impl Render for ChatLayout {
             .h_full()
             .min_h_0()
             .relative()
-            .bg(theme.bg_primary)
             .child(
                 div()
                     .flex()
@@ -523,6 +523,9 @@ impl Render for ChatLayout {
                             .flex_row()
                             .flex_1()
                             .min_h_0()
+                            .bg(theme.bg_tertiary)
+                            .rounded_bl(px(ROUNDED_BORDER_WINDOW))
+                            .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
                                     AnyView::from(self.clan_sidebar.clone())
@@ -560,7 +563,6 @@ impl Render for ChatLayout {
                     .flex_col()
                     .flex_1()
                     .h_full()
-                    .bg(theme.bg_primary)
                     .child(content),
             )
             .children(fullscreen)

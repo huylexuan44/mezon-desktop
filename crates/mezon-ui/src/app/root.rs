@@ -4,6 +4,7 @@ use gpui::{
     StyleRefinement, Window, div, img, prelude::*, px,
 };
 use mezon_store::{AuthState, ClanList, ConnectionStore, Settings};
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
@@ -229,6 +230,8 @@ impl Render for RootView {
             .bg(theme.bg_primary)
             .font_family(base_font_family)
             .text_color(theme.text_primary)
+            .rounded(px(ROUNDED_BORDER_WINDOW))
+            .overflow_hidden()
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &crate::ToggleInspector, window, cx| {
