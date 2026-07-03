@@ -1,5 +1,7 @@
 use gpui::{App, AppContext, Entity, Global};
 use mezon_store::{ChannelId, ClanId};
+
+use crate::clan::settings::ClanSettingsPage;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,10 @@ pub enum Route {
     SettingsLanguage,
     SettingsVoice,
     SettingsAdvanced,
+    ClanSettings {
+        clan_id: ClanId,
+        page: ClanSettingsPage,
+    },
     NotFound {
         path: String,
     },
@@ -80,6 +86,9 @@ impl Route {
             Route::SettingsLanguage => "/settings/language".to_string(),
             Route::SettingsVoice => "/settings/voice".to_string(),
             Route::SettingsAdvanced => "/settings/advanced".to_string(),
+            Route::ClanSettings { clan_id, page } => {
+                format!("/chat/clans/{}/settings/{}", clan_id.get(), page.slug())
+            }
             Route::NotFound { path } => path.clone(),
         }
     }
@@ -152,6 +161,14 @@ impl Route {
             ["settings", "language"] => Route::SettingsLanguage,
             ["settings", "voice"] => Route::SettingsVoice,
             ["settings", "advanced"] => Route::SettingsAdvanced,
+            ["chat", "clans", clan_id, "settings"] => Route::ClanSettings {
+                clan_id: clan_id.parse().ok()?,
+                page: ClanSettingsPage::Overview,
+            },
+            ["chat", "clans", clan_id, "settings", page] => Route::ClanSettings {
+                clan_id: clan_id.parse().ok()?,
+                page: ClanSettingsPage::from_slug(page)?,
+            },
             _ => return None,
         })
     }
@@ -443,6 +460,28 @@ mod tests {
             username: "alice".into(),
         };
         assert_eq!(route.to_path(), "/chat/alice");
+        assert_eq!(Route::from_path(&route.to_path()), route);
+    }
+
+    #[test]
+    fn from_path_clan_settings_overview() {
+        let route = Route::from_path("/chat/clans/42/settings/overview");
+        assert_eq!(
+            route,
+            Route::ClanSettings {
+                clan_id: ClanId(42),
+                page: ClanSettingsPage::Overview,
+            }
+        );
+    }
+
+    #[test]
+    fn to_path_roundtrip_clan_settings() {
+        let route = Route::ClanSettings {
+            clan_id: ClanId(7),
+            page: ClanSettingsPage::Roles,
+        };
+        assert_eq!(route.to_path(), "/chat/clans/7/settings/roles");
         assert_eq!(Route::from_path(&route.to_path()), route);
     }
 

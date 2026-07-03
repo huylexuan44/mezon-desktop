@@ -47,14 +47,23 @@ pub fn handle() -> tokio::runtime::Handle {
 }
 
 pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
-    tracing::debug!("put_bytes_to_url: PUTting {} bytes", data.len());
+    put_bytes_to_content_type(url, data, "application/octet-stream").await
+}
+
+pub async fn put_bytes_to_content_type(
+    url: &str,
+    data: Vec<u8>,
+    content_type: &str,
+) -> Result<()> {
+    tracing::debug!("put_bytes_to_content_type: PUTting {} bytes", data.len());
     let url = url.to_string();
+    let content_type = content_type.to_string();
     runtime()
         .spawn(async move {
             let request = http::Request::builder()
                 .method(http::Method::PUT)
                 .uri(&url)
-                .header("Content-Type", "application/octet-stream")
+                .header("Content-Type", content_type)
                 .body(AsyncBody::from(data))?;
             let response =
                 match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, http_client().send(request)).await
@@ -66,9 +75,12 @@ pub async fn put_bytes_to_url(url: &str, data: Vec<u8>) -> Result<()> {
                     ),
                 };
             let status = response.status();
-            tracing::debug!("put_bytes_to_url: response status={}", status);
+            tracing::debug!("put_bytes_to_content_type: response status={}", status);
             if !status.is_success() {
-                tracing::error!("put_bytes_to_url: HTTP PUT failed with status {}", status);
+                tracing::error!(
+                    "put_bytes_to_content_type: HTTP PUT failed with status {}",
+                    status
+                );
                 anyhow::bail!("HTTP PUT failed with status {}", status);
             }
             Ok(())
@@ -402,6 +414,7 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    /// Create a new clan.
     pub async fn create_clan_desc(
         &self,
         clan_name: &str,
@@ -417,6 +430,39 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.create_clan_desc(&clan_name, &logo, &banner).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_clan_desc(
+        &self,
+        request: mezon_proto::api::UpdateClanDescRequest,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_clan_desc(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_system_message_by_clan_id(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::SystemMessage> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_system_message_by_clan_id(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_system_message(
+        &self,
+        request: mezon_proto::api::SystemMessageRequest,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_system_message(request).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -450,6 +496,32 @@ impl TransportClient {
             .spawn(async move {
                 transport
                     .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// List threads for a parent channel.
+    pub async fn list_thread_descs(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        page: i32,
+    ) -> Result<Vec<crate::transport::ApiThreadDesc>> {
+        use crate::transport::THREAD_LIST_LIMIT;
+        let transport = self.inner.clone();
+        let channel_id = channel_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid channel_id: {e}"))?;
+        let clan_id = clan_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("invalid clan_id: {e}"))?;
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_thread_descs(channel_id, clan_id, THREAD_LIST_LIMIT, page, 0, None)
                     .await
             })
             .await
@@ -511,6 +583,24 @@ impl TransportClient {
                     .delete_pin_message(&id, &message_id, &channel_id, &clan_id)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    /// Search threads by label within a parent channel.
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<crate::transport::ApiThreadDesc>> {
+        let transport = self.inner.clone();
+        let clan_id = clan_id.to_string();
+        let channel_id = channel_id.to_string();
+        let label = label.to_string();
+
+        runtime()
+            .spawn(async move { transport.search_thread(&clan_id, &channel_id, &label).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -681,6 +771,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_list_permission().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_clan_user_role(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::RoleList> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_role_of_user_in_clan(clan_id, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message(
         &self,
@@ -772,6 +882,7 @@ impl TransportClient {
         channel_type: u32,
         category_id: Option<i64>,
         parent_id: Option<i64>,
+        channel_private: i32,
     ) -> Result<crate::transport::ApiChannelDesc> {
         let transport = self.inner.clone();
         let channel_label = channel_label.to_string();
@@ -785,6 +896,7 @@ impl TransportClient {
                         channel_type,
                         category_id,
                         parent_id,
+                        channel_private,
                     )
                     .await
             })
@@ -954,6 +1066,26 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    /// Check duplicate thread name within a parent channel.
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        let transport = self.inner.clone();
+        let name = name.to_string();
+        let parent_channel_id = parent_channel_id.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .check_duplicate_thread_name(&name, &parent_channel_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn session_logout(&self, token: &str, refresh_token: &str) -> Result<()> {
         let transport = self.inner.clone();
         let token = token.to_string();
@@ -1020,6 +1152,22 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.remove_channel_favorite(channel_id, clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn list_user_permission_in_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_user_permission_in_channel(clan_id, channel_id)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

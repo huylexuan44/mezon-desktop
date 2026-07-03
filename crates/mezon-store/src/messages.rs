@@ -597,6 +597,13 @@ impl MessagesStore {
             .unwrap_or(&[])
     }
 
+    pub fn last_cached_message(&self, channel_id: &str) -> Option<&Message> {
+        let channel_id = channel_id.parse::<ChannelId>().ok()?;
+        self.cache
+            .get(&channel_id)
+            .and_then(|channel| channel.messages.last())
+    }
+
     /// The messages exposed to the UI. The buffer is already bounded to
     /// `MAX_MESSAGES_PER_CHANNEL` — it *is* the sliding window — and `gpui::list`
     /// virtualizes painting, so the UI mirrors the whole buffer 1:1. Older/newer
@@ -3674,7 +3681,9 @@ mod tests {
 
     fn reconcile_temp_in(ch: &mut ChannelMessages, temp_id: MessageId, confirmed: Message) {
         if let Some(idx) = ch.messages.position(temp_id) {
-            ch.messages.replace_at(idx, confirmed);
+            let temp = ch.messages.as_slice()[idx].clone();
+            let merged = merge_sparse_sender(&temp, confirmed);
+            ch.messages.replace_at_and_regroup(idx, merged);
         } else if !ch.messages.contains_id(confirmed.id) {
             ch.messages.push_sorted(confirmed);
         }
@@ -3699,6 +3708,23 @@ mod tests {
         let mut ch = channel_msgs(vec![Message::new(MessageId(1), "hello", "u1", "U", 100)]);
         remove_temp_in(&mut ch, non_existent);
         assert_eq!(ch.messages.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_temp_preserves_sender_from_optimistic_when_ack_sparse() {
+        let temp_id = MessageId::next_optimistic();
+        let temp = Message::new(temp_id, "hello", "42", "gia.chuvan", 1_700_000_000)
+            .with_avatar("avatar.png")
+            .with_avatar_proxied(gpui::SharedString::from("proxy.png"));
+        let mut ch = channel_msgs(vec![temp]);
+        let sparse_ack = Message::new(MessageId(99), "hello", "0", String::new(), 0);
+        reconcile_temp_in(&mut ch, temp_id, sparse_ack);
+        let row = &ch.messages.as_slice()[0];
+        assert_eq!(row.id, MessageId(99));
+        assert_eq!(row.sender_id, "42");
+        assert_eq!(row.sender_name, "gia.chuvan");
+        assert_eq!(row.avatar_url, "avatar.png");
+        assert_eq!(row.create_time, 1_700_000_000);
     }
 
     #[test]

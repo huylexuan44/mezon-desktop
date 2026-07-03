@@ -3,13 +3,14 @@ use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
     StyleRefinement, Window, div, img, prelude::*, px,
 };
-use mezon_store::{AuthState, ClanList, ConnectionStore, Settings};
 use ui::utils::ROUNDED_BORDER_WINDOW;
+use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
 use crate::chat::layout::ChatLayout;
+use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
 use crate::components::primitives::{Button, Icon, IconName, Size, Spinner};
 use crate::image_cache::{
     LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES, SHARED_IMAGE_CACHE_CAPACITY,
@@ -24,6 +25,7 @@ pub struct RootView {
     login_view: Entity<LoginView>,
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
+    clan_setting_screen: Entity<ClanSettingScreen>,
     settings: Entity<Settings>,
     applied_theme: String,
     initial_route_restored: bool,
@@ -60,6 +62,7 @@ impl RootView {
 
         cx.observe(&Router::global(cx), |this, router, cx| {
             this.sync_settings_page(cx);
+            this.sync_clan_settings_page(cx);
             if let Route::Channel {
                 clan_id,
                 channel_id,
@@ -140,6 +143,24 @@ impl RootView {
             }
         });
 
+        let channel_list = ChannelList::global(cx);
+        let channel_list_for_clan_settings = channel_list.clone();
+        let clan_list_for_clan_settings = clan_list.clone();
+        let settings_for_clan_settings = settings.clone();
+        let clan_setting_screen = cx.new({
+            let settings = settings_for_clan_settings;
+            move |cx| {
+                ClanSettingScreen::new(
+                    ClanId(0),
+                    ClanSettingsPage::Overview,
+                    settings.clone(),
+                    clan_list_for_clan_settings.clone(),
+                    channel_list_for_clan_settings.clone(),
+                    cx,
+                )
+            }
+        });
+
         let applied_theme = settings.read(cx).theme.clone();
         let image_cache = cx.new(|cx| {
             LruImageCache::labeled(
@@ -156,6 +177,7 @@ impl RootView {
             login_view,
             chat_layout,
             settings_screen,
+            clan_setting_screen,
             settings,
             applied_theme,
             initial_route_restored: false,
@@ -178,6 +200,21 @@ impl RootView {
         };
         self.settings_screen
             .update(cx, |s, cx| s.set_page(page, cx));
+    }
+
+    fn sync_clan_settings_page(&mut self, cx: &mut Context<Self>) {
+        match Router::global(cx).read(cx).route() {
+            Route::ClanSettings { clan_id, page } => {
+                self.clan_setting_screen.update(cx, |screen, cx| {
+                    screen.set_clan_and_page(clan_id, page, cx);
+                });
+            }
+            _ => {
+                self.clan_setting_screen.update(cx, |screen, cx| {
+                    screen.release_active_page(cx);
+                });
+            }
+        }
     }
 }
 
@@ -210,6 +247,7 @@ impl Render for RootView {
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
+                    Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
                     Route::NotFound { .. } => render_not_found(theme, &locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),

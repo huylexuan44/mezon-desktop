@@ -23,3 +23,6 @@ dirs.workspace = true
 flume.workspace = true
 url.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+prost.workspace = true
