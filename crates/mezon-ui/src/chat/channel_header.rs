@@ -5,11 +5,13 @@ use gpui::{
     Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point,
     prelude::*, px,
 };
-use mezon_store::Settings;
+use mezon_store::{Settings, ThreadsStore};
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
 
 use crate::app::window_controls;
+use crate::chat::layout::ChatLayout;
 use crate::chat::pinned_popover::{PinnedPopoverPanel, pin_popover_on_open};
+use crate::chat::threads_popover::{ThreadsPopoverPanel, thread_popover_on_open};
 use crate::components::primitives::{
     Button, ButtonVariant, ButtonVariants, Icon, IconName, Sizable, Size,
 };
@@ -17,6 +19,7 @@ use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+type ThreadTriggerClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 pub struct ChannelHeader {
     name: String,
@@ -24,6 +27,9 @@ pub struct ChannelHeader {
     members_action: bool,
     members_active: bool,
     on_toggle_members: Option<ToggleHandler>,
+    show_threads: bool,
+    layout: Option<Entity<ChatLayout>>,
+    thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     settings: Option<Entity<Settings>>,
     gallery_trigger: Option<AnyElement>,
@@ -37,6 +43,9 @@ impl ChannelHeader {
             members_action: true,
             members_active: false,
             on_toggle_members: None,
+            show_threads: false,
+            layout: None,
+            thread_handle: None,
             pin_handle: None,
             settings: None,
             gallery_trigger: None,
@@ -60,6 +69,21 @@ impl ChannelHeader {
 
     pub fn on_toggle_members(mut self, handler: ToggleHandler) -> Self {
         self.on_toggle_members = Some(handler);
+        self
+    }
+
+    pub fn layout(mut self, layout: Entity<ChatLayout>) -> Self {
+        self.layout = Some(layout);
+        self
+    }
+
+    pub fn show_threads(mut self, show: bool) -> Self {
+        self.show_threads = show;
+        self
+    }
+
+    pub fn thread_popover(mut self, handle: PopoverMenuHandle<ThreadsPopoverPanel>) -> Self {
+        self.thread_handle = Some(handle);
         self
     }
 
@@ -158,12 +182,53 @@ impl ChannelHeader {
         let members_action = self.members_action;
         let members_active = self.members_active;
         let on_toggle_members = self.on_toggle_members;
+        let show_threads = self.show_threads;
+        let thread_handle = self.thread_handle;
+        let layout = self.layout;
         let pin_handle = self.pin_handle;
         let settings = self.settings;
         let mut gallery_trigger = self.gallery_trigger;
         let mut buttons: Vec<AnyElement> = Vec::new();
         for (id, icon) in actions {
             if id == "hdr-members" && !members_action {
+                continue;
+            }
+            if id == "hdr-thread" {
+                if !show_threads {
+                    continue;
+                }
+                if let (Some(handle), Some(layout)) = (thread_handle.clone(), layout.clone()) {
+                    let menu_handle = handle.clone();
+                    buttons.push(
+                        PopoverMenu::new("hdr-thread-popover")
+                            .with_handle(handle)
+                            .anchor(Anchor::TopRight)
+                            .attach(Anchor::BottomRight)
+                            .offset(point(px(0.), px(9.)))
+                            .on_open(thread_popover_on_open(layout.clone()))
+                            .menu({
+                                let layout = layout.clone();
+                                move |window, cx| {
+                                    layout.update(cx, |layout, cx| {
+                                        layout.ensure_thread_search_input(window, cx);
+                                    });
+                                    let search_input =
+                                        layout.read(cx).thread_search_input.clone()?;
+                                    Some(cx.new(|cx| {
+                                        ThreadsPopoverPanel::new(
+                                            layout.clone(),
+                                            search_input,
+                                            menu_handle.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                }
+                            })
+                            .trigger(ThreadPopoverTrigger::new(theme, false))
+                            .into_any_element(),
+                    );
+                }
                 continue;
             }
             if id == "hdr-pin"
@@ -233,15 +298,16 @@ pub struct ChatHeader {
     dm: bool,
     members_action: bool,
     members_active: bool,
+    show_threads: bool,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
-    layout: WeakEntity<crate::ChatLayout>,
+    layout: WeakEntity<ChatLayout>,
     settings: Entity<Settings>,
     _settings_observe: Subscription,
 }
 
 impl ChatHeader {
     pub fn new(
-        layout: WeakEntity<crate::ChatLayout>,
+        layout: WeakEntity<ChatLayout>,
         settings: &Entity<Settings>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -251,6 +317,7 @@ impl ChatHeader {
             dm: false,
             members_action: true,
             members_active: false,
+            show_threads: false,
             pin_handle: None,
             layout,
             settings: settings.clone(),
@@ -269,10 +336,12 @@ impl ChatHeader {
     ) {
         let name = name.unwrap_or_else(|| self.name.clone());
         self.pin_handle = pin_handle;
+        let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
         if self.name == name
             && self.dm == dm
             && self.members_action == members_action
             && self.members_active == members_active
+            && self.show_threads == show_threads
         {
             return;
         }
@@ -280,39 +349,127 @@ impl ChatHeader {
         self.dm = dm;
         self.members_action = members_action;
         self.members_active = members_active;
+        self.show_threads = show_threads;
         cx.notify();
     }
 }
 
 impl Render for ChatHeader {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let layout = self.layout.clone();
+        let theme = cx.theme();
+        let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
+        let show_threads = self.show_threads;
 
         let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
             .anchor(Anchor::TopRight)
             .attach(Anchor::BottomRight)
             .offset(point(px(0.), px(4.)))
-            .trigger(GalleryTrigger::new(&theme))
+            .trigger(GalleryTrigger::new(theme))
             .menu({
                 let settings = settings.clone();
                 move |window, cx| build_gallery_modal(settings.clone(), window, cx)
             })
             .into_any_element();
 
+        let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
+            let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
+        });
         let mut header = ChannelHeader::new(self.name.to_string())
             .dm(self.dm)
             .members_action(self.members_action)
             .members_active(self.members_active)
             .gallery_trigger(gallery_trigger)
-            .on_toggle_members(Arc::new(move |_window: &mut Window, cx: &mut App| {
-                let _ = layout.update(cx, |this, cx| this.toggle_member_list(cx));
-            }));
+            .on_toggle_members(members_toggle)
+            .show_threads(show_threads);
+        if show_threads
+            && let Ok(thread_handle) = self
+                .layout
+                .read_with(cx, |layout, _| layout.thread_popover_handle.clone())
+            && let Some(layout) = self.layout.upgrade()
+        {
+            header = header.layout(layout).thread_popover(thread_handle);
+        }
         if let Some(handle) = self.pin_handle.clone() {
             header = header.pin_popover(handle, settings);
         }
-        header.render(&theme).into_any_element()
+        header.render(theme).into_any_element()
+    }
+}
+
+#[derive(IntoElement)]
+struct ThreadPopoverTrigger {
+    open: bool,
+    icon_color: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
+    on_click: Option<ThreadTriggerClickHandler>,
+}
+
+impl ThreadPopoverTrigger {
+    fn new(theme: &Theme, open: bool) -> Self {
+        Self {
+            open,
+            icon_color: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
+            on_click: None,
+        }
+    }
+}
+
+impl Toggleable for ThreadPopoverTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+}
+
+impl Clickable for ThreadPopoverTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _cursor_style: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl RenderOnce for ThreadPopoverTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tint = if self.open {
+            self.icon_active
+        } else {
+            self.icon_color
+        };
+        let bg_hover = self.bg_hover;
+        let mut button = div()
+            .id("hdr-thread-trigger")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(
+                Icon::new(IconName::ThreadIcon)
+                    .size(px(20.))
+                    .text_color(tint),
+            );
+        if self.open {
+            button = button.bg(self.bg_active);
+        }
+        if let Some(handler) = self.on_click {
+            button.on_click(handler)
+        } else {
+            button
+        }
     }
 }
 

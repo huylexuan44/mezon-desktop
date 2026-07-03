@@ -13,6 +13,7 @@ use mezon_store::{
     ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, Settings, VoiceMember,
 };
 
+use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
 use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{
     Avatar, Icon, IconName, Sizable, Size, context_menu_at, mention_count_badge_on_channel_row,
@@ -25,7 +26,11 @@ mod skeleton;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{OpenMenu, build_channel_menu, on_category_click, on_channel_click};
 
-fn resolve_voice_member_slot(cx: &App, clan_id: Option<ClanId>, m: &VoiceMember) -> VoiceMemberSlot {
+fn resolve_voice_member_slot(
+    cx: &App,
+    clan_id: Option<ClanId>,
+    m: &VoiceMember,
+) -> VoiceMemberSlot {
     let mut slot = VoiceMemberSlot::from(m);
     if let Some(clan_id) = clan_id
         && let Some(store) = ClanMembersStore::try_global(cx)
@@ -53,10 +58,12 @@ pub struct ChannelSidebar {
     items: Rc<Vec<SidebarItem>>,
     list_state: ListState,
     active_clan_name: String,
+    active_clan_name_upper: String,
     active_clan_id: Option<ClanId>,
     loaded_clans: HashSet<ClanId>,
     channel_list_handle: Entity<ChannelList>,
     open_menu: Option<OpenMenu>,
+    pub(super) clan_menu_open: bool,
     skeleton_phase: skeleton::Phase,
     skeleton_clan: Option<ClanId>,
     _skeleton_timer: Option<Task<()>>,
@@ -144,10 +151,12 @@ impl ChannelSidebar {
             items: Rc::new(Vec::new()),
             list_state,
             active_clan_name: String::new(),
+            active_clan_name_upper: String::new(),
             active_clan_id: None,
             loaded_clans: HashSet::new(),
             channel_list_handle,
             open_menu: None,
+            clan_menu_open: false,
             skeleton_phase: skeleton::Phase::default(),
             skeleton_clan: None,
             _skeleton_timer: None,
@@ -171,12 +180,18 @@ impl ChannelSidebar {
 
         let new_clan_id = clans.active_clan_id;
         let clan_changed = self.active_clan_id != new_clan_id;
+        if clan_changed {
+            self.clan_menu_open = false;
+        }
 
         let new_clan_name = clans
             .active_clan()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| mezon_i18n::t(&locale, "sidebar.selectClan").to_string());
         let name_changed = new_clan_name != self.active_clan_name;
+        if name_changed {
+            self.active_clan_name_upper = new_clan_name.to_uppercase();
+        }
         self.active_clan_name = new_clan_name;
         self.active_clan_id = new_clan_id;
 
@@ -211,12 +226,14 @@ impl ChannelSidebar {
                 !self.loaded_clans.contains(clan_id)
             } else {
                 self.loaded_clans.insert(*clan_id);
-                let show_empty = channels.show_empty_categories();
                 for category in categories {
-                    let is_favorites = category.id == FAVOR_CATE_ID;
-                    if !show_empty && !is_favorites && category.channels.is_empty() {
+                    if !channels.is_show_empty_category(*clan_id)
+                        && category.channels.is_empty()
+                        && category.id != FAVOR_CATE_ID
+                    {
                         continue;
                     }
+                    let is_favorites = category.id == FAVOR_CATE_ID;
                     let collapsed = channels.is_category_collapsed(*clan_id, &category.id);
                     let name = if is_favorites {
                         mezon_i18n::t(&locale, "channelList.favoriteChannel").to_string()
@@ -372,6 +389,13 @@ impl ChannelSidebar {
             None => SharedString::from(prefix),
         }
     }
+
+    pub(crate) fn dismiss_clan_menu(&mut self, cx: &mut Context<Self>) {
+        if self.clan_menu_open {
+            self.clan_menu_open = false;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for ChannelSidebar {
@@ -384,12 +408,25 @@ impl Render for ChannelSidebar {
         let suppress_hover = self.suppress_hover;
         let list_state = self.list_state.clone();
         let sidebar = cx.entity().downgrade();
+        let sidebar_for_channel_menu = sidebar.clone();
+        let sidebar_for_clan_menu = sidebar.clone();
+        let channel_list_for_clan_menu = self.channel_list_handle.clone();
+        let locale = self.settings.read(cx).language.clone();
         let menu_overlay = self.open_menu.as_ref().map(|menu| {
             (
                 menu.position,
                 menu.channel_type,
                 menu.is_thread,
-                self.settings.read(cx).language.clone(),
+                locale.clone(),
+            )
+        });
+        let clan_menu_data = self.clan_menu_open.then(|| {
+            (
+                self.active_clan_id,
+                self.channel_list
+                    .read(cx)
+                    .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
+                locale.clone(),
             )
         });
 
@@ -441,24 +478,86 @@ impl Render for ChannelSidebar {
             .h_full()
             .pb(px(68.))
             .bg(theme.bg_secondary)
-            .child(
+            .child({
+                let sidebar = sidebar.clone();
+                let sidebar_for_menu = sidebar_for_clan_menu.clone();
+                let channel_list_for_menu = channel_list_for_clan_menu.clone();
+                let clan_name = self.active_clan_name_upper.clone();
+                let has_clan = self.active_clan_id.is_some();
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
+                    .relative()
                     .w_full()
                     .h(px(50.))
-                    .px_3()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.text_primary)
-                            .child(self.active_clan_name.clone()),
-                    ),
-            )
+                    .when(has_clan, |el| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .h_full()
+                                .px_3()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.bg_hover))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let sidebar = sidebar.clone();
+                                    move |_: &MouseDownEvent, _window, cx| {
+                                        if let Some(view) = sidebar.upgrade() {
+                                            view.update(cx, |this, cx| {
+                                                this.clan_menu_open = !this.clan_menu_open;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_base()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_primary)
+                                        .child(clan_name.clone()),
+                                )
+                                .child(
+                                    Icon::new(IconName::ChevronDownIcon)
+                                        .size(px(20.))
+                                        .text_color(theme.text_secondary),
+                                ),
+                        )
+                    })
+                    .when(!has_clan, |el| {
+                        el.child(
+                            div()
+                                .h_full()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary)
+                                .child(clan_name.clone()),
+                        )
+                    })
+                    .when_some(clan_menu_data, move |el, (clan_id, show_empty, locale)| {
+                        let Some(clan_id) = clan_id else {
+                            return el;
+                        };
+                        el.child(clan_menu_overlay(
+                            build_clan_menu(
+                                sidebar_for_menu.clone(),
+                                channel_list_for_menu.clone(),
+                                clan_id,
+                                &locale,
+                                show_empty,
+                            ),
+                            px(50.),
+                            px(8.),
+                        ))
+                    })
+            })
             .child(
                 div()
                     .flex_1()
@@ -472,7 +571,12 @@ impl Render for ChannelSidebar {
                 move |el, (position, channel_type, is_thread, locale)| {
                     el.child(context_menu_at(
                         position,
-                        build_channel_menu(sidebar, &locale, channel_type, is_thread),
+                        build_channel_menu(
+                            sidebar_for_channel_menu.clone(),
+                            &locale,
+                            channel_type,
+                            is_thread,
+                        ),
                     ))
                 },
             )

@@ -33,6 +33,7 @@ pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
     ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment, ApiChannelDesc, ApiPinMessage,
+    ApiThreadDesc,
     ApiVoiceChannelUser,
 };
 pub use transport_adapter::TransportAdapter;

@@ -330,8 +330,12 @@ impl ChannelMessages {
                     added_bottom,
                     removed_bottom,
                 } => {
-                    let was_at_end = this.list_state.is_scrolled_to_end().unwrap_or(true);
+                    let was_at_end = this
+                        .list_state
+                        .is_scrolled_to_end()
+                        .unwrap_or(this.at_bottom);
                     let prev_top = this.list_state.logical_scroll_top();
+                    let prev_count = this.list_state.item_count();
                     let h = usize::from(this.header_shown);
                     if *removed_top > 0 {
                         this.list_state.splice(h..h + *removed_top, 0);
@@ -362,10 +366,17 @@ impl ChannelMessages {
                                 offset_in_item: px(0.),
                             });
                         }
-                    } else if *added_bottom > 0 || *removed_top > 0 {
+                    } else if (*added_bottom > 0 || *removed_top > 0)
+                        && prev_top.item_ix < prev_count
+                    {
+                        let (item_ix, offset_in_item) = if prev_top.item_ix < *removed_top {
+                            (0, px(0.))
+                        } else {
+                            (prev_top.item_ix - *removed_top, prev_top.offset_in_item)
+                        };
                         this.list_state.scroll_to(gpui::ListOffset {
-                            item_ix: prev_top.item_ix.saturating_sub(*removed_top),
-                            offset_in_item: prev_top.offset_in_item,
+                            item_ix,
+                            offset_in_item,
                         });
                     }
                 }
@@ -798,7 +809,11 @@ impl ChannelMessages {
             for view in self.gif_videos.values() {
                 view.update(cx, |gif, cx| gif.set_playing(true, cx));
             }
-            if self.list_state.is_scrolled_to_end().unwrap_or(true) {
+            if self
+                .list_state
+                .is_scrolled_to_end()
+                .unwrap_or(self.at_bottom)
+            {
                 self.sync_channel_seen_when_focused(true, cx);
             }
         } else {
@@ -823,7 +838,10 @@ impl ChannelMessages {
         if self.active_videos.contains_key(&key) {
             return;
         }
-        self.active_videos.clear();
+        let previous: Vec<_> = self.active_videos.drain().map(|(_, view)| view).collect();
+        for view in previous {
+            view.update(cx, |video, cx| video.release_textures(window, cx));
+        }
         let view = cx.new(|cx| VideoPlayerView::new(activation, window, cx));
         self.active_videos.insert(key, view);
         cx.notify();
@@ -892,7 +910,7 @@ impl ChannelMessages {
         }
     }
 
-    fn apply_gif_reconcile(&mut self, cx: &mut Context<Self>) {
+    fn apply_gif_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let header = usize::from(self.header_shown);
         let count = self.list_state.item_count();
         let start = self.list_state.logical_scroll_top().item_ix.max(header);
@@ -942,7 +960,17 @@ impl ChannelMessages {
         let wanted_keys: std::collections::HashSet<(MessageId, usize)> =
             wanted.iter().map(|gif| gif.key).collect();
         let before = self.gif_videos.len();
-        self.gif_videos.retain(|key, _| wanted_keys.contains(key));
+        let stale: Vec<(MessageId, usize)> = self
+            .gif_videos
+            .keys()
+            .filter(|key| !wanted_keys.contains(*key))
+            .cloned()
+            .collect();
+        for key in stale {
+            if let Some(view) = self.gif_videos.remove(&key) {
+                view.update(cx, |gif, cx| gif.release_textures(window, cx));
+            }
+        }
         let mut changed = self.gif_videos.len() != before;
 
         for gif in wanted {
@@ -1360,7 +1388,9 @@ impl Render for ChannelMessages {
         self.clear_image_cache_if_channel_changed(window, cx);
         self.image_cache
             .update(cx, |cache, cx| cache.sweep(window, cx));
-        cx.defer_in(window, |this, _window, cx| this.apply_gif_reconcile(cx));
+        cx.defer_in(window, |this, window, cx| {
+            this.apply_gif_reconcile(window, cx)
+        });
         self.sync_render_identity(cx);
 
         let store = MessagesStore::global(cx);
@@ -1415,8 +1445,11 @@ impl Render for ChannelMessages {
         let welcome = self.welcome.clone();
         let onboarding = self.onboarding.clone();
         let has_more_bottom = store.read(cx).has_more_bottom();
-        let show_scroll_down =
-            has_more_bottom || !self.list_state.is_scrolled_to_end().unwrap_or(true);
+        let show_scroll_down = has_more_bottom
+            || !self
+                .list_state
+                .is_scrolled_to_end()
+                .unwrap_or(self.at_bottom);
         let unread_count = fab_unread_count(
             self.last_seen_at_bottom,
             store.read(cx).channel_tail_message_id(),
@@ -1466,7 +1499,7 @@ impl Render for ChannelMessages {
                         emoji_recent: &emoji_recent,
                         coming_soon: coming_soon.clone(),
                     };
-                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx)
+                    render_message_item(store.read(cx).viewport_messages(), msg_ix, &ctx, cx)
                 })
                 .flex_1()
                 .size_full()

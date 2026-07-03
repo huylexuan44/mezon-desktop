@@ -1,5 +1,8 @@
 use gpui::App;
+use mezon_client::transport::prioritize_avatar;
 
+use crate::account::AccountStore;
+use crate::clan::ClanList;
 use crate::clan_members::{ClanMember, ClanMembersStore, User};
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
 use crate::group_members::{GroupMember, GroupMembersStore};
@@ -84,6 +87,29 @@ impl UserProfileView {
     }
 }
 
+/// Avatar for the signed-in user in the active clan context (clan profile avatar, then account avatar).
+pub fn current_user_clan_avatar(cx: &App, clan_id: Option<ClanId>) -> String {
+    let store = AccountStore::global(cx).read(cx);
+    let clan = store
+        .clan_profile
+        .as_ref()
+        .filter(|profile| clan_id.is_none_or(|id| profile.clan_id == id));
+    let clan_av = clan
+        .and_then(|profile| profile.avatar_url.as_deref())
+        .unwrap_or("");
+    let user_av = store
+        .account
+        .as_ref()
+        .and_then(|acct| acct.avatar_url.as_deref())
+        .unwrap_or("");
+    prioritize_avatar(clan_av, user_av)
+}
+
+/// Active clan id when the user is in a clan channel view.
+pub fn active_clan_id(cx: &App) -> Option<ClanId> {
+    ClanList::global(cx).read(cx).active_clan_id
+}
+
 /// Resolve a single user's profile for the popover, mirroring React's `useUserById`: a clan
 /// channel reads the clan member, a DM group reads the group member, and a 1-1 DM resolves the
 /// peer from the already-loaded [`DirectChannel`] (plus any cached friend record) — **no API call**.
@@ -99,6 +125,39 @@ pub fn resolve_user_profile(
             .member(clan_id, user_id)
             .map(|member| UserProfileView::from_clan_member(member, online)),
         ProfileContext::Direct(channel_id) => resolve_direct(channel_id, user_id, online, cx),
+    }
+}
+
+pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) -> Option<String> {
+    match context {
+        ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
+            .read(cx)
+            .member(clan_id, user_id)
+            .map(|member| member.avatar().to_string()),
+        ProfileContext::Direct(channel_id) => {
+            let kind = DirectMessageStore::global(cx)
+                .read(cx)
+                .find(channel_id)
+                .map(|dm| dm.kind)?;
+            match kind {
+                DirectKind::Group => GroupMembersStore::global(cx)
+                    .read(cx)
+                    .member(channel_id, user_id)
+                    .map(|member| member.avatar().to_string()),
+                DirectKind::Dm => {
+                    if let Some(url) = UsersByUserStore::global(cx)
+                        .read(cx)
+                        .user(user_id)
+                        .map(|user| user.avatar_url.clone())
+                    {
+                        return Some(url);
+                    }
+                    let store = DirectMessageStore::global(cx);
+                    let dm = store.read(cx).find(channel_id)?;
+                    (dm.peer_user_id == Some(user_id)).then(|| dm.avatar.clone())
+                }
+            }
+        }
     }
 }
 

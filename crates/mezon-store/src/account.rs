@@ -70,6 +70,7 @@ pub struct AccountStore {
     pub nickname_duplicate: bool,
     account_freshness: Freshness,
     devices_freshness: Freshness,
+    reset_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -102,6 +103,7 @@ impl AccountStore {
             nickname_duplicate: false,
             account_freshness: Freshness::new(),
             devices_freshness: Freshness::new(),
+            reset_generation: 0,
             api,
             _conn_watch: conn_watch,
         }
@@ -184,6 +186,7 @@ impl AccountStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.account = None;
         self.account_loading = false;
         self.account_error = false;
@@ -220,10 +223,14 @@ impl AccountStore {
         cx.notify();
 
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| match api.get_account().await {
             Ok(acct) => {
                 let account = user_account_from_api(acct);
                 let _ = this.update(cx, |this, cx| {
+                    if this.reset_generation != generation {
+                        return;
+                    }
                     Self::spawn_persist_cache(&account, cx);
                     this.account = Some(account);
                     this.account_freshness.mark_fetched();
@@ -236,6 +243,9 @@ impl AccountStore {
             Err(e) => {
                 tracing::error!("Failed to load account: {e}");
                 let _ = this.update(cx, |this, cx| {
+                    if this.reset_generation != generation {
+                        return;
+                    }
                     this.account_loading = false;
                     this.account_error = true;
                     cx.emit(AccountEvent::AccountLoadFailed);

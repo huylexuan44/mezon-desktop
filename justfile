@@ -6,6 +6,10 @@
 # some of their test targets don't even compile against our pinned deps).
 pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater"
 
+# Formatting scope — pkgs plus mezon-voice (excluded from clippy/test above),
+# still excluding vendored crates (read-only, carry upstream fmt drift).
+fmt_pkgs := pkgs + " -p mezon-voice"
+
 # List available recipes
 default:
     @just help
@@ -79,11 +83,11 @@ check:
 # Strict linting (Use before commit/push)
 lint:
     cargo clippy {{pkgs}} --all-targets --all-features --locked -- -D warnings
-    cargo fmt --all -- --check
+    cargo fmt {{fmt_pkgs}} -- --check
 
 # Auto-fix formatting and clippy suggestions
 fix:
-    cargo fmt --all
+    cargo fmt {{fmt_pkgs}}
     cargo clippy {{pkgs}} --fix --allow-dirty --allow-staged
 
 # ------------------------------------------------------------------------------

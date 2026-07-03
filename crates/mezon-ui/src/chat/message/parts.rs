@@ -1,16 +1,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Entity, FontWeight, ObjectFit, SharedString, Transformation, div, img, prelude::*,
-    px, radians, rems,
+    AnyElement, App, Entity, FontWeight, ObjectFit, SharedString, Transformation, div, img,
+    prelude::*, px, radians, rems,
 };
 use mezon_store::{
     AlbumLayout, ChannelType, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
-    MessagesStore, Reaction, ViewerMedia,
+    MessagesStore, Reaction, ViewerMedia, resolve_avatar_url,
 };
-
-// image-viewer: disabled, reimplement later
-// use super::image_viewer::ImageViewer;
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
@@ -21,21 +18,42 @@ use crate::app::shell::Shell;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 
-pub fn avatar_element(msg: &Message, ctx: &RowCtx) -> AnyElement {
+pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
+    let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let mut avatar = Avatar::new()
         .name(msg.sender_name.clone())
         .with_size(Size::Small)
         .image_cache(ctx.avatar_cache.clone());
-    let proxied = msg.avatar_proxied.clone();
-    if !proxied.is_empty() {
-        avatar = avatar.src(proxied.clone());
-        if !msg.avatar_url.is_empty() && msg.avatar_url != proxied {
-            avatar = avatar.fallback_src(msg.avatar_url.clone());
+    if let Some(proxied) = proxied {
+        avatar = avatar.src(proxied);
+        if !raw_url.is_empty() {
+            avatar = avatar.fallback_src(raw_url);
         }
-    } else if !msg.avatar_url.is_empty() {
-        avatar = avatar.src(msg.avatar_url.clone());
+    } else if !raw_url.is_empty() {
+        avatar = avatar.src(raw_url);
     }
     avatar.into_any_element()
+}
+
+fn resolve_message_avatar_urls(
+    msg: &Message,
+    ctx: &RowCtx,
+    cx: &App,
+) -> (String, Option<SharedString>) {
+    if let Some(context) = ctx.profile_context
+        && let Some(user_id) = msg.sender_user_id
+        && let Some(avatar_url) = resolve_avatar_url(user_id, context, cx)
+        && !avatar_url.is_empty()
+    {
+        let proxied = crate::util::imgproxy::avatar_url(cx, &avatar_url);
+        return (avatar_url, Some(SharedString::from(proxied)));
+    }
+
+    let proxied = msg.avatar_proxied.clone();
+    if !proxied.is_empty() {
+        return (msg.avatar_url.to_string(), Some(proxied));
+    }
+    (msg.avatar_url.to_string(), None)
 }
 
 pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
@@ -86,10 +104,45 @@ fn reply_preview_line(content: &str) -> String {
 
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
-    let is_deleted = reference.message_ref_id.is_zero();
-    let preview = if is_deleted {
-        mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()
-    } else if reference.content.is_empty() {
+    if reference.message_ref_id.is_zero() {
+        return div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h(px(24.))
+            .pl(px(super::context::REPLY_INSET))
+            .pr(px(super::context::CONTENT_RIGHT_PAD))
+            .text_size(px(14.))
+            .child(
+                Icon::new(IconName::ReplyCorner)
+                    .size_4()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .size_6()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.tokens.bg_icon_theme)
+                    .child(
+                        Icon::new(IconName::IconReplyMessDeletedWeb)
+                            .size_4()
+                            .text_color(theme.tokens.text_theme_primary),
+                    ),
+            )
+            .child(
+                div()
+                    .italic()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()),
+            )
+            .into_any_element();
+    }
+
+    let preview = if reference.content.is_empty() {
         if reference.has_attachment {
             mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()
         } else {
@@ -148,7 +201,6 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .min_w_0()
                 .truncate()
                 .text_color(theme.tokens.text_theme_message)
-                .when(is_deleted, |d| d.italic())
                 .child(preview),
         )
         .into_any_element()

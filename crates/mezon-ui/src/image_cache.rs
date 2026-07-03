@@ -16,6 +16,9 @@ pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
 pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
+pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 8;
+pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// App-wide fallback cache attached at the root, so any `img`/avatar that does
 /// not declare its own cache uses this bounded LRU instead of GPUI's unbounded
 /// global asset cache (which never evicts and leaks RAM for every URL seen).
@@ -23,8 +26,6 @@ pub const SHARED_IMAGE_CACHE_CAPACITY: usize = 384;
 pub const SHARED_IMAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 48;
 pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
-pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 24;
-pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 96 * 1024 * 1024;
 pub const VIEWER_IMAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Per-image decoded-size caps. A compressed file is tiny on the wire but is

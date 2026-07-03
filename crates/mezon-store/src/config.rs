@@ -393,7 +393,7 @@ impl AppConfig {
     }
 
     pub fn emoji_src(&self, emoji_id: &str) -> String {
-        if emoji_id.is_empty() {
+        if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
         let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);

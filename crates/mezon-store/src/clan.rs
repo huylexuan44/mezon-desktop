@@ -1,13 +1,54 @@
 use crate::channel::ChannelList;
+use crate::config::AppConfig;
 use crate::ids::{ChannelId, ClanId, UserId};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiClanDesc;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
+use mezon_proto::api::{SystemMessage, SystemMessageRequest, UpdateClanDescRequest};
 
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+pub const MAX_CLAN_LOGO_BYTES: u64 = 1_000_000;
+pub const MAX_CLAN_BANNER_BYTES: u64 = 10_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClanImageMimeType {
+    Jpeg,
+    Png,
+    Gif,
+    Webp,
+}
+
+impl ClanImageMimeType {
+    pub const ALLOWED_EXTENSIONS: &'static [&'static str] = &["jpg", "jpeg", "png", "gif", "webp"];
+
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            "png" => Some(Self::Png),
+            "gif" => Some(Self::Gif),
+            "webp" => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    pub fn is_allowed_extension(ext: &str) -> bool {
+        Self::from_extension(ext).is_some()
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Clan {
@@ -26,6 +67,89 @@ pub struct Clan {
     pub prevent_anonymous: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClanSystemMessage {
+    pub channel_id: ChannelId,
+    pub welcome_random: bool,
+    pub welcome_sticker: bool,
+    pub boost_message: bool,
+    pub setup_tips: bool,
+    pub hide_audit_log: bool,
+}
+
+impl ClanSystemMessage {
+    pub fn from_proto(msg: SystemMessage) -> Self {
+        Self {
+            channel_id: ChannelId(msg.channel_id),
+            welcome_random: msg.welcome_random == "1",
+            welcome_sticker: msg.welcome_sticker == "1",
+            boost_message: msg.boost_message == "1",
+            setup_tips: msg.setup_tips == "1",
+            hide_audit_log: msg.hide_audit_log,
+        }
+    }
+
+    fn into_request(self, clan_id: ClanId) -> SystemMessageRequest {
+        SystemMessageRequest {
+            clan_id: clan_id.get(),
+            channel_id: self.channel_id.get(),
+            welcome_random: bool_flag(self.welcome_random),
+            welcome_sticker: bool_flag(self.welcome_sticker),
+            boost_message: bool_flag(self.boost_message),
+            setup_tips: bool_flag(self.setup_tips),
+            hide_audit_log: self.hide_audit_log,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClanOverviewDraft {
+    pub clan_name: String,
+    pub logo: String,
+    pub banner: String,
+    pub welcome_channel_id: Option<ChannelId>,
+    pub prevent_anonymous: bool,
+}
+
+impl ClanOverviewDraft {
+    fn update_request(&self, clan_id: ClanId, clan: &Clan) -> UpdateClanDescRequest {
+        UpdateClanDescRequest {
+            clan_id: clan_id.get(),
+            clan_name: self.clan_name.trim().to_string(),
+            logo: Some(self.logo.clone()),
+            banner: Some(self.banner.clone()),
+            prevent_anonymous: self.prevent_anonymous,
+            welcome_channel_id: proto_channel_id(
+                self.welcome_channel_id.or(clan.welcome_channel_id),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn clan_update(&self, clan: &Clan, name: String) -> ClanUpdate {
+        ClanUpdate {
+            name: Some(name),
+            logo: self.logo.clone(),
+            banner: self.banner.clone(),
+            welcome_channel_id: self.welcome_channel_id.or(clan.welcome_channel_id),
+            status: clan.status,
+            is_onboarding: clan.is_onboarding,
+            is_community: clan.is_community,
+            prevent_anonymous: self.prevent_anonymous,
+        }
+    }
+}
+
+fn proto_channel_id(id: Option<ChannelId>) -> i64 {
+    id.map(|id| id.get())
+        .filter(|id| *id != 0)
+        .unwrap_or_default()
+}
+
+fn bool_flag(value: bool) -> String {
+    if value { "1" } else { "0" }.to_string()
+}
+
 impl From<ApiClanDesc> for Clan {
     fn from(c: ApiClanDesc) -> Self {
         let avatar_url = (!c.logo.is_empty()).then_some(c.logo);
@@ -42,10 +166,10 @@ impl From<ApiClanDesc> for Clan {
             has_unread: false,
             muted: false,
             welcome_channel_id,
-            status: 0,
-            is_onboarding: false,
-            is_community: false,
-            prevent_anonymous: false,
+            status: c.status,
+            is_onboarding: c.is_onboarding,
+            is_community: c.is_community,
+            prevent_anonymous: c.prevent_anonymous,
         }
     }
 }
@@ -71,6 +195,7 @@ pub struct ClanList {
     pub active_clan_id: Option<ClanId>,
     api: Arc<AppApi>,
     loading: bool,
+    reset_generation: u64,
     _connection_watch: Task<()>,
 }
 
@@ -98,6 +223,7 @@ impl ClanList {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.clans.clear();
         self.loading = false;
         if self.active_clan_id.take().is_some() {
@@ -114,6 +240,7 @@ impl ClanList {
             active_clan_id: None,
             api,
             loading: false,
+            reset_generation: 0,
             _connection_watch: connection_watch,
         }
     }
@@ -167,6 +294,7 @@ impl ClanList {
         }
         self.loading = true;
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             const MAX_RETRIES: u32 = 3;
             let mut attempt = 0u32;
@@ -185,7 +313,9 @@ impl ClanList {
                     Err(e) => {
                         tracing::error!("Failed to load clans after {attempt} retries: {e}");
                         let _ = this.update(cx, |this, _| {
-                            this.loading = false;
+                            if this.reset_generation == generation {
+                                this.loading = false;
+                            }
                         });
                         return;
                     }
@@ -211,6 +341,9 @@ impl ClanList {
                 })
                 .collect();
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
                 this.loading = false;
                 this.update_clans(mapped, cx);
                 if let Some(clan_id) = this.active_clan_id {
@@ -337,11 +470,12 @@ impl ClanList {
     }
 
     pub fn set_badge_count(&mut self, clan_id: ClanId, count: u32, cx: &mut Context<Self>) {
-        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
-            && clan.badge_count != count
-        {
-            clan.badge_count = count;
-            cx.notify();
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id) {
+            let count = if clan.muted { 0 } else { count };
+            if clan.badge_count != count {
+                clan.badge_count = count;
+                cx.notify();
+            }
         }
     }
 
@@ -362,7 +496,7 @@ impl ClanList {
     }
 
     pub fn clan(&self, clan_id: ClanId) -> Option<&Clan> {
-        self.clans.iter().find(|c| c.id == clan_id)
+        self.clan_by_id(clan_id)
     }
 
     pub fn active_clan_banner(&self) -> Option<&str> {
@@ -449,16 +583,20 @@ impl ClanList {
         })
     }
 
-    pub fn upload_clan_logo(
+    pub fn upload_clan_image(
         &self,
         path: &Path,
+        max_bytes: u64,
         cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<String>> {
+    ) -> Task<Result<String, String>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
-        cx.spawn(async move |_this, cx| {
+        let base_img_url = AppConfig::global(cx).base_img_url.clone();
+        cx.spawn(async move |_, cx| {
             cx.background_executor()
-                .spawn(async move { api.upload_avatar(&path).await })
+                .spawn(async move {
+                    upload_clan_image_to_cdn(&api, &base_img_url, &path, max_bytes).await
+                })
                 .await
         })
     }
@@ -478,6 +616,181 @@ impl ClanList {
     pub fn apply_saved_order(&mut self, order: &[ClanId]) {
         apply_clan_order(&mut self.clans, order);
     }
+
+    pub fn clan_by_id(&self, clan_id: ClanId) -> Option<&Clan> {
+        self.clans.iter().find(|c| c.id == clan_id)
+    }
+
+    pub fn fetch_system_message(
+        &self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ClanSystemMessage, String>> {
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            let msg = api
+                .get_system_message_by_clan_id(id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(ClanSystemMessage::from_proto(msg))
+        })
+    }
+
+    pub fn save_clan_overview(
+        &mut self,
+        clan_id: ClanId,
+        draft: ClanOverviewDraft,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let clan = self.clans.iter().find(|c| c.id == clan_id).cloned();
+        let Some(clan) = clan else {
+            return cx.spawn(async move |_, _| Err("clan not found".into()));
+        };
+        let request = draft.update_request(clan_id, &clan);
+        let trimmed_name = draft.clan_name.trim().to_string();
+        let previous_name = clan.name.clone();
+        let local_update = draft.clan_update(&clan, trimmed_name.clone());
+        cx.spawn(async move |this, cx| {
+            if trimmed_name != previous_name.trim() {
+                let is_duplicate = api
+                    .check_duplicate_clan_name(&trimmed_name, "0")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if is_duplicate {
+                    return Err("Duplicate clan name".into());
+                }
+            }
+
+            api.update_clan_desc(request)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            this.update(cx, |this, cx| {
+                let _ = update_clan(&mut this.clans, clan_id, local_update);
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn save_system_message(
+        &self,
+        clan_id: ClanId,
+        draft: ClanSystemMessage,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        let request = draft.into_request(clan_id);
+        cx.spawn(async move |_, _| {
+            api.update_system_message(request)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn check_clan_name_available(
+        &self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool, String>> {
+        let api = self.api.clone();
+        let name = name.trim().to_string();
+        cx.spawn(async move |_, _| {
+            api.check_duplicate_clan_name(&name, "0")
+                .await
+                .map(|dup| !dup)
+                .map_err(|e| e.to_string())
+        })
+    }
+}
+
+fn timestamped_upload_filename(original: &str) -> String {
+    let sanitized = original
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{ms}_{sanitized}")
+}
+
+fn image_dimensions(data: &[u8]) -> (i32, i32) {
+    image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .map(|(w, h)| {
+            (
+                i32::try_from(w).unwrap_or(i32::MAX),
+                i32::try_from(h).unwrap_or(i32::MAX),
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
+fn read_clan_image_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len == 0 {
+        return Err("File is empty".into());
+    }
+    if len > max_bytes {
+        return Err(format!("File exceeds {max_bytes}-byte limit ({len} bytes)"));
+    }
+    std::fs::read(path).map_err(|e| e.to_string())
+}
+
+async fn upload_clan_image_to_cdn(
+    api: &AppApi,
+    base_img_url: &str,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<String, String> {
+    let path_buf = path.to_path_buf();
+    let data = mezon_client::transport_runtime::handle()
+        .spawn_blocking(move || read_clan_image_file(&path_buf, max_bytes))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let raw_filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("avatar");
+    let filename = timestamped_upload_filename(raw_filename);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let filetype = ClanImageMimeType::from_extension(&ext)
+        .ok_or_else(|| format!("Unsupported image extension: .{ext}"))?
+        .as_str();
+    let size = i32::try_from(data.len()).map_err(|_| "Image file is too large".to_string())?;
+    let (width, height) = image_dimensions(&data);
+
+    let upload = api
+        .upload_attachment_file(&filename, filetype, size, width, height)
+        .await
+        .map_err(|e| e.to_string())?;
+    mezon_client::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if upload.filename.is_empty() {
+        return Err("UploadAttachmentFile returned empty filename".into());
+    }
+    let base = base_img_url.trim_end_matches('/');
+    Ok(format!("{base}/{}", upload.filename))
 }
 
 fn apply_clan_order(clans: &mut Vec<Clan>, order: &[ClanId]) {
@@ -513,9 +826,7 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
         clan.name = name;
     }
     clan.avatar_url = (!update.logo.is_empty()).then_some(update.logo);
-    if !update.banner.is_empty() {
-        clan.banner_url = Some(update.banner);
-    }
+    clan.banner_url = (!update.banner.is_empty()).then_some(update.banner);
     if let Some(wc) = update.welcome_channel_id {
         clan.welcome_channel_id = Some(wc);
     }
@@ -654,6 +965,10 @@ mod tests {
             logo: "logo.png".into(),
             banner: String::new(),
             welcome_channel_id: 0,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         };
         let clan = Clan::from(desc);
         assert_eq!(clan.badge_count, 0);
@@ -661,6 +976,17 @@ mod tests {
         assert!(!clan.muted);
         assert_eq!(clan.avatar_url.as_deref(), Some("logo.png"));
         assert!(clan.welcome_channel_id.is_none());
+    }
+
+    #[test]
+    fn clan_image_mime_type_matches_allowed_extensions() {
+        for ext in ClanImageMimeType::ALLOWED_EXTENSIONS {
+            assert!(
+                ClanImageMimeType::from_extension(ext).is_some(),
+                "missing mime mapping for .{ext}"
+            );
+        }
+        assert!(ClanImageMimeType::from_extension("bmp").is_none());
     }
 
     #[test]
@@ -673,6 +999,10 @@ mod tests {
             logo: String::new(),
             banner: String::new(),
             welcome_channel_id: 0,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         };
         assert_eq!(Clan::from(desc).creator_id, UserId(7));
     }
@@ -701,10 +1031,14 @@ mod tests {
     #[test]
     fn set_has_unread_message_sets_flag() {
         let mut c = clans();
-        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1))
+            && !clan.muted
+        {
             clan.has_unread = false;
         }
-        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1))
+            && !clan.muted
+        {
             clan.has_unread = true;
         }
         assert!(c[0].has_unread);
@@ -714,7 +1048,9 @@ mod tests {
     #[test]
     fn increment_clan_badge_when_not_muted() {
         let mut c = clans();
-        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|c| c.id == ClanId(1))
+            && !clan.muted
+        {
             clan.badge_count = clan.badge_count.saturating_add(1);
         }
         assert_eq!(c[0].badge_count, 1);
@@ -724,7 +1060,9 @@ mod tests {
     fn increment_clan_badge_skipped_when_muted() {
         let mut c = clans();
         c[0].muted = true;
-        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1)) && !clan.muted {
+        if let Some(clan) = c.iter_mut().find(|cl| cl.id == ClanId(1))
+            && !clan.muted
+        {
             clan.badge_count = clan.badge_count.saturating_add(1);
         }
         assert_eq!(c[0].badge_count, 0);
@@ -777,6 +1115,10 @@ mod tests {
             logo: "logo.png".into(),
             banner: String::new(),
             welcome_channel_id: 0,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         };
         apply_created_clan(&mut clans, desc);
         assert_eq!(clans.len(), 3);
@@ -798,6 +1140,10 @@ mod tests {
             logo: String::new(),
             banner: String::new(),
             welcome_channel_id: 0,
+            status: 0,
+            is_onboarding: false,
+            is_community: false,
+            prevent_anonymous: false,
         };
         apply_created_clan(&mut clans, desc);
         assert_eq!(clans.len(), 2);

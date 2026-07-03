@@ -1,14 +1,17 @@
-use gpui::{AnyView, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, MessagesStore, Settings, VoiceMember,
-    VoiceStore,
+    DirectKind, DirectMessageStore, GroupMembersStore, MessagesStore, Settings, ThreadsEvent,
+    ThreadsStore, VoiceMember, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 
+use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
 use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
+use crate::components::primitives::{InputEvent, InputState};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::{ChannelSidebar, ClanSidebar, DirectSidebar};
@@ -28,9 +31,23 @@ pub struct ChatLayout {
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
+    pub(crate) thread_popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
+    pub(crate) thread_search_input: Option<Entity<InputState>>,
+    thread_name_input: Option<Entity<InputState>>,
+    create_thread_message_input: Option<Entity<InputState>>,
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
+    displayed_threads_panel: ThreadsPanelSlice,
+    pending_open_threads_popover: bool,
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct ThreadsPanelSlice {
+    creating: bool,
+    submitting: bool,
+    create_private: bool,
+    name_error: Option<String>,
 }
 
 struct ActiveChannelSlice {
@@ -125,6 +142,18 @@ impl ChatLayout {
         })
         .detach();
 
+        let threads_store = ThreadsStore::global(cx);
+        cx.observe(&threads_store, |this, _, cx| {
+            if this.threads_panel_state_changed(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&threads_store, |this, _, event, cx| {
+            this.on_threads_event(event, cx);
+        })
+        .detach();
+
         cx.subscribe(
             &mezon_store::ClanMembersStore::global(cx),
             |this, _, event: &mezon_store::ClanMembersEvent, cx| {
@@ -140,8 +169,8 @@ impl ChatLayout {
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
-            //TODO: recheck behaviour
             if this.active_channel_display_changed(cx) {
+                this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
                 cx.notify();
             }
@@ -150,8 +179,9 @@ impl ChatLayout {
         cx.observe(&Router::global(cx), |this, _, cx| {
             if matches!(
                 Router::global(cx).read(cx).route(),
-                Route::Direct | Route::DirectMessage { .. }
+                Route::Direct | Route::Friends | Route::DirectMessage { .. }
             ) {
+                this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
             }
             this.sync_active_from_route(cx);
@@ -174,9 +204,15 @@ impl ChatLayout {
             pending_channel_id: None,
             prefetched_voice_channel: None,
             show_member_list: true,
+            thread_popover_handle: PopoverMenuHandle::default(),
+            thread_search_input: None,
+            thread_name_input: None,
+            create_thread_message_input: None,
             pin_popover_handle: PopoverMenuHandle::default(),
             displayed_active_channel: None,
             displayed_voice_mini: None,
+            displayed_threads_panel: ThreadsPanelSlice::default(),
+            pending_open_threads_popover: false,
         };
         this.sync_active_from_route(cx);
         this
@@ -363,6 +399,22 @@ impl ChatLayout {
         }
     }
 
+    fn threads_panel_state_changed(&mut self, cx: &Context<Self>) -> bool {
+        let store = ThreadsStore::global(cx);
+        let store = store.read(cx);
+        let next = ThreadsPanelSlice {
+            creating: store.is_creating(),
+            submitting: store.is_submitting(),
+            create_private: store.create_private(),
+            name_error: store.name_error().map(str::to_string),
+        };
+        if self.displayed_threads_panel == next {
+            return false;
+        }
+        self.displayed_threads_panel = next;
+        true
+    }
+
     fn active_channel_display_changed(&mut self, cx: &Context<Self>) -> bool {
         let changed = {
             let channels = self.channel_list.read(cx);
@@ -484,10 +536,42 @@ impl Render for ChatLayout {
         self.chat_area.bind_window(window, cx);
         self.maybe_prefetch_voice_token(cx);
 
+        if std::mem::take(&mut self.pending_open_threads_popover) {
+            let handle = self.thread_popover_handle.clone();
+            window.defer(cx, move |window, cx| handle.show(window, cx));
+        }
+
         let nav_body = self.render_nav_body(cx);
-        let content = self.render_content(cx);
-        let voice_mini_bar = self.render_voice_mini_bar(cx);
         let locale = self.settings.read(cx).language.clone();
+        let create_panel = self.build_create_thread_panel(&locale, window, cx);
+        let chat_content = self.render_content(cx);
+        let main_content = if let Some(panel) = create_panel {
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .w_full()
+                .min_w_0()
+                .h_full()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(chat_content),
+                )
+                .child(panel)
+                .into_any_element()
+        } else {
+            chat_content
+        };
+        let voice_mini_bar = self.render_voice_mini_bar(cx);
         let fullscreen = if self.connected_call_is_active(cx) {
             crate::chat::voice::render_screen_fullscreen_overlay(
                 cx.theme(),
@@ -548,9 +632,8 @@ impl Render for ChatLayout {
                             .occlude()
                             .children(voice_mini_bar)
                             .child(
-                                AnyView::from(self.user_info_bar.clone()).cached(
-                                    StyleRefinement::default().w_full().h(px(56.0)),
-                                ),
+                                AnyView::from(self.user_info_bar.clone())
+                                    .cached(StyleRefinement::default().w_full().h(px(56.0))),
                             ),
                     ),
             )
@@ -559,9 +642,12 @@ impl Render for ChatLayout {
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
+                    .min_h_0()
+                    .overflow_hidden()
                     .bg(theme.bg_primary)
-                    .child(content),
+                    .child(main_content),
             )
             .children(fullscreen)
     }
@@ -586,6 +672,203 @@ impl ChatLayout {
             &self.auth_state,
             cx,
         );
+    }
+
+    pub(crate) fn open_create_thread(&mut self, cx: &mut Context<Self>) {
+        self.thread_popover_handle.hide(cx);
+        self.clear_create_thread_inputs(cx);
+        ThreadsStore::global(cx).update(cx, |store, cx| store.start_create(cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_create_thread(&mut self, cx: &mut Context<Self>) {
+        ThreadsStore::global(cx).update(cx, |store, cx| store.cancel_create(cx));
+        self.clear_create_thread_inputs(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_create_thread_private(&mut self, private: bool, cx: &mut Context<Self>) {
+        ThreadsStore::global(cx).update(cx, |store, cx| {
+            store.set_create_private(private, cx);
+        });
+    }
+
+    pub(crate) fn dismiss_threads_popover(&mut self, cx: &mut Context<Self>) {
+        self.thread_popover_handle.hide(cx);
+        self.clear_thread_search(cx);
+        self.close_create_thread(cx);
+    }
+
+    fn clear_create_thread_inputs(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = &self.thread_name_input {
+            input.update(cx, |state, cx| state.clear(cx));
+        }
+        if let Some(input) = &self.create_thread_message_input {
+            input.update(cx, |state, cx| state.clear(cx));
+        }
+    }
+
+    fn clear_thread_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = &self.thread_search_input {
+            input.update(cx, |state, cx| state.clear(cx));
+        }
+        ThreadsStore::global(cx).update(cx, |store, cx| {
+            store.set_search_query(String::new(), cx);
+        });
+    }
+
+    pub(crate) fn submit_create_thread(
+        &mut self,
+        name: String,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        ThreadsStore::global(cx).update(cx, |store, cx| {
+            store.submit_create(name, message, cx);
+        });
+        let _ = window;
+    }
+
+    pub(crate) fn navigate_to_thread(
+        &mut self,
+        channel_id: &str,
+        clan_id: &str,
+        parent_id: &str,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(channel_id) = channel_id.parse::<ChannelId>() else {
+            return;
+        };
+        let Ok(clan_id) = clan_id.parse::<ClanId>() else {
+            return;
+        };
+        self.thread_popover_handle.hide(cx);
+        self.clear_thread_search(cx);
+        let label = label.to_string();
+        let parent = parent_id.parse::<ChannelId>().ok();
+        self.channel_list.update(cx, |list, cx| {
+            if let Some(parent) = parent {
+                list.ensure_thread_with_parent(channel_id, parent, clan_id, label.clone(), cx);
+            } else {
+                list.ensure_thread_channel(channel_id, label.clone(), cx);
+            }
+            list.select_channel(channel_id, cx);
+        });
+        crate::router::navigate(
+            cx,
+            Route::Channel {
+                clan_id,
+                channel_id,
+            },
+        );
+    }
+
+    fn on_threads_event(&mut self, event: &ThreadsEvent, cx: &mut Context<Self>) {
+        match event {
+            ThreadsEvent::ThreadCreated {
+                channel_id,
+                clan_id,
+            } => {
+                self.close_create_thread(cx);
+                self.navigate_to_thread(channel_id, clan_id, "", "", cx);
+                ThreadsStore::global(cx).update(cx, |store, cx| store.refresh(cx));
+            }
+            ThreadsEvent::CreateFailed { message } => {
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.error(message.clone(), cx);
+                });
+                cx.notify();
+            }
+            ThreadsEvent::OpenPopoverRequested => {
+                self.pending_open_threads_popover = true;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn ensure_thread_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.thread_search_input.is_some() {
+            return;
+        }
+        let locale = self.settings.read(cx).language.clone();
+        let placeholder = mezon_i18n::t(&locale, "channelMenu.menu.thread.searchThreads");
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .embedded(true)
+        });
+        let input_for_sub = input.clone();
+        cx.subscribe_in(&input, window, move |_, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = input_for_sub.read(cx).value().to_string();
+                ThreadsStore::global(cx).update(cx, |store, cx| {
+                    store.set_search_query(query, cx);
+                });
+            }
+        })
+        .detach();
+        self.thread_search_input = Some(input);
+    }
+
+    pub(crate) fn settings_language(&self, cx: &App) -> String {
+        self.settings.read(cx).language.clone()
+    }
+
+    fn ensure_create_thread_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_name_input.is_none() {
+            let locale = self.settings.read(cx).language.clone();
+            let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
+            self.thread_name_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+        }
+        if self.create_thread_message_input.is_none() {
+            let locale = self.settings.read(cx).language.clone();
+            let ph = mezon_i18n::t(&locale, "chat.messagePlaceholder");
+            self.create_thread_message_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
+        }
+    }
+
+    fn build_create_thread_panel(
+        &mut self,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !ThreadsStore::global(cx).read(cx).is_creating() {
+            return None;
+        }
+        self.ensure_create_thread_inputs(window, cx);
+        let name_input = self.thread_name_input.clone()?;
+        let message_input = self.create_thread_message_input.clone()?;
+        let theme = cx.theme().clone();
+        let name_error = ThreadsStore::global(cx)
+            .read(cx)
+            .name_error()
+            .map(|s| s.to_string());
+        let submitting = ThreadsStore::global(cx).read(cx).is_submitting();
+        let create_private = ThreadsStore::global(cx).read(cx).create_private();
+
+        Some(
+            crate::chat::create_thread_panel::render_create_thread_panel(
+                crate::chat::create_thread_panel::CreateThreadPanelParams {
+                    thread_name_input: name_input,
+                    message_input,
+                    name_error: name_error.as_deref(),
+                    submitting,
+                    create_private,
+                    locale,
+                    theme: &theme,
+                    layout: cx.entity(),
+                },
+            ),
+        )
     }
 
     pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
@@ -828,6 +1111,7 @@ impl ChatLayout {
             | Route::SettingsLanguage
             | Route::SettingsVoice
             | Route::SettingsAdvanced
+            | Route::ClanSettings { .. }
             | Route::NotFound { .. } => div().into_any_element(),
         };
 

@@ -150,8 +150,9 @@ pub struct ChannelList {
     remembered_channels: HashMap<ClanId, ChannelId>,
     api: Arc<AppApi>,
     collapsed: HashSet<(String, String)>,
-    show_empty_categories: bool,
+    show_empty_categories: HashSet<ClanId>,
     channel_index: RefCell<ChannelLocationCache>,
+    reset_generation: u64,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
@@ -215,6 +216,7 @@ impl ChannelList {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.cache.clear();
         self.app_channels_cache.clear();
         self.topic_parent_badges.clear();
@@ -279,8 +281,9 @@ impl ChannelList {
             remembered_channels: HashMap::new(),
             api,
             collapsed: HashSet::new(),
-            show_empty_categories: true,
+            show_empty_categories: HashSet::new(),
             channel_index: RefCell::new(ChannelLocationCache::default()),
+            reset_generation: 0,
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
@@ -363,11 +366,15 @@ impl ChannelList {
         }
         self.loading.insert(clan_id);
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = Self::fetch_clan_data(&api, clan_id).await;
             match result {
                 Ok((mut categories, app_channels, last_messages)) => {
                     let _ = this.update(cx, |this, cx| {
+                        if this.reset_generation != generation {
+                            return;
+                        }
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.merge_pending_badges(&mut categories);
@@ -704,6 +711,49 @@ impl ChannelList {
             self.notify_channel_list(clan_id, cx);
         }
         self.sync_clan_after_read(clan_id, cleared_badge, cx);
+    }
+
+    pub fn apply_clan_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for category in categories.iter_mut() {
+                for ch in &category.channels {
+                    if ch.badge_count > 0 || ch.is_unread() {
+                        changed = true;
+                    }
+                }
+                Self::mark_channels_read(&mut category.channels);
+            }
+        }
+        if changed {
+            self.notify_channel_list(clan_id, cx);
+        }
+    }
+
+    pub fn mark_clan_as_read(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.apply_clan_read(clan_id, cx);
+        ClanList::global(cx).update(cx, |cl, cx| cl.apply_badge_read(clan_id, cx));
+        let api = self.api.clone();
+        let id = clan_id.get();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = api.mark_as_read(0, 0, id).await {
+                tracing::error!("mark clan as read failed for clan {id}: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn is_show_empty_category(&self, clan_id: ClanId) -> bool {
+        self.show_empty_categories.contains(&clan_id)
+    }
+
+    pub fn set_show_empty_category(&mut self, clan_id: ClanId, show: bool, cx: &mut Context<Self>) {
+        if show {
+            self.show_empty_categories.insert(clan_id);
+        } else {
+            self.show_empty_categories.remove(&clan_id);
+        }
+        cx.notify();
     }
 
     pub fn apply_last_seen(
@@ -1138,17 +1188,6 @@ impl ChannelList {
         cx.background_executor()
             .spawn(async move { save_collapse_state(snapshot) })
             .detach();
-    }
-
-    pub fn show_empty_categories(&self) -> bool {
-        self.show_empty_categories
-    }
-
-    pub fn set_show_empty_categories(&mut self, value: bool, cx: &mut Context<Self>) {
-        if self.show_empty_categories != value {
-            self.show_empty_categories = value;
-            cx.notify();
-        }
     }
 
     pub fn add_channel_favorite(
