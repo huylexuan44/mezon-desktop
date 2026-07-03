@@ -145,13 +145,18 @@ unsafe fn cf_run_loop_run() {
 }
 
 /// Convert a CFStringRef to a Rust `String`.
-/// Returns `None` if the pointer is null or the string uses a non-ASCII path.
 #[cfg(target_os = "macos")]
 unsafe fn cf_string_to_str(cf_str: *const std::os::raw::c_void) -> Option<String> {
     use std::os::raw::{c_char, c_void};
 
     unsafe extern "C" {
         fn CFStringGetCStringPtr(the_string: *const c_void, encoding: u32) -> *const c_char;
+        fn CFStringGetCString(
+            the_string: *const c_void,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> u8;
     }
 
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
@@ -159,11 +164,28 @@ unsafe fn cf_string_to_str(cf_str: *const std::os::raw::c_void) -> Option<String
         return None;
     }
     let ptr = unsafe { CFStringGetCStringPtr(cf_str, K_CF_STRING_ENCODING_UTF8) };
-    if ptr.is_null() {
+    if !ptr.is_null() {
+        return Some(
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+
+    let mut buf = [0 as c_char; 256];
+    let ok = unsafe {
+        CFStringGetCString(
+            cf_str,
+            buf.as_mut_ptr(),
+            buf.len() as isize,
+            K_CF_STRING_ENCODING_UTF8,
+        )
+    };
+    if ok == 0 {
         return None;
     }
     Some(
-        unsafe { std::ffi::CStr::from_ptr(ptr) }
+        unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
             .to_string_lossy()
             .into_owned(),
     )

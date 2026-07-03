@@ -3159,6 +3159,8 @@
   "message.poll.durationLessThanMinute": "Less than a minute",
   "message.poll.durationMinutes": "{{count}} minutes",
   "message.poll.ended": "Ended",
+  "message.poll.finalResults": "Final results",
+  "message.poll.loadingVoterDetails": "Loading...",
   "message.poll.left": "left",
   "message.poll.loadMore": "Load more {{count}} options",
   "message.poll.loadMore1Option": "Load more 1 option",

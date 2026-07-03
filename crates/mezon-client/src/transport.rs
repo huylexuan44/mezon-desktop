@@ -371,6 +371,7 @@ pub struct ApiAccount {
     pub about_me: Option<String>,
     pub phone_number: Option<String>,
     pub password_setted: bool,
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +399,8 @@ pub struct ApiChannelDesc {
     pub last_sent_message_id: i64,
     pub last_sent_timestamp: i64,
     pub badge_count: i32,
+    #[serde(default)]
+    pub creator_id: i64,
 }
 
 /// A direct-message / group conversation descriptor (clan_id = 0 namespace). Unlike
@@ -540,10 +543,7 @@ fn entity_mention_targets_user(m: &ApiEntityMention, user_id: i64, role_ids: &[i
     m.role_id != 0 && role_ids.contains(&m.role_id)
 }
 
-pub fn enrich_content_tokens(
-    tokens: &mut ApiMessageContent,
-    entity_mentions: &[ApiEntityMention],
-) {
+pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[ApiEntityMention]) {
     for m in entity_mentions {
         if m.e <= m.s {
             continue;
@@ -568,9 +568,7 @@ pub fn enrich_content_tokens(
             ..Default::default()
         });
     }
-    tokens
-        .mentions
-        .sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
+    tokens.mentions.sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
 }
 
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
@@ -614,6 +612,14 @@ fn json_field_i64(value: &serde_json::Value, key: &str) -> i64 {
 }
 
 pub fn parse_notification_content(content: &[u8]) -> (i64, i64) {
+    if content.is_empty() {
+        return (0, 0);
+    }
+    if !matches!(content.first().copied(), Some(b'{') | Some(b'['))
+        && let Ok(fcm) = api::DirectFcmProto::decode(content)
+    {
+        return (fcm.message_id, i64::from(fcm.create_time_seconds));
+    }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
         return (0, 0);
     };
@@ -704,7 +710,11 @@ pub struct ContentToken {
     pub role_id: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
-    #[serde(default, rename = "channelId", deserialize_with = "string_or_number::deserialize")]
+    #[serde(
+        default,
+        rename = "channelId",
+        deserialize_with = "string_or_number::deserialize"
+    )]
     pub channel_id: Option<String>,
     #[serde(default)]
     pub emojiid: Option<String>,
@@ -712,6 +722,124 @@ pub struct ContentToken {
     pub kind: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiPollAnswer {
+    #[serde(default)]
+    pub index: Option<i64>,
+    #[serde(default)]
+    pub label: String,
+}
+
+mod opt_i64_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64()),
+            Some(serde_json::Value::String(s)) => {
+                if s.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(s.parse::<i64>().ok())
+                }
+            }
+            Some(_) => Ok(None),
+        }
+    }
+}
+
+mod opt_i32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|v| v as i32)),
+            Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<i32>().ok()),
+            _ => Ok(None),
+        }
+    }
+}
+
+mod bool_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<bool, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Bool(b)) => Ok(b),
+            Some(serde_json::Value::String(s)) => Ok(s == "true" || s == "1"),
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64() == Some(1)),
+            _ => Ok(false),
+        }
+    }
+}
+
+mod vec_i32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Array(arr)) => Ok(arr
+                .into_iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::Number(n) => n.as_i64().map(|x| x as i32),
+                    serde_json::Value::String(s) => s.parse::<i32>().ok(),
+                    _ => None,
+                })
+                .collect()),
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+mod poll_answers {
+    use super::ApiPollAnswer;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ApiPollAnswer>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => return Ok(Vec::new()),
+        };
+        Ok(raw
+            .into_iter()
+            .map(|value| match value {
+                serde_json::Value::String(label) => ApiPollAnswer { index: None, label },
+                serde_json::Value::Object(map) => ApiPollAnswer {
+                    index: map.get("index").and_then(serde_json::Value::as_i64),
+                    label: map
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                },
+                _ => ApiPollAnswer::default(),
+            })
+            .collect())
+    }
 }
 
 /// Parsed `content` JSON of a message (the mezon `IExtendedMessage` shape).
@@ -730,6 +858,26 @@ pub struct ApiMessageContent {
     pub mk: Vec<ContentToken>,
     #[serde(default)]
     pub lk: Vec<ContentToken>,
+    /// `true` when this message is a forward (rides inside the content JSON as
+    /// `fwd` in mezon-react `IMessageSendPayload`).
+    #[serde(default)]
+    pub fwd: bool,
+    #[serde(default, alias = "id", deserialize_with = "opt_i64_flex::deserialize")]
+    pub poll_id: Option<i64>,
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default, deserialize_with = "poll_answers::deserialize")]
+    pub answers: Vec<ApiPollAnswer>,
+    #[serde(default, deserialize_with = "vec_i32_flex::deserialize")]
+    pub answer_counts: Vec<i32>,
+    #[serde(default, deserialize_with = "opt_i64_flex::deserialize")]
+    pub expire_at: Option<i64>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub is_closed: bool,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub total_votes: Option<i32>,
+    #[serde(default, rename = "type")]
+    pub poll_type: Option<i64>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -1213,6 +1361,7 @@ impl MezonTransport {
         user: api::User,
         email: Option<String>,
         password_setted: bool,
+        logo: Option<String>,
     ) -> ApiAccount {
         ApiAccount {
             user_id: user.id,
@@ -1223,6 +1372,7 @@ impl MezonTransport {
             about_me: (!user.about_me.is_empty()).then_some(user.about_me),
             phone_number: (!user.phone_number.is_empty()).then_some(user.phone_number),
             password_setted,
+            logo,
         }
     }
 
@@ -1282,6 +1432,7 @@ impl MezonTransport {
             last_sent_message_id,
             last_sent_timestamp,
             badge_count: channel.count_mess_unread,
+            creator_id: channel.creator_id,
         }
     }
 
@@ -1671,6 +1822,7 @@ impl MezonTransport {
                     user,
                     (!account.email.is_empty()).then_some(account.email),
                     account.password_setted,
+                    (!account.logo.is_empty()).then_some(account.logo),
                 );
                 tracing::debug!("Decoded account response: {} bytes", response.len());
                 Ok(account)
@@ -2170,7 +2322,7 @@ impl MezonTransport {
             .filter_map(|friend| {
                 friend
                     .user
-                    .map(|user| Self::account_from_user(user, None, false))
+                    .map(|user| Self::account_from_user(user, None, false, None))
             })
             .collect())
     }
@@ -5575,6 +5727,7 @@ impl MezonTransport {
     }
 
     /// React channel message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn react_channel_message(
         &self,
         clan_id: i64,
@@ -5583,6 +5736,10 @@ impl MezonTransport {
         emoji_id: i64,
         emoji: &str,
         count: i32,
+        message_sender_id: i64,
+        mode: i32,
+        is_public: bool,
+        remove: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MessageReaction {
@@ -5592,6 +5749,10 @@ impl MezonTransport {
             emoji_id,
             emoji: emoji.to_string(),
             count,
+            message_sender_id,
+            mode,
+            is_public,
+            action: remove,
             ..Default::default()
         }
         .encode_to_vec();
@@ -5632,13 +5793,14 @@ impl MezonTransport {
         poll_id: i64,
         message_id: i64,
         channel_id: i64,
+        answer_indices: Vec<i32>,
     ) -> Result<api::VotePollResponse> {
         let cid = self.generate_cid();
         let body = api::VotePollRequest {
             poll_id,
             message_id,
             channel_id,
-            ..Default::default()
+            answer_indices,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "VotePoll", body).await?;
@@ -6001,6 +6163,44 @@ impl MezonTransport {
 mod tests {
     use super::*;
 
+    #[test]
+    fn poll_content_deserializes_flexible_scalar_and_answer_types() {
+        let json = r#"{
+            "t": "",
+            "poll_id": "123",
+            "question": "Q?",
+            "answers": ["A", {"index": 1, "label": "B"}],
+            "answer_counts": ["3", 1, "x"],
+            "total_votes": "4",
+            "is_closed": "true",
+            "expire_at": "1700000000",
+            "type": 1
+        }"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert_eq!(c.poll_id, Some(123));
+        assert_eq!(c.answers.len(), 2);
+        assert_eq!(c.answers[0].label, "A");
+        assert_eq!(c.answers[0].index, None);
+        assert_eq!(c.answers[1].index, Some(1));
+        assert_eq!(c.answers[1].label, "B");
+        assert_eq!(c.answer_counts, vec![3, 1]);
+        assert_eq!(c.total_votes, Some(4));
+        assert!(c.is_closed);
+        assert_eq!(c.expire_at, Some(1_700_000_000));
+        assert_eq!(c.poll_type, Some(1));
+    }
+
+    #[test]
+    fn poll_id_falls_back_to_id_alias_and_bool_flex_accepts_numeric() {
+        let c: ApiMessageContent =
+            serde_json::from_str(r#"{"t":"","id":456,"is_closed":1}"#).expect("content");
+        assert_eq!(c.poll_id, Some(456));
+        assert!(c.is_closed);
+        let c2: ApiMessageContent =
+            serde_json::from_str(r#"{"t":"","is_closed":false}"#).expect("content");
+        assert!(!c2.is_closed);
+    }
+
     fn user_mention(user_id: &str, s: i32, e: i32) -> OutgoingMention {
         OutgoingMention {
             user_id: user_id.into(),
@@ -6323,6 +6523,18 @@ mod tests {
     fn notification_content_malformed_is_zero() {
         assert_eq!(parse_notification_content(&[0xff, 0x00, 0x12]), (0, 0));
         assert_eq!(parse_notification_content(&[]), (0, 0));
+    }
+
+    #[test]
+    fn notification_content_decodes_direct_fcm_protobuf() {
+        let fcm = api::DirectFcmProto {
+            message_id: 987654321,
+            create_time_seconds: 1700000000,
+            content: "hi @bob".into(),
+            ..Default::default()
+        };
+        let bytes = fcm.encode_to_vec();
+        assert_eq!(parse_notification_content(&bytes), (987654321, 1700000000));
     }
 
     #[test]

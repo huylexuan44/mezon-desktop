@@ -10,6 +10,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_rustls::rustls::pki_types::ServerName;
 
+const SOCK_HOST_IP_OVERRIDE: Option<&str> = Some("161.248.80.11");
+
 #[cfg(debug_assertions)]
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -254,9 +256,9 @@ type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 struct IoLoopState {
     handlers: Arc<Mutex<AdapterHandlers>>,
-    streams: Arc<Mutex<HashMap<u16, Vec<Vec<u8>>>>>,
+    streams: HashMap<u16, Vec<Vec<u8>>>,
     is_connected: Arc<AtomicBool>,
-    read_buffer: Arc<Mutex<Vec<u8>>>,
+    read_buffer: Vec<u8>,
 }
 
 pub struct AbridgedTcpAdapter {
@@ -409,34 +411,32 @@ fn decode_frame(buf: &[u8]) -> FrameStep {
 }
 
 impl IoLoopState {
-    async fn handle_data(&self, incoming: &[u8]) -> Result<()> {
+    fn handle_data(&mut self, handlers: &AdapterHandlers, incoming: &[u8]) -> Result<()> {
         if incoming.is_empty() {
             return Ok(());
         }
-        self.read_buffer.lock().await.extend_from_slice(incoming);
-        self.process_raw_buffer().await
+        self.read_buffer.extend_from_slice(incoming);
+        self.process_raw_buffer(handlers)
     }
 
-    async fn process_raw_buffer(&self) -> Result<()> {
-        let handlers = self.handlers.lock().await.clone();
+    fn process_raw_buffer(&mut self, handlers: &AdapterHandlers) -> Result<()> {
         let mut start = 0usize;
 
         loop {
             let frame = {
-                let mut buf = self.read_buffer.lock().await;
-                if start >= buf.len() {
-                    buf.drain(..start);
+                if start >= self.read_buffer.len() {
+                    self.read_buffer.drain(..start);
                     return Ok(());
                 }
-                match decode_frame(&buf[start..]) {
+                match decode_frame(&self.read_buffer[start..]) {
                     FrameStep::NeedMore => {
-                        buf.drain(..start);
+                        self.read_buffer.drain(..start);
                         return Ok(());
                     }
                     FrameStep::Reset(reason) => {
                         tracing::warn!("frame desync ({reason}), resetting read buffer");
-                        buf.clear();
-                        self.streams.lock().await.clear();
+                        self.read_buffer.clear();
+                        self.streams.clear();
                         return Ok(());
                     }
                     FrameStep::Frame { consumed, frame } => {
@@ -458,16 +458,13 @@ impl IoLoopState {
                     payload,
                 } => {
                     if fin {
-                        let body = {
-                            let mut streams = self.streams.lock().await;
-                            match streams.remove(&cid) {
-                                Some(chunks) => {
-                                    let mut combined: Vec<u8> = chunks.concat();
-                                    combined.extend_from_slice(&payload);
-                                    combined
-                                }
-                                None => payload,
+                        let body = match self.streams.remove(&cid) {
+                            Some(chunks) => {
+                                let mut combined: Vec<u8> = chunks.concat();
+                                combined.extend_from_slice(&payload);
+                                combined
                             }
+                            None => payload,
                         };
                         tracing::debug!(
                             "Complete API response: cid={cid} code={code} len={} bytes",
@@ -475,13 +472,11 @@ impl IoLoopState {
                         );
                         handlers.trigger_message(cid, code, body);
                     } else {
-                        let mut streams = self.streams.lock().await;
-                        let chunks = streams.entry(cid).or_default();
+                        let chunks = self.streams.entry(cid).or_default();
                         chunks.push(payload);
                         let buffered: usize = chunks.iter().map(Vec::len).sum();
                         if buffered > MAX_REALTIME_FRAME_LEN {
-                            streams.remove(&cid);
-                            drop(streams);
+                            self.streams.remove(&cid);
                             tracing::warn!(
                                 "cid={cid} response exceeds {MAX_REALTIME_FRAME_LEN}-byte cap, failing request"
                             );
@@ -513,21 +508,28 @@ impl IoLoopState {
     }
 }
 
+enum LoopExit {
+    ServerClosed,
+    Error(String),
+    WriteChannelClosed,
+}
+
 impl AbridgedTcpAdapter {
     async fn io_loop(
         mut tls: TlsStream,
         mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
         ready_tx: oneshot::Sender<()>,
-        state: IoLoopState,
+        mut state: IoLoopState,
     ) {
         let mut read_buf = vec![0u8; 8192];
         let mut read_count = 0u64;
+        let handlers = state.handlers.lock().await.clone();
 
         // Signal that io_loop is ready (select is polling)
         let _ = ready_tx.send(());
         tracing::debug!("I/O loop running, entering select branch");
 
-        loop {
+        let exit: LoopExit = loop {
             tracing::trace!("select iteration begin");
             tokio::select! {
                 result = tls.read(&mut read_buf) => {
@@ -535,10 +537,7 @@ impl AbridgedTcpAdapter {
                     match result {
                         Ok(0) => {
                             tracing::info!("Server closed connection after {} reads", read_count);
-                            state.is_connected.store(false, Ordering::Release);
-                            let h = state.handlers.lock().await;
-                            h.trigger_close(true);
-                            break;
+                            break LoopExit::ServerClosed;
                         }
                         Ok(n) => {
                             read_count += 1;
@@ -560,24 +559,18 @@ impl AbridgedTcpAdapter {
                                     "Server returned HTTP on abridged TCP port (expected binary framing, not nginx/WSS). Response: {}",
                                     preview.lines().next().unwrap_or("?")
                                 );
-                                state.is_connected.store(false, Ordering::Release);
-                                let h = state.handlers.lock().await;
-                                h.trigger_error("server spoke HTTP instead of abridged TCP".into());
-                                h.trigger_close(false);
-                                break;
+                                break LoopExit::Error(
+                                    "server spoke HTTP instead of abridged TCP".into(),
+                                );
                             }
 
-                            if let Err(e) = state.handle_data(&read_buf[..n]).await {
+                            if let Err(e) = state.handle_data(&handlers, &read_buf[..n]) {
                                 tracing::error!("handle_data error: {}", e);
                             }
                         }
                         Err(e) => {
                             tracing::error!("READ error: kind={:?} msg={}", e.kind(), e);
-                            state.is_connected.store(false, Ordering::Release);
-                            let h = state.handlers.lock().await;
-                            h.trigger_error(e.to_string());
-                            h.trigger_close(false);
-                            break;
+                            break LoopExit::Error(e.to_string());
                         }
                     }
                 }
@@ -599,24 +592,37 @@ impl AbridgedTcpAdapter {
                                 Ok(()) => tracing::trace!("write_all OK"),
                                 Err(e) => {
                                     tracing::error!("write_all error: {}", e);
-                                    break;
+                                    break LoopExit::Error(e.to_string());
                                 }
                             }
                             match tls.flush().await {
                                 Ok(()) => tracing::trace!("flush OK"),
                                 Err(e) => {
                                     tracing::error!("flush error: {}", e);
-                                    break;
+                                    break LoopExit::Error(e.to_string());
                                 }
                             }
                         }
                         None => {
                             tracing::info!("Write channel closed, exiting I/O loop");
-                            break;
+                            break LoopExit::WriteChannelClosed;
                         }
                     }
                 }
             }
+        };
+
+        match exit {
+            LoopExit::ServerClosed => {
+                state.is_connected.store(false, Ordering::Release);
+                handlers.trigger_close(true);
+            }
+            LoopExit::Error(msg) => {
+                state.is_connected.store(false, Ordering::Release);
+                handlers.trigger_error(msg);
+                handlers.trigger_close(false);
+            }
+            LoopExit::WriteChannelClosed => {}
         }
 
         tracing::info!("I/O loop exited (total reads: {})", read_count);
@@ -654,7 +660,11 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let config = build_client_config();
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-        let addr = format!("{}:{}", host, port);
+        let connect_host = match (host, SOCK_HOST_IP_OVERRIDE) {
+            (crate::DEFAULT_WS_HOST, Some(ip)) => ip,
+            _ => host,
+        };
+        let addr = format!("{}:{}", connect_host, port);
         tracing::debug!("TCP connecting...");
         let tcp = tokio::time::timeout(
             std::time::Duration::from_secs(15),
@@ -682,9 +692,9 @@ impl TransportAdapter for AbridgedTcpAdapter {
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let state = IoLoopState {
             handlers: self.handlers.clone(),
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            streams: HashMap::new(),
             is_connected: self.is_connected.clone(),
-            read_buffer: Arc::new(Mutex::new(Vec::new())),
+            read_buffer: Vec::new(),
         };
 
         let previous = self.io_task.lock().await.take();
@@ -728,18 +738,20 @@ impl TransportAdapter for AbridgedTcpAdapter {
     }
 
     async fn send(&self, message: Vec<u8>) -> Result<()> {
-        match mezon_proto::realtime::Envelope::decode(message.as_slice()) {
-            Ok(envelope) => tracing::trace!(
-                "send() {} bytes -> Envelope cid={} {}",
-                message.len(),
-                envelope.cid,
-                envelope_detail(&envelope)
-            ),
-            Err(_) => tracing::trace!(
-                "send() {} bytes (non-envelope) {:02x?}",
-                message.len(),
-                &message[..message.len().min(16)]
-            ),
+        if tracing::enabled!(tracing::Level::TRACE) {
+            match mezon_proto::realtime::Envelope::decode(message.as_slice()) {
+                Ok(envelope) => tracing::trace!(
+                    "send() {} bytes -> Envelope cid={} {}",
+                    message.len(),
+                    envelope.cid,
+                    envelope_detail(&envelope)
+                ),
+                Err(_) => tracing::trace!(
+                    "send() {} bytes (non-envelope) {:02x?}",
+                    message.len(),
+                    &message[..message.len().min(16)]
+                ),
+            }
         }
 
         if !self.is_open() {
@@ -909,7 +921,7 @@ mod tests {
 
     type CapturedMessages = Arc<std::sync::Mutex<Vec<(u16, u32, Vec<u8>)>>>;
 
-    fn captured_state() -> (IoLoopState, CapturedMessages) {
+    fn captured_state() -> (IoLoopState, AdapterHandlers, CapturedMessages) {
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = received.clone();
         let handlers = AdapterHandlers {
@@ -919,12 +931,12 @@ mod tests {
             ..Default::default()
         };
         let state = IoLoopState {
-            handlers: Arc::new(Mutex::new(handlers)),
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            handlers: Arc::new(Mutex::new(handlers.clone())),
+            streams: HashMap::new(),
             is_connected: Arc::new(AtomicBool::new(true)),
-            read_buffer: Arc::new(Mutex::new(Vec::new())),
+            read_buffer: Vec::new(),
         };
-        (state, received)
+        (state, handlers, received)
     }
 
     #[tokio::test]
@@ -933,15 +945,13 @@ mod tests {
         let chunk = 4096;
         assert!(body.len() > chunk);
 
-        let (state, received) = captured_state();
+        let (mut state, handlers, received) = captured_state();
 
         state
-            .handle_data(&raw_frame(6, false, &body[..chunk]))
-            .await
+            .handle_data(&handlers, &raw_frame(6, false, &body[..chunk]))
             .unwrap();
         state
-            .handle_data(&raw_frame(6, true, &body[chunk..]))
-            .await
+            .handle_data(&handlers, &raw_frame(6, true, &body[chunk..]))
             .unwrap();
 
         let received = received.lock().unwrap();
@@ -956,9 +966,11 @@ mod tests {
     async fn delivers_single_frame_api_response() {
         let body = channel_messages_body(16);
 
-        let (state, received) = captured_state();
+        let (mut state, handlers, received) = captured_state();
 
-        state.handle_data(&raw_frame(7, true, &body)).await.unwrap();
+        state
+            .handle_data(&handlers, &raw_frame(7, true, &body))
+            .unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -971,11 +983,11 @@ mod tests {
         let body = channel_messages_body(64);
         let frame = raw_frame(8, true, &body);
 
-        let (state, received) = captured_state();
+        let (mut state, handlers, received) = captured_state();
 
-        state.handle_data(&frame[..5]).await.unwrap();
+        state.handle_data(&handlers, &frame[..5]).unwrap();
         assert!(received.lock().unwrap().is_empty());
-        state.handle_data(&frame[5..]).await.unwrap();
+        state.handle_data(&handlers, &frame[5..]).unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -1004,9 +1016,11 @@ mod tests {
 
     #[tokio::test]
     async fn empty_response_delivered_immediately() {
-        let (state, received) = captured_state();
+        let (mut state, handlers, received) = captured_state();
 
-        state.handle_data(&raw_frame(9, true, &[])).await.unwrap();
+        state
+            .handle_data(&handlers, &raw_frame(9, true, &[]))
+            .unwrap();
 
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
@@ -1016,14 +1030,14 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_responses_route_by_cid() {
-        let (state, received) = captured_state();
+        let (mut state, handlers, received) = captured_state();
 
         let a = channel_messages_body(16);
         let b = channel_messages_body(32);
         let mut burst = raw_frame(20, true, &a);
         burst.extend_from_slice(&raw_frame(21, true, &[]));
         burst.extend_from_slice(&raw_frame(22, true, &b));
-        state.handle_data(&burst).await.unwrap();
+        state.handle_data(&handlers, &burst).unwrap();
 
         let received = received.lock().unwrap();
         let by: std::collections::HashMap<u16, Vec<u8>> =

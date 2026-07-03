@@ -113,6 +113,14 @@ pub enum IconName {
     IconShareEventVoice,
     IconTick,
     IconUserProfileDM,
+    EmojiCatStar,
+    EmojiCatLeaf,
+    EmojiCatBowl,
+    EmojiCatGame,
+    EmojiCatBicycle,
+    EmojiCatHeart,
+    EmojiCatRibbon,
+    EmojiCatObject,
     ImageThumbnail,
     ImageUploadIcon,
     Inbox,
@@ -270,6 +278,19 @@ pub enum IconName {
     Windows,
     WindowZoom,
     ZoomIcon,
+    Reply,
+    ReplyRightClick,
+    PinMessageRightClick,
+    CopyTextRightClick,
+    DeleteMessageRightClick,
+    ReportMessageRightClick,
+    DollarIconRightClick,
+    ForwardAllRightClick,
+    ForwardRightClick,
+    EndPollNowIcon,
+    MarkUnreadIcon,
+    AddToInboxIcon,
+    QuickMenusIcon,
 }
 
 impl IconName {
@@ -386,6 +407,14 @@ impl IconName {
             Self::IconShareEventVoice => "icons/icon-share-event-voice.svg",
             Self::IconTick => "icons/icon-tick.svg",
             Self::IconUserProfileDM => "icons/icon-user-profile-dm.svg",
+            Self::EmojiCatStar => "icons/emoji-cat-star.svg",
+            Self::EmojiCatLeaf => "icons/emoji-cat-leaf.svg",
+            Self::EmojiCatBowl => "icons/emoji-cat-bowl.svg",
+            Self::EmojiCatGame => "icons/emoji-cat-game.svg",
+            Self::EmojiCatBicycle => "icons/emoji-cat-bicycle.svg",
+            Self::EmojiCatHeart => "icons/emoji-cat-heart.svg",
+            Self::EmojiCatRibbon => "icons/emoji-cat-ribbon.svg",
+            Self::EmojiCatObject => "icons/emoji-cat-object.svg",
             Self::ImageThumbnail => "icons/image-thumbnail.svg",
             Self::ImageUploadIcon => "icons/image-upload-icon.svg",
             Self::Inbox => "icons/inbox.svg",
@@ -543,6 +572,19 @@ impl IconName {
             Self::Windows => "icons/windows.svg",
             Self::WindowZoom => "icons/window-zoom.svg",
             Self::ZoomIcon => "icons/zoom-icon.svg",
+            Self::Reply => "icons/reply.svg",
+            Self::ReplyRightClick => "icons/reply-right-click.svg",
+            Self::PinMessageRightClick => "icons/pin-message-right-click.svg",
+            Self::CopyTextRightClick => "icons/copy-text-right-click.svg",
+            Self::DeleteMessageRightClick => "icons/delete-message-right-click.svg",
+            Self::ReportMessageRightClick => "icons/report-message-right-click.svg",
+            Self::DollarIconRightClick => "icons/dollar-icon-right-click.svg",
+            Self::ForwardAllRightClick => "icons/forward-all-right-click.svg",
+            Self::ForwardRightClick => "icons/forward-right-click.svg",
+            Self::EndPollNowIcon => "icons/end-poll-now.svg",
+            Self::MarkUnreadIcon => "icons/mark-unread.svg",
+            Self::AddToInboxIcon => "icons/add-to-inbox.svg",
+            Self::QuickMenusIcon => "icons/quick-menus.svg",
         }
     }
 }
@@ -555,3 +597,4 @@ impl Icon {
         svg().path(name.path()).size(px(16.)).flex_none()
     }
 }
+

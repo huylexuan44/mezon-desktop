@@ -23,9 +23,7 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
-/// Dev abridged-TCP port (`NX_CHAT_APP_TCP_PORT` on dev stacks). Production connects to
-/// [`DEFAULT_WS_HOST`] (`sock.mezon.ai`) as a hostname-only endpoint.
-const DEV_ABRIDGED_TCP_PORT: u16 = 7349;
+const DEFAULT_TLS_PORT: u16 = 443;
 
 /// Owns the transport connection manager task + the auth-state observation. Registered as a
 /// [`Global`] so it lives for the process; the held [`Task`]/[`Subscription`] cancel on drop.
@@ -273,6 +271,7 @@ impl ConnectionStore {
                             *state = AuthState::NotAuthenticated;
                             cx.notify();
                         });
+                        crate::login::LoginStore::reset_all_user_stores(cx);
                     });
                     consecutive_failures = 0;
                     retry_backoff_secs = 1;
@@ -404,7 +403,7 @@ pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> 
         .tcp_port
         .or(session.ws_port)
         .or(default_port)
-        .unwrap_or(DEV_ABRIDGED_TCP_PORT)
+        .unwrap_or(DEFAULT_TLS_PORT)
 }
 
 /// Restore a stored session from the OS keychain.
@@ -458,14 +457,14 @@ mod tests {
             tcp_host: Some("mezon.ai".to_owned()),
             ..Default::default()
         };
-        assert_eq!(resolve_tcp_port(&s, Some(DEV_ABRIDGED_TCP_PORT)), 7349);
+        assert_eq!(resolve_tcp_port(&s, Some(7349)), 7349);
     }
 
     #[test]
-    fn resolve_tcp_port_falls_back_to_dev_port_when_unset() {
+    fn resolve_tcp_port_falls_back_to_tls_default_when_unset() {
         assert_eq!(
             resolve_tcp_port(&Session::default(), None),
-            DEV_ABRIDGED_TCP_PORT
+            DEFAULT_TLS_PORT
         );
     }
 

@@ -27,7 +27,7 @@ pub fn render_message_item(messages: &[Message], ix: usize, ctx: &RowCtx) -> Any
             col.child(render_welcome(msg, ctx)).into_any_element()
         }
         code if code.is_system() => render_system_message(msg, ctx),
-        _ => render_user_message(msg, combined, ctx),
+        _ => render_user_message(msg, combined, show_separator, ctx),
     };
 
     if !show_separator && !show_unread_break {

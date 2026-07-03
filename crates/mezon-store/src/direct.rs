@@ -131,7 +131,11 @@ impl DirectChannelList {
         }
     }
 
-    fn replace(&mut self, mut channels: Vec<DirectChannel>, badge_map: &HashMap<ChannelId, i32>) {
+    fn replace(
+        &mut self,
+        mut channels: Vec<DirectChannel>,
+        badge_map: &HashMap<ChannelId, DmBadgeInfo>,
+    ) {
         let local_counts: HashMap<ChannelId, u32> = self
             .channels
             .iter()
@@ -195,6 +199,17 @@ impl DirectMessageStore {
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalDirectMessageStore>()
             .map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.channels = DirectChannelList::default();
+        self.loading = false;
+        self.freshness.mark_stale();
+        self.has_more = true;
+        self.current_page = 1;
+        self.current = None;
+        cx.emit(DirectEvent::Changed);
+        cx.notify();
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -433,30 +448,49 @@ fn sort_by_recent(channels: &mut [DirectChannel]) {
     channels.sort_by_key(|c| std::cmp::Reverse(c.last_sent_timestamp));
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DmBadgeInfo {
+    badge_count: i32,
+    last_sent_timestamp: i64,
+    last_seen_timestamp: i64,
+}
+
 fn badge_map_from_descs(
     descs: Vec<mezon_client::transport::ApiChannelDesc>,
-) -> HashMap<ChannelId, i32> {
+) -> HashMap<ChannelId, DmBadgeInfo> {
     descs
         .into_iter()
-        .map(|d| (ChannelId(d.channel_id), d.badge_count))
+        .map(|d| {
+            (
+                ChannelId(d.channel_id),
+                DmBadgeInfo {
+                    badge_count: d.badge_count,
+                    last_sent_timestamp: d.last_sent_timestamp,
+                    last_seen_timestamp: d.last_seen_timestamp,
+                },
+            )
+        })
         .collect()
 }
 
-/// Merge server badge counts with in-memory WS increments (React keeps dm meta + badge API).
+/// Merge server badge counts + last-sent/seen timestamps with in-memory WS increments (React
+/// seeds its DM sort + unread state from `ListChannelBadgeCount`, not just `ListChannelDescs` —
+/// both timestamps must come from the same record or `is_unread` desyncs from reality).
 fn merge_dm_unread_counts(
     channels: &mut [DirectChannel],
-    badge_map: &HashMap<ChannelId, i32>,
+    badge_map: &HashMap<ChannelId, DmBadgeInfo>,
     local_counts: &HashMap<ChannelId, u32>,
 ) {
     for ch in channels.iter_mut() {
+        let badge = badge_map.get(&ch.id);
         let from_list = ch.unread_count;
-        let from_badges = badge_map
-            .get(&ch.id)
-            .copied()
-            .unwrap_or(0)
-            .max(0) as u32;
+        let from_badges = badge.map(|b| b.badge_count).unwrap_or(0).max(0) as u32;
         let from_local = local_counts.get(&ch.id).copied().unwrap_or(0);
         ch.unread_count = from_list.max(from_badges).max(from_local);
+        if let Some(b) = badge {
+            ch.last_sent_timestamp = b.last_sent_timestamp;
+            ch.last_seen_timestamp = b.last_seen_timestamp;
+        }
     }
 }
 
@@ -821,14 +855,76 @@ mod tests {
         let mut channels = vec![DirectChannel {
             id: ChannelId(1),
             unread_count: 1,
+            last_sent_timestamp: 100,
             ..direct_from_api(api_dm(1, "a", 3))
         }];
         let mut badge_map = HashMap::new();
-        badge_map.insert(ChannelId(1), 5);
+        badge_map.insert(
+            ChannelId(1),
+            DmBadgeInfo {
+                badge_count: 5,
+                last_sent_timestamp: 100,
+                last_seen_timestamp: 0,
+            },
+        );
         let mut local = HashMap::new();
         local.insert(ChannelId(1), 3);
         merge_dm_unread_counts(&mut channels, &badge_map, &local);
         assert_eq!(channels[0].unread_count, 5);
+    }
+
+    #[test]
+    fn merge_dm_unread_counts_adopts_badge_last_sent_timestamp() {
+        let mut channels = vec![DirectChannel {
+            id: ChannelId(1),
+            last_sent_timestamp: 100,
+            ..direct_from_api(api_dm(1, "a", 3))
+        }];
+        let mut badge_map = HashMap::new();
+        badge_map.insert(
+            ChannelId(1),
+            DmBadgeInfo {
+                badge_count: 0,
+                last_sent_timestamp: 900,
+                last_seen_timestamp: 0,
+            },
+        );
+        merge_dm_unread_counts(&mut channels, &badge_map, &HashMap::new());
+        assert_eq!(channels[0].last_sent_timestamp, 900);
+    }
+
+    #[test]
+    fn merge_dm_unread_counts_leaves_timestamp_when_channel_missing_from_badge_map() {
+        let mut channels = vec![DirectChannel {
+            id: ChannelId(1),
+            last_sent_timestamp: 100,
+            ..direct_from_api(api_dm(1, "a", 3))
+        }];
+        merge_dm_unread_counts(&mut channels, &HashMap::new(), &HashMap::new());
+        assert_eq!(channels[0].last_sent_timestamp, 100);
+    }
+
+    #[test]
+    fn merge_dm_unread_counts_adopts_badge_last_seen_timestamp_keeping_unread_state_consistent() {
+        let mut channels = vec![DirectChannel {
+            id: ChannelId(1),
+            last_sent_timestamp: 100,
+            last_seen_timestamp: 0,
+            ..direct_from_api(api_dm(1, "a", 3))
+        }];
+        let mut badge_map = HashMap::new();
+        badge_map.insert(
+            ChannelId(1),
+            DmBadgeInfo {
+                badge_count: 0,
+                last_sent_timestamp: 900,
+                last_seen_timestamp: 900,
+            },
+        );
+        merge_dm_unread_counts(&mut channels, &badge_map, &HashMap::new());
+        assert_eq!(channels[0].last_sent_timestamp, 900);
+        assert_eq!(channels[0].last_seen_timestamp, 900);
+        assert!(!channels[0].is_unread());
     }
 
     fn dm(id: i64, ts: i64) -> DirectChannel {

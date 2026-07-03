@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task};
+use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
 use mezon_client::AppApi;
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
 pub use mezon_voice::{
-    PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview, VideoFrameData,
-    VideoFrameStore, VoiceParticipant, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options,
+    NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
+    VideoFrameData, VideoFrameStore, VoiceParticipant, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options,
 };
 
 use crate::AppConfig;
@@ -83,8 +83,10 @@ pub struct VoiceStore {
     cached_meet_token: Option<CachedMeetToken>,
     meet_token_prefetching: Option<String>,
     last_repaint_seq: Option<u64>,
+    link_copied: bool,
     _events_task: Option<Task<()>>,
     _repaint_task: Option<Task<()>>,
+    _link_copied_reset: Option<Task<()>>,
 }
 
 struct PipWindow {
@@ -94,6 +96,14 @@ struct PipWindow {
 
 struct GlobalVoiceStore(Entity<VoiceStore>);
 impl Global for GlobalVoiceStore {}
+
+pub fn screen_tile_id(identity: &str) -> String {
+    format!("{identity}\u{1}screen")
+}
+
+pub fn camera_tile_id(identity: &str) -> String {
+    format!("{identity}\u{1}camera")
+}
 
 impl VoiceStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
@@ -131,25 +141,15 @@ impl VoiceStore {
             cached_meet_token: None,
             meet_token_prefetching: None,
             last_repaint_seq: None,
+            link_copied: false,
             _events_task: None,
             _repaint_task: None,
+            _link_copied_reset: None,
         }
     }
 
     fn current_max_frame_seq(&self) -> Option<u64> {
-        let store = self.frame_store.as_ref()?;
-        let mut max_seq = None;
-        for participant in &self.participants {
-            for key in [participant.camera, participant.screenshare]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(frame) = store.get(key) {
-                    max_seq = Some(max_seq.map_or(frame.seq, |m: u64| m.max(frame.seq)));
-                }
-            }
-        }
-        max_seq
+        Some(self.frame_store.as_ref()?.publish_seq())
     }
 
     fn cached_token_for(&self, channel_id: &str) -> Option<String> {
@@ -232,25 +232,26 @@ impl VoiceStore {
 
     pub fn render_image(&self, key: u64) -> Option<Arc<RenderImage>> {
         let store = self.frame_store.as_ref()?;
-        let frame = store.get(key)?;
-        let mut cache = self.render_cache.lock();
-        if let Some(entry) = cache.get(&key)
-            && entry.seq == frame.seq
-        {
-            return Some(entry.image.clone());
-        }
-        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
+        let cached_seq = self.render_cache.lock().get(&key).map(|entry| entry.seq);
+        let Some(frame) = store.take_new(key, cached_seq) else {
+            return self
+                .render_cache
+                .lock()
+                .get(&key)
+                .map(|entry| entry.image.clone());
+        };
+        let seq = frame.seq;
+        let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
         let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
             buffer,
         )]));
-        let previous = cache.insert(
+        let previous = self.render_cache.lock().insert(
             key,
             CachedRenderImage {
-                seq: frame.seq,
+                seq,
                 image: image.clone(),
             },
         );
-        drop(cache);
         if let Some(previous) = previous {
             self.pending_texture_drops.lock().push(previous.image);
         }
@@ -282,16 +283,57 @@ impl VoiceStore {
         });
     }
 
-    fn flush_texture_drops(&self, cx: &mut App) {
+    fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
         let drops: Vec<Arc<RenderImage>> =
             std::mem::take(&mut *self.pending_texture_drops.lock());
         for image in drops {
-            cx.drop_image(image, None);
+            cx.drop_image(image, window.as_deref_mut());
         }
     }
 
     pub fn focused_tile(&self) -> Option<&str> {
         self.focused_tile.as_deref()
+    }
+
+    pub fn link_copied(&self) -> bool {
+        self.link_copied
+    }
+
+    pub fn mark_link_copied(&mut self, cx: &mut Context<Self>) {
+        self.link_copied = true;
+        cx.notify();
+        self._link_copied_reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            this.update(cx, |this, cx| {
+                this.link_copied = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn desired_screen_full_res(&self) -> bool {
+        let Some(local) = self.participants.iter().find(|p| p.is_local) else {
+            return false;
+        };
+        let Some(screen_key) = local.screenshare else {
+            return false;
+        };
+        let focused = self
+            .focused_tile
+            .as_deref()
+            .is_some_and(|id| id == screen_tile_id(&local.identity));
+        let fullscreen = self.fullscreen_screen == Some(screen_key);
+        let pip = self.pip.as_ref().is_some_and(|p| p.key == screen_key);
+        focused || fullscreen || pip
+    }
+
+    fn sync_screen_full_res(&self) {
+        if let Some(session) = &self.session {
+            session.set_screen_full_res(self.desired_screen_full_res());
+        }
     }
 
     pub fn toggle_focus(&mut self, id: String, cx: &mut Context<Self>) {
@@ -300,18 +342,21 @@ impl VoiceStore {
         } else {
             self.focused_tile = Some(id);
         }
+        self.sync_screen_full_res();
         cx.notify();
     }
 
     pub fn set_focus(&mut self, id: String, cx: &mut Context<Self>) {
         if self.focused_tile.as_deref() != Some(id.as_str()) {
             self.focused_tile = Some(id);
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
 
     pub fn clear_focus(&mut self, cx: &mut Context<Self>) {
         if self.focused_tile.take().is_some() {
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -320,17 +365,39 @@ impl VoiceStore {
         self.fullscreen_screen
     }
 
+    pub fn pip_key(&self) -> Option<u64> {
+        self.pip.as_ref().map(|p| p.key)
+    }
+
+    pub fn primary_screen_key(&self) -> Option<u64> {
+        if let Some(key) = self.fullscreen_screen {
+            return Some(key);
+        }
+        if let Some(focused) = self.focused_tile.as_deref()
+            && let Some(key) = self
+                .participants
+                .iter()
+                .find(|p| p.screenshare.is_some() && screen_tile_id(&p.identity) == focused)
+                .and_then(|p| p.screenshare)
+        {
+            return Some(key);
+        }
+        self.participants.iter().find_map(|p| p.screenshare)
+    }
+
     pub fn toggle_fullscreen_screen(&mut self, key: u64, cx: &mut Context<Self>) {
         self.fullscreen_screen = if self.fullscreen_screen == Some(key) {
             None
         } else {
             Some(key)
         };
+        self.sync_screen_full_res();
         cx.notify();
     }
 
     pub fn clear_fullscreen_screen(&mut self, cx: &mut Context<Self>) {
         if self.fullscreen_screen.take().is_some() {
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -340,12 +407,14 @@ impl VoiceStore {
             let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
         }
         self.pip = Some(PipWindow { key, handle });
+        self.sync_screen_full_res();
         cx.notify();
     }
 
     pub fn close_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
             let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -353,6 +422,7 @@ impl VoiceStore {
     pub fn on_pip_closed(&mut self, key: u64, cx: &mut Context<Self>) {
         if self.pip.as_ref().is_some_and(|p| p.key == key) {
             self.pip = None;
+            self.sync_screen_full_res();
             cx.notify();
         }
     }
@@ -386,13 +456,14 @@ impl VoiceStore {
         channel_label: String,
         input_device_id: Option<String>,
         output_device_id: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.is_active_in(&channel_id) {
             return;
         }
 
-        self.teardown(cx);
+        self.teardown(Some(window), cx);
         self.channel_label = channel_label;
 
         let ws_url = AppConfig::global(cx).meet_ws_url.clone();
@@ -501,7 +572,7 @@ impl VoiceStore {
             loop {
                 frame_store.frame_changed().await;
                 let keep_going = this.update(cx, |this, cx| {
-                    this.flush_texture_drops(cx);
+                    this.flush_texture_drops(None, cx);
                     if this.has_active_video() {
                         let seq = this.current_max_frame_seq();
                         if seq.is_some() && seq != this.last_repaint_seq {
@@ -588,12 +659,13 @@ impl VoiceStore {
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
                 self.evict_stale_render_cache();
-                self.flush_texture_drops(cx);
+                self.flush_texture_drops(None, cx);
                 self.prune_screen_targets(cx);
+                self.sync_screen_full_res();
             }
             VoiceEvent::Disconnected { reason } => {
                 tracing::info!("voice disconnected: {reason}");
-                self.teardown(cx);
+                self.teardown(None, cx);
             }
             VoiceEvent::Error(message) => {
                 tracing::warn!("voice error: {message}");
@@ -612,8 +684,8 @@ impl VoiceStore {
         cx.notify();
     }
 
-    pub fn leave(&mut self, cx: &mut Context<Self>) {
-        self.teardown(cx);
+    pub fn leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.teardown(Some(window), cx);
         cx.notify();
     }
 
@@ -667,7 +739,7 @@ impl VoiceStore {
         cx.notify();
     }
 
-    fn teardown(&mut self, cx: &mut Context<Self>) {
+    fn teardown(&mut self, mut window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.session = None;
@@ -677,9 +749,9 @@ impl VoiceStore {
             cache.drain().map(|(_, entry)| entry.image).collect()
         };
         for image in stale {
-            cx.drop_image(image, None);
+            cx.drop_image(image, window.as_deref_mut());
         }
-        self.flush_texture_drops(cx);
+        self.flush_texture_drops(window, cx);
         self._events_task = None;
         self._repaint_task = None;
         self.connection = VoiceConnection::Idle;
@@ -693,5 +765,7 @@ impl VoiceStore {
         self.participants.clear();
         self.meet_token_prefetching = None;
         self.last_repaint_seq = None;
+        self.link_copied = false;
+        self._link_copied_reset = None;
     }
 }

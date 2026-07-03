@@ -1,7 +1,8 @@
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div,
+    App, Context, Entity, FontWeight, SharedString, Task, UniformListScrollHandle, Window, div,
     prelude::*, px, uniform_list,
 };
 use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
@@ -11,6 +12,9 @@ use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, Router, navigate};
 use crate::theme::{ActiveTheme, Theme};
 
+const SCROLL_HOVER_RELEASE_MS: u64 = 150;
+
+#[derive(PartialEq)]
 struct DmItem {
     channel_id: ChannelId,
     id: SharedString,
@@ -26,34 +30,33 @@ pub struct DirectSidebar {
     settings: Entity<Settings>,
     list_scroll: UniformListScrollHandle,
     dm_items: Rc<Vec<DmItem>>,
+    pending_rebuild: bool,
+    suppress_hover: bool,
+    last_scroll_at: Option<Instant>,
+    _hover_release_task: Option<Task<()>>,
+}
+
+fn is_dm_route(cx: &App) -> bool {
+    matches!(
+        Router::global(cx).read(cx).route(),
+        Route::Direct | Route::DirectMessage { .. } | Route::Friends
+    )
 }
 
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
-    let raw: Vec<(ChannelId, String, DirectKind, bool, bool, String)> = store
-        .channels()
-        .iter()
-        .map(|ch| {
-            (
-                ch.id,
-                ch.label.clone(),
-                ch.kind,
-                ch.is_unread(),
-                ch.online,
-                ch.avatar.clone(),
-            )
-        })
-        .collect();
     Rc::new(
-        raw.into_iter()
-            .map(|(channel_id, label, kind, unread, online, avatar)| DmItem {
-                channel_id,
-                id: SharedString::from(channel_id.to_string()),
-                label: SharedString::from(label),
-                kind,
-                unread,
-                online,
-                avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar)),
-                avatar_raw: SharedString::from(avatar),
+        store
+            .channels()
+            .iter()
+            .map(|ch| DmItem {
+                channel_id: ch.id,
+                id: SharedString::from(ch.id.to_string()),
+                label: SharedString::from(ch.label.clone()),
+                kind: ch.kind,
+                unread: ch.is_unread(),
+                online: ch.online,
+                avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
+                avatar_raw: SharedString::from(ch.avatar.clone()),
             })
             .collect(),
     )
@@ -64,12 +67,26 @@ impl DirectSidebar {
         let direct_store = DirectMessageStore::global(cx);
 
         cx.observe(&direct_store, |this, store, cx| {
-            this.dm_items = build_dm_items(store.read(cx), cx);
+            if is_dm_route(cx) {
+                let items = build_dm_items(store.read(cx), cx);
+                if this.dm_items != items {
+                    this.dm_items = items;
+                    cx.notify();
+                }
+            } else {
+                this.pending_rebuild = true;
+            }
+        })
+        .detach();
+        cx.observe(&Router::global(cx), |this, _, cx| {
+            if this.pending_rebuild && is_dm_route(cx) {
+                this.pending_rebuild = false;
+                let store = DirectMessageStore::global(cx);
+                this.dm_items = build_dm_items(store.read(cx), cx);
+            }
             cx.notify();
         })
         .detach();
-        cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
-            .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
         let dm_items = build_dm_items(direct_store.read(cx), cx);
@@ -78,7 +95,39 @@ impl DirectSidebar {
             settings,
             list_scroll: UniformListScrollHandle::new(),
             dm_items,
+            pending_rebuild: false,
+            suppress_hover: false,
+            last_scroll_at: None,
+            _hover_release_task: None,
         }
+    }
+
+    fn on_scroll(&mut self, cx: &mut Context<Self>) {
+        self.last_scroll_at = Some(Instant::now());
+        if self.suppress_hover {
+            return;
+        }
+        self.suppress_hover = true;
+        cx.notify();
+        self._hover_release_task = Some(cx.spawn(async move |this, cx| {
+            let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
+            loop {
+                cx.background_executor().timer(idle).await;
+                let still_scrolling = this
+                    .update(cx, |this, _| {
+                        this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
+                    })
+                    .unwrap_or(false);
+                if still_scrolling {
+                    continue;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.suppress_hover = false;
+                    cx.notify();
+                });
+                break;
+            }
+        }));
     }
 
     fn render_search(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -131,7 +180,7 @@ impl DirectSidebar {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_base()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_primary)
                     .child(mezon_i18n::t(locale, "directMessage.friends")),
@@ -187,6 +236,7 @@ impl Render for DirectSidebar {
             _ => None,
         };
         let items = self.dm_items.clone();
+        let suppress_hover = self.suppress_hover;
 
         let list = uniform_list("dm-list", count, move |range, _window, cx| {
             let theme = cx.theme().clone();
@@ -201,6 +251,7 @@ impl Render for DirectSidebar {
                             .online(item.online)
                             .avatar_src(item.avatar_src.clone())
                             .avatar_raw(item.avatar_raw.clone())
+                            .suppress_hover(suppress_hover)
                             .render(&theme)
                             .into_any_element()
                     }
@@ -209,6 +260,7 @@ impl Render for DirectSidebar {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.list_scroll)
+        .on_scroll_wheel(cx.listener(|this, _event, _window, cx| this.on_scroll(cx)))
         .flex_1()
         .min_h_0()
         .px_2();

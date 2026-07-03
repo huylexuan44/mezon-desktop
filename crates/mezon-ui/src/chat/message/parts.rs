@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Entity, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, rems,
+    AnyElement, Entity, FontWeight, ObjectFit, SharedString, Transformation, div, img, prelude::*,
+    px, radians, rems,
 };
 use mezon_store::{
-    AlbumLayout, Message, MessageAttachment, MessageId, MessageReference, MessagesStore, Reaction,
-    ViewerMedia,
+    AlbumLayout, ChannelType, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
+    MessagesStore, Reaction, ViewerMedia,
 };
 
 // image-viewer: disabled, reimplement later
@@ -13,8 +14,10 @@ use mezon_store::{
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
+use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::time::format_message_time;
 use super::video_player::VideoActivation;
+use crate::app::shell::Shell;
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 
@@ -46,7 +49,7 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         .child(
             div()
                 .text_size(px(16.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(gpui::rgb(name_color))
                 .child(msg.sender_name.clone()),
         )
@@ -59,16 +62,41 @@ pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
         .into_any_element()
 }
 
+fn reply_preview_line(content: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut first = true;
+    for word in content.split_whitespace() {
+        if !first {
+            out.push(' ');
+            chars += 1;
+        }
+        first = false;
+        for ch in word.chars() {
+            if chars >= MAX_CHARS {
+                return out;
+            }
+            out.push(ch);
+            chars += 1;
+        }
+    }
+    out
+}
+
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
-    let preview = if reference.content.is_empty() {
+    let is_deleted = reference.message_ref_id.is_zero();
+    let preview = if is_deleted {
+        mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()
+    } else if reference.content.is_empty() {
         if reference.has_attachment {
             mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()
         } else {
             String::new()
         }
     } else {
-        reference.content.clone()
+        reply_preview_line(&reference.content)
     };
 
     let avatar = if reference.sender_avatar.is_empty() {
@@ -118,8 +146,9 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_color(theme.text_muted)
+                .truncate()
+                .text_color(theme.tokens.text_theme_message)
+                .when(is_deleted, |d| d.italic())
                 .child(preview),
         )
         .into_any_element()
@@ -474,10 +503,9 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     if msg.reactions.is_empty() {
         return None;
     }
-    let theme = ctx.theme;
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
     for (i, reaction) in msg.reactions.iter().enumerate() {
-        row = row.child(reaction_pill(i, reaction, ctx.current_user_id, theme));
+        row = row.child(reaction_pill(i, reaction, msg.id, ctx));
     }
     Some(row.into_any_element())
 }
@@ -485,26 +513,57 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 fn reaction_pill(
     index: usize,
     reaction: &Reaction,
-    current_user_id: &str,
-    theme: &Theme,
+    message_id: MessageId,
+    ctx: &RowCtx,
 ) -> AnyElement {
-    let reacted =
-        !current_user_id.is_empty() && reaction.sender_ids.iter().any(|id| id == current_user_id);
-    let label = if reaction.emoji.is_empty() {
-        format!("{}", reaction.count)
-    } else {
-        format!("{} {}", reaction.emoji, reaction.count)
-    };
+    let theme = ctx.theme;
+    let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
+    let count_label = reaction.count_label.clone();
+    let src = reaction.emoji_proxied.clone();
+    let add_emoji_id = reaction.emoji_id.clone();
+    let add_emoji = reaction.emoji.clone();
+    let panel_emoji_id = reaction.emoji_id.clone();
+    let panel_emoji = reaction.emoji.clone();
+    let avatar_cache = ctx.avatar_cache.clone();
+
     let mut pill = div()
         .id(("reaction", index))
+        .relative()
         .flex()
         .flex_row()
         .items_center()
+        .justify_center()
         .h(px(24.))
-        .px_2()
+        .min_w(px(48.))
+        .pl(px(28.))
+        .pr(px(8.))
         .rounded_md()
         .text_sm()
-        .text_color(theme.text_secondary);
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .text_color(theme.tokens.text_theme_primary)
+        .on_click(move |_, _, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.add_reaction(
+                    message_id,
+                    add_emoji_id.to_string(),
+                    add_emoji.to_string(),
+                    cx,
+                );
+            });
+        })
+        .hoverable_tooltip(move |_window, cx| {
+            cx.new(|cx| {
+                UserReactionPanel::new(
+                    message_id,
+                    panel_emoji_id.clone(),
+                    panel_emoji.clone(),
+                    avatar_cache.clone(),
+                    cx,
+                )
+            })
+            .into()
+        });
     if reacted {
         pill = pill
             .bg(gpui::Rgba {
@@ -516,50 +575,214 @@ fn reaction_pill(
     } else {
         pill = pill.bg(theme.bg_tertiary);
     }
-    pill.child(label).into_any_element()
+
+    let glyph = reaction.emoji.clone();
+    let emoji_el = if src.is_empty() {
+        div()
+            .absolute()
+            .left(px(5.))
+            .child(glyph)
+            .into_any_element()
+    } else {
+        img(src)
+            .absolute()
+            .left(px(5.))
+            .size(px(16.))
+            .object_fit(ObjectFit::ScaleDown)
+            .with_fallback(emoji_error_fallback(px(16.), theme.text_muted))
+            .into_any_element()
+    };
+
+    pill.child(emoji_el).child(count_label).into_any_element()
 }
 
-pub fn render_hover_actions(msg: &Message, theme: &Theme, suppress_hover: bool) -> AnyElement {
-    if suppress_hover {
+pub fn render_hover_actions(
+    msg: &Message,
+    combined: bool,
+    has_reply: bool,
+    is_different_day: bool,
+    ctx: &RowCtx,
+) -> AnyElement {
+    if ctx.suppress_hover || ctx.hovered_row != Some(msg.id) {
         return div().into_any_element();
     }
-    let group_name = SharedString::from(format!("msg-{}", msg.row_anchor_id.0));
+    let theme = ctx.theme;
     let bg_hover = theme.bg_hover;
-    let action = move |id: &'static str, icon: IconName| {
+    let action = move |id: &'static str, icon: IconName, size: f32| {
+        let mut svg_icon = Icon::new(icon)
+            .size(px(size))
+            .text_color(theme.text_secondary);
+        if matches!(icon, IconName::Reply) {
+            // Mirrors React's `rotate-180` on the toolbar's reply icon (the same
+            // asset is used un-rotated for the "···" menu's reply item).
+            svg_icon =
+                svg_icon.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)));
+        }
         div()
             .id(id)
             .p_1()
             .rounded_md()
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
-            .child(Icon::new(icon).size_4().text_color(theme.text_secondary))
+            .child(svg_icon)
+    };
+
+    let (top, margin_top) = if is_different_day {
+        (-8., 4.)
+    } else if combined || has_reply {
+        (-8., 0.)
+    } else {
+        (16., 0.)
     };
 
     let reply_id = msg.id;
+    let react_id = msg.id;
+    let react_host = ctx.video_host.clone();
+
+    let is_topic_msg = msg.code == MessageCode::Topic;
+    let is_poll_msg = msg.code == MessageCode::Poll;
+    let sender_is_real = !msg.sender_id.is_empty() && msg.sender_id != "0";
+    let is_own_message = ctx.current_user_id == msg.sender_id.as_str();
+
+    let show_topic = ctx.clan_id.is_some_and(|c| !c.is_zero()) && !is_topic_msg && !is_poll_msg;
+    let show_edit = is_own_message
+        && msg.code != MessageCode::SendToken
+        && msg.code.is_user_timeline()
+        && !is_poll_msg
+        && !msg.is_forwarded;
+    let show_thread = ctx.channel_top_level
+        && ctx.is_clan_owner
+        && !is_poll_msg
+        && ctx.channel_type != Some(ChannelType::Stream)
+        && ctx.channel_type != Some(ChannelType::App);
+    let show_coffee = !is_own_message && sender_is_real;
+
+    let coming_soon = ctx.coming_soon.clone();
+
+    let msg_id = msg.id;
+    let edit_host = ctx.video_host.clone();
+    let option_host = ctx.video_host.clone();
+
+    let recent_emoji = (!ctx.emoji_recent.is_empty()).then(|| {
+        let mut row = div().flex().flex_row().items_center().gap_0p5();
+        for emoji in ctx.emoji_recent {
+            let emoji_id = emoji.id.clone();
+            let shortname = emoji.shortname.clone();
+            let src = emoji.src.clone();
+            let cell_id =
+                SharedString::from(format!("recent-emoji-{}-{}", msg.row_anchor_id.0, emoji.id));
+            let mut cell = div()
+                .id(cell_id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(move |s| s.bg(bg_hover))
+                .on_click(move |_, _, cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        store.add_reaction(msg_id, emoji_id.clone(), shortname.clone(), cx);
+                    });
+                });
+            if !src.is_empty() {
+                cell = cell.child(
+                    img(src)
+                        .size(px(20.))
+                        .with_fallback(emoji_error_fallback(px(20.), theme.text_secondary)),
+                );
+            }
+            row = row.child(cell);
+        }
+        row.child(
+            div()
+                .w(px(1.))
+                .h(px(20.))
+                .mx_1()
+                .bg(theme.border)
+                .opacity(0.5),
+        )
+    });
 
     div()
+        .id(SharedString::from(format!(
+            "hover-actions-{}",
+            msg.row_anchor_id.0
+        )))
         .absolute()
         .right(px(24.))
-        .top(px(-16.))
+        .top(px(top))
+        .mt(px(margin_top))
         .flex()
         .flex_row()
         .items_center()
         .gap_0p5()
         .p_0p5()
         .rounded_lg()
-        .bg(theme.bg_floating)
-        .border_1()
-        .border_color(theme.border)
-        .opacity(0.)
-        .group_hover(group_name, |s| s.opacity(1.))
-        .child(action("react", IconName::Smile))
+        .bg(theme.tokens.bg_theme_contexify)
+        .children(recent_emoji)
+        .when(show_topic, |d| {
+            let coming_soon = coming_soon.clone();
+            d.child(
+                action("topic", IconName::TopicIcon, 24.).on_click(move |_, _, cx| {
+                    let coming_soon = coming_soon.clone();
+                    Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                }),
+            )
+        })
         .child(
-            action("reply", IconName::ReplyCorner).on_click(move |_, _, cx| {
-                MessagesStore::global(cx).update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+            action("react", IconName::Smile, 20.).on_click(move |_, window, cx| {
+                let position = window.mouse_position();
+                let _ = react_host.update(cx, |this, cx| {
+                    this.open_reaction_picker(react_id, position, window, cx);
+                });
             }),
         )
-        .child(action("edit", IconName::PenEdit))
-        .child(action("delete", IconName::TrashIcon))
+        .when(!is_own_message, |d| {
+            d.child(
+                action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
+                    MessagesStore::global(cx)
+                        .update(cx, |store, cx| store.set_reply_to(reply_id, cx));
+                }),
+            )
+        })
+        .when(show_edit, |d| {
+            d.child(
+                action("edit", IconName::PenEdit, 20.).on_click(move |_, window, cx| {
+                    let _ = edit_host.update(cx, |this, cx| {
+                        this.begin_edit(msg_id, window, cx);
+                    });
+                }),
+            )
+        })
+        .when(show_thread, |d| {
+            let coming_soon = coming_soon.clone();
+            d.child(
+                action("thread", IconName::ThreadIcon, 20.).on_click(move |_, _, cx| {
+                    let coming_soon = coming_soon.clone();
+                    Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                }),
+            )
+        })
+        .when(show_coffee, |d| {
+            let coming_soon = coming_soon.clone();
+            d.child(
+                action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
+                    move |_, _, cx| {
+                        let coming_soon = coming_soon.clone();
+                        Shell::global(cx).update(cx, move |shell, cx| shell.info(coming_soon, cx));
+                    },
+                ),
+            )
+        })
+        .child(
+            action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
+                let position = window.mouse_position();
+                let _ = option_host.update(cx, |this, cx| {
+                    this.open_context_menu(msg_id, position, cx);
+                });
+            }),
+        )
         .into_any_element()
 }
 

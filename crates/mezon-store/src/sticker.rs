@@ -54,6 +54,14 @@ impl StickerStore {
         cx.try_global::<GlobalStickerStore>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.by_id.clear();
+        self.order.clear();
+        self.freshness.mark_stale();
+        self.loading = false;
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
             if let ClanEvent::ActiveClanChanged(Some(_)) = event {

@@ -150,7 +150,7 @@ pub(super) fn render_clan_row(
         .group(clan.group_name.clone())
         .relative()
         .w_full()
-        .h(px(48.))
+        .h(px(56.))
         .flex()
         .items_center()
         .justify_center()

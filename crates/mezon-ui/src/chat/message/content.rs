@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use gpui::{
-    Anchor, AnyElement, App, FontWeight, HighlightStyle, Hsla, InteractiveText, SharedString,
-    StyledText, UnderlineStyle, div, prelude::*, px, rems,
+    Anchor, AnyElement, App, FontWeight, HighlightStyle, Hsla, InteractiveText, ObjectFit,
+    SharedString, StyledText, UnderlineStyle, div, img, prelude::*, px, rems,
 };
 use mezon_store::{
     ChannelId, ChannelList, Message, MessageSpan, PlatformStore, UserId, is_here_user_id,
@@ -78,7 +78,11 @@ fn render_message_content_with_options(
         .spans
         .iter()
         .any(|s| matches!(s, MessageSpan::CodeBlock { .. }));
-    if !options.inline && !has_code_block {
+    let has_custom_emoji = msg
+        .spans
+        .iter()
+        .any(|s| matches!(s, MessageSpan::Emoji { emoji_id, .. } if !emoji_id.is_empty()));
+    if !options.inline && !has_code_block && !has_custom_emoji {
         return render_rich_styled(msg, ctx, body_color);
     }
 
@@ -231,6 +235,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     let profile_context = ctx.profile_context;
     let settings = ctx.settings.clone();
     let host = ctx.video_host.clone();
+    let avatar_cache = ctx.avatar_cache.clone();
     let interactive = InteractiveText::new(("msg-itext", msg.row_anchor_id.0 as usize), styled)
         .on_click(click_ranges, move |range_ix, window, cx| {
             let Some(action) = actions.get(range_ix) else {
@@ -245,7 +250,14 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
                     };
                     let position = window.mouse_position();
                     let popover = cx.new(|cx| {
-                        UserProfilePopover::new(*user_id, context, settings.clone(), window, cx)
+                        UserProfilePopover::new(
+                            *user_id,
+                            context,
+                            settings.clone(),
+                            avatar_cache.clone(),
+                            window,
+                            cx,
+                        )
                     });
                     let _ = host.update(cx, move |this, cx| {
                         this.set_mention_popover(popover, position, cx);
@@ -257,7 +269,7 @@ fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> An
     div()
         .w_full()
         .min_w_0()
-        .text_sm()
+        .text_base()
         .line_height(rems(1.375))
         .text_color(body_color)
         .child(interactive)
@@ -298,7 +310,7 @@ fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
         .flex_wrap()
         .items_baseline()
         .min_w_0()
-        .text_sm()
+        .text_base()
         .line_height(rems(1.375))
         .text_color(body_color);
     if inline {
@@ -395,10 +407,34 @@ fn append_span(
             channel_id.as_deref(),
             ctx,
         )),
-        MessageSpan::Emoji { name, .. } => {
-            row.child(div().text_color(body_color).child(name.clone()))
+        MessageSpan::Emoji { name, emoji_id } => {
+            row.child(render_emoji_span(name, emoji_id, body_color, ctx))
         }
     }
+}
+
+fn render_emoji_span(
+    name: &SharedString,
+    emoji_id: &str,
+    body_color: gpui::Rgba,
+    ctx: &RowCtx,
+) -> AnyElement {
+    let src = crate::util::imgproxy::emoji_url(ctx.app, emoji_id);
+    if src.is_empty() {
+        return div()
+            .text_color(body_color)
+            .child(name.clone())
+            .into_any_element();
+    }
+    img(SharedString::from(src))
+        .h(px(24.))
+        .max_w(px(24.))
+        .object_fit(ObjectFit::Contain)
+        .with_fallback(super::reaction_detail::emoji_error_fallback(
+            px(24.),
+            ctx.theme.text_muted,
+        ))
+        .into_any_element()
 }
 
 fn render_mention_chip(
@@ -460,6 +496,7 @@ fn render_mention_chip(
         user_id,
         profile_ctx,
         settings,
+        ctx.avatar_cache.clone(),
     )
     .anchor(Anchor::BottomLeft)
     .attach(Anchor::TopLeft)
@@ -562,7 +599,7 @@ fn render_plain_text_spans(spans: &[MessageSpan], color: gpui::Rgba) -> AnyEleme
             .w_full()
             .min_w_0()
             .min_h(px(30.))
-            .text_sm()
+            .text_base()
             .line_height(rems(1.375))
             .text_color(color)
             .child(text)
@@ -573,7 +610,7 @@ fn render_plain_text_spans(spans: &[MessageSpan], color: gpui::Rgba) -> AnyEleme
         .flex_col()
         .w_full()
         .min_w_0()
-        .text_sm()
+        .text_base()
         .line_height(rems(1.375));
     for line in text.split('\n') {
         col = col.child(
@@ -590,7 +627,13 @@ fn render_plain_text_spans(spans: &[MessageSpan], color: gpui::Rgba) -> AnyEleme
 
 fn render_link_only_spans(spans: &[MessageSpan], theme: &Theme) -> AnyElement {
     let link_color = theme.tokens.mention_color;
-    let mut col = div().flex().flex_col().w_full().min_w_0().text_sm().gap_1();
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .text_base()
+        .gap_1();
     for span in spans {
         let MessageSpan::Link { text, url } = span else {
             continue;
@@ -620,7 +663,16 @@ fn resolve_link_url(url: &str, text: &str) -> String {
     text.to_string()
 }
 
-fn open_message_link(url: String, cx: &mut App) {
+/// The first detected link in a message's rich-text spans, if any (for the
+/// "···" context menu's copy/open-link items).
+pub(crate) fn first_link(msg: &Message) -> Option<String> {
+    msg.spans.iter().find_map(|span| match span {
+        MessageSpan::Link { text, url } => Some(resolve_link_url(url, text)),
+        _ => None,
+    })
+}
+
+pub(crate) fn open_message_link(url: String, cx: &mut App) {
     if url.is_empty() {
         return;
     }

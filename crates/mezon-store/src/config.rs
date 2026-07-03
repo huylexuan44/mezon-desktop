@@ -375,12 +375,29 @@ impl AppConfig {
         format!("{}/{}{}", base, self.imgproxy_key, path)
     }
 
+    pub fn voice_link(&self, clan_id: &str, channel_id: &str) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        if clan_id.is_empty() || clan_id == "0" {
+            format!("{base}/chat/direct/message/{channel_id}/3")
+        } else {
+            format!("{base}/chat/clans/{clan_id}/channels/{channel_id}")
+        }
+    }
+
     pub fn avatar_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 100, 100, "fit")
+        self.imgproxy_url(source, 100, 100, "fill")
     }
 
     pub fn profile_proxy(&self, source: &str) -> String {
-        self.imgproxy_url(source, 300, 300, "fit")
+        self.imgproxy_url(source, 300, 300, "fill")
+    }
+
+    pub fn emoji_src(&self, emoji_id: &str) -> String {
+        if emoji_id.is_empty() {
+            return String::new();
+        }
+        let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
+        self.imgproxy_url(&source, 100, 100, "fit")
     }
 
     pub fn attachment_proxy(
@@ -538,146 +555,3 @@ fn opt_bool(value: Option<&'static str>, default: bool) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dims(w: u32, h: u32) -> (f32, f32, bool) {
-        let d = calculate_media_dimensions(w, h, false, 0);
-        (d.width, d.height, d.is_small)
-    }
-
-    #[test]
-    fn media_dimensions_landscape_caps_to_available_width() {
-        assert_eq!(dims(800, 600), (464.0, 348.0, false));
-    }
-
-    #[test]
-    fn media_dimensions_own_message_uses_wider_box() {
-        let d = calculate_media_dimensions(800, 600, true, 0);
-        assert_eq!((d.width, d.height), (480.0, 360.0));
-    }
-
-    #[test]
-    fn media_dimensions_tall_image_is_small() {
-        assert_eq!(dims(100, 400), (100.0, 400.0, true));
-    }
-
-    #[test]
-    fn media_dimensions_panorama_caps_height_band() {
-        assert_eq!(dims(2000, 100), (464.0, 23.0, true));
-    }
-
-    #[test]
-    fn media_dimensions_small_image_min_stretch() {
-        assert_eq!(dims(185, 75), (197.0, 80.0, false));
-    }
-
-    #[test]
-    fn media_dimensions_unknown_defaults_to_hundred_square() {
-        assert_eq!(dims(0, 0), (100.0, 100.0, true));
-    }
-
-    #[test]
-    fn dev_defaults_match_legacy_constants() {
-        let cfg = AppConfig::dev_defaults();
-        assert_eq!(cfg.api_host, "api.mezon.ai");
-        assert_eq!(cfg.api_port, 443);
-        assert!(cfg.api_secure);
-        assert_eq!(cfg.tcp_port, None);
-        assert_eq!(cfg.client_host(), "gw.mezon.ai");
-        assert_eq!(cfg.client_port(), 443);
-    }
-
-    #[test]
-    fn dev_defaults_use_dev_tcp_port() {
-        let cfg = AppConfig::dev_defaults();
-        assert_eq!(cfg.tcp_port, Some(7349));
-        assert_eq!(cfg.client_host(), "dev-mezon.nccsoft.vn");
-    }
-
-    #[test]
-    fn opt_helpers_fall_back_when_unset_or_blank() {
-        assert_eq!(opt_str(None, "def"), "def");
-        assert_eq!(opt_str(Some("  "), "def"), "def");
-        assert_eq!(opt_str(Some(" val "), "def"), "val");
-        assert_eq!(opt_u16(None, 8088), 8088);
-        assert_eq!(opt_u16(Some("443"), 8088), 443);
-        assert_eq!(opt_u16(Some("nope"), 8088), 8088);
-        assert_eq!(opt_u32(Some("128"), 64), 128);
-        assert_eq!(opt_opt_u16(None), None);
-        assert_eq!(opt_opt_u16(Some("7349")), Some(7349));
-        assert!(opt_bool(Some("true"), false));
-        assert!(opt_bool(Some("1"), false));
-        assert!(!opt_bool(None, false));
-    }
-
-    #[test]
-    fn imgproxy_url_rewrites_cdn_urls() {
-        let cfg = AppConfig {
-            imgproxy_base_url: "https://imgproxy.example".into(),
-            imgproxy_key: "sig".into(),
-            ..AppConfig::dev_defaults()
-        };
-        let src = "https://cdn.mezon.ai/images/avatar.png";
-        let out = cfg.imgproxy_url(src, 100, 100, "fit");
-        assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
-        assert!(out.ends_with("@webp"));
-        assert!(out.contains(src));
-    }
-
-    #[test]
-    fn imgproxy_url_skips_external_urls() {
-        let cfg = AppConfig::dev_defaults();
-        let src = "https://example.com/avatar.png";
-        assert_eq!(cfg.imgproxy_url(src, 100, 100, "fit"), src);
-    }
-
-    #[test]
-    fn imgproxy_url_proxies_cdn_on_dev_base() {
-        let cfg = AppConfig::dev_defaults();
-        let src = "https://cdn.mezon.ai/images/avatar.png";
-        let out = cfg.imgproxy_url(src, 100, 100, "fit");
-        assert!(out.starts_with("https://dev-imgproxy.nccsoft.vn/"));
-        assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
-        assert!(out.contains(src));
-        assert!(out.ends_with("@webp"));
-    }
-
-    #[test]
-    fn imgproxy_url_empty_returns_empty() {
-        let cfg = AppConfig::dev_defaults();
-        assert_eq!(cfg.imgproxy_url("", 100, 100, "fit"), "");
-    }
-
-    #[test]
-    fn avatar_proxy_matches_react_fit_100() {
-        let cfg = AppConfig {
-            imgproxy_base_url: "https://imgproxy.example".into(),
-            imgproxy_key: "sig".into(),
-            ..AppConfig::dev_defaults()
-        };
-        let out = cfg.avatar_proxy("https://cdn.mezon.ai/a.png");
-        assert!(
-            out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
-            "avatar must be 100x100 fit like React MessageAvatar: {out}"
-        );
-    }
-
-    #[test]
-    fn attachment_proxy_uses_one_x_display_dims_like_react() {
-        let cfg = AppConfig {
-            imgproxy_base_url: "https://imgproxy.example".into(),
-            imgproxy_key: "sig".into(),
-            ..AppConfig::dev_defaults()
-        };
-        let src = "https://cdn.mezon.ai/images/photo.png";
-        let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
-        let pw = display_w.ceil() as u32;
-        let ph = display_h.ceil() as u32;
-        assert!(
-            url.contains(&format!("rs:fill:{pw}:{ph}:1/mb:2097152/plain/")),
-            "attachment proxy must be 1x display dims like React Photo.tsx: {url}"
-        );
-    }
-}

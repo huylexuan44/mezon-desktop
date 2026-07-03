@@ -97,6 +97,15 @@ impl ClanList {
         cx.try_global::<GlobalClanList>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.clans.clear();
+        self.loading = false;
+        if self.active_clan_id.take().is_some() {
+            cx.emit(ClanEvent::ActiveClanChanged(None));
+        }
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
         let connection_watch = Self::spawn_connection_watch(api.clone(), cx);
@@ -159,16 +168,27 @@ impl ClanList {
         self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let (clans_result, badges_result) =
-                tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
-            let clans = match clans_result {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("Failed to load clans: {e}");
-                    let _ = this.update(cx, |this, _| {
-                        this.loading = false;
-                    });
-                    return;
+            const MAX_RETRIES: u32 = 3;
+            let mut attempt = 0u32;
+            let (clans, badges_result) = loop {
+                let (clans_result, badges_result) =
+                    tokio::join!(api.list_clan_descs(), api.list_clan_badge_count());
+                match clans_result {
+                    Ok(c) => break (c, badges_result),
+                    Err(e) if attempt < MAX_RETRIES => {
+                        attempt += 1;
+                        tracing::warn!("Failed to load clans (attempt {attempt}): {e}, retrying");
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(2 * attempt as u64))
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load clans after {attempt} retries: {e}");
+                        let _ = this.update(cx, |this, _| {
+                            this.loading = false;
+                        });
+                        return;
+                    }
                 }
             };
             let badge_map: std::collections::HashMap<String, (i32, bool)> = badges_result
@@ -313,6 +333,15 @@ impl ClanList {
             if was_badge != clan.badge_count {
                 cx.notify();
             }
+        }
+    }
+
+    pub fn set_badge_count(&mut self, clan_id: ClanId, count: u32, cx: &mut Context<Self>) {
+        if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
+            && clan.badge_count != count
+        {
+            clan.badge_count = count;
+            cx.notify();
         }
     }
 

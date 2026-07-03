@@ -25,6 +25,8 @@ pub(super) struct DirectUnreadItem {
     pub unread_count: u32,
     pub avatar_src: SharedString,
     pub avatar_raw: SharedString,
+    pub row_id: SharedString,
+    pub anim_key: SharedString,
 }
 
 pub(super) struct DirectUnreadListState {
@@ -109,15 +111,10 @@ impl DirectUnreadListState {
             .flex_col()
             .items_center()
             .w_full()
-            .children(
-                self.render
-                    .iter()
-                    .map(|item| {
-                        let animate_out = !live_ids.contains(&item.channel_id);
-                        render_direct_unread_item(item, animate_out)
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            .children(self.render.iter().map(|item| {
+                let animate_out = !live_ids.contains(&item.channel_id);
+                render_direct_unread_item(item, animate_out)
+            }))
             .into_any_element()
     }
 }
@@ -137,6 +134,8 @@ pub(super) fn build_direct_unread_items(
             unread_count: ch.unread_count,
             avatar_src: SharedString::from(crate::util::imgproxy::avatar_url(cx, &ch.avatar)),
             avatar_raw: SharedString::from(ch.avatar.clone()),
+            row_id: SharedString::from(format!("direct-unread-{}", ch.id)),
+            anim_key: SharedString::from(format!("direct-unread-anim-{}", ch.id)),
         })
         .collect()
 }
@@ -170,7 +169,6 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
     let unread_count = item.unread_count;
     let badge = badge_text(unread_count);
     let wide = unread_count >= 10;
-    let anim_key = SharedString::from(format!("direct-unread-anim-{channel_id}"));
     let ease = |t: f32| 1.0 - (1.0 - t).powi(2);
 
     let avatar_size = px(40.);
@@ -183,12 +181,12 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
     } else {
         let mut avatar = Avatar::new().name(item.label.clone()).size_px(avatar_size);
         if !item.avatar_src.is_empty() {
-            avatar = avatar.src(item.avatar_src.to_string());
+            avatar = avatar.src(item.avatar_src.clone());
             if !item.avatar_raw.is_empty() && item.avatar_raw != item.avatar_src {
-                avatar = avatar.fallback_src(item.avatar_raw.to_string());
+                avatar = avatar.fallback_src(item.avatar_raw.clone());
             }
         } else if !item.avatar_raw.is_empty() {
-            avatar = avatar.src(item.avatar_raw.to_string());
+            avatar = avatar.src(item.avatar_raw.clone());
         }
         div()
             .size(avatar_size)
@@ -221,7 +219,7 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
             .child(avatar)
             .child(badge_el)
             .with_animation(
-                SharedString::from(format!("{anim_key}-fade-out")),
+                SharedString::from(format!("{}-fade-out", item.anim_key)),
                 Animation::new(Duration::from_millis(REMOVAL_DEFER_MS)).with_easing(ease),
                 |el, delta| el.opacity(1.0 - delta),
             )
@@ -235,7 +233,7 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
     };
 
     let row = div()
-        .id(SharedString::from(format!("direct-unread-{channel_id}")))
+        .id(item.row_id.clone())
         .flex()
         .items_end()
         .justify_center()
@@ -248,7 +246,7 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
 
     if animate_out {
         row.with_animation(
-            SharedString::from(format!("{anim_key}-height-out")),
+            SharedString::from(format!("{}-height-out", item.anim_key)),
             Animation::new(Duration::from_millis(REMOVAL_DEFER_MS)).with_easing(ease),
             |el, delta| el.h(px(ROW_HEIGHT * (1.0 - delta).max(0.0))),
         )

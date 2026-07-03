@@ -184,6 +184,7 @@ impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
         let locale = self.settings.read(cx).language.clone();
+        let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
         let state = self.auth_state.read(cx).clone();
 
@@ -198,7 +199,6 @@ impl Render for RootView {
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
-                tracing::warn!("DBG RootView render authed route={route:?}");
                 match route {
                     Route::SettingsAccount
                     | Route::SettingsProfile
@@ -208,11 +208,11 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
-                    | Route::SettingsAdvanced => cached_fill(self.settings_screen.clone()),
+                    | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::NotFound { .. } => render_not_found(theme, &locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
-                    _ => cached_fill(self.chat_layout.clone()),
+                    _ => uncached_fill(self.chat_layout.clone()),
                 }
             }
         };
@@ -227,6 +227,7 @@ impl Render for RootView {
             .flex_col()
             .size_full()
             .bg(theme.bg_primary)
+            .font_family(base_font_family)
             .text_color(theme.text_primary)
             .child(window_controls::render_app_drag_header())
             .image_cache(self.image_cache.clone())
@@ -266,6 +267,14 @@ fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
     view.into()
         .cached(StyleRefinement::default().flex_1().min_h_0())
+        .into_any_element()
+}
+
+fn uncached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .child(view.into())
         .into_any_element()
 }
 

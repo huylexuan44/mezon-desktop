@@ -13,6 +13,8 @@ use crate::screen_picker::{PickedScreen, scap_target_for_pick};
 use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
 const CAPTURE_FPS: u32 = 15;
+const PREVIEW_MAX_WIDTH: u32 = 640;
+const PREVIEW_MAX_HEIGHT: u32 = 400;
 
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
@@ -24,9 +26,16 @@ impl ScreenStopper {
     }
 }
 
+impl Drop for ScreenStopper {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn start_screen(
     identity: String,
     frame_store: Arc<VideoFrameStore>,
+    full_res: Arc<AtomicBool>,
     pick: PickedScreen,
 ) -> (
     ScreenStopper,
@@ -84,6 +93,7 @@ pub fn start_screen(
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
+            let mut display_buf = Vec::new();
 
             while !thread_stop.load(Ordering::Relaxed) {
                 let frame = match capturer.get_next_frame() {
@@ -157,9 +167,22 @@ pub fn start_screen(
                     source.capture_frame(&frame);
                 }
 
-                let preview =
-                    normalize_bgra(&bgra.data, src_w as usize, src_h as usize, row_stride);
-                frame_store.publish(key, src_w, src_h, preview);
+                let (pw, ph) = if full_res.load(Ordering::Relaxed) {
+                    (src_w, src_h)
+                } else {
+                    preview_dims(src_w, src_h)
+                };
+                display_buf.resize((pw * ph * 4) as usize, 0);
+                downscale_bgra_into(
+                    &mut display_buf,
+                    &bgra.data,
+                    src_w as usize,
+                    src_h as usize,
+                    row_stride,
+                    pw as usize,
+                    ph as usize,
+                );
+                frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf));
             }
 
             capturer.stop_capture();
@@ -176,19 +199,36 @@ pub fn start_screen(
     (ScreenStopper { stop }, track_rx)
 }
 
-fn normalize_bgra(src: &[u8], width: usize, height: usize, row_stride: usize) -> Vec<u8> {
-    let tight = width * 4;
-    if row_stride == tight {
-        return src[..(tight * height).min(src.len())].to_vec();
-    }
-    let mut out = vec![0u8; tight * height];
-    for y in 0..height {
-        let s = y * row_stride;
-        let d = y * tight;
-        if s + tight > src.len() {
-            break;
+fn preview_dims(width: u32, height: u32) -> (u32, u32) {
+    let scale = (PREVIEW_MAX_WIDTH as f32 / width.max(1) as f32)
+        .min(PREVIEW_MAX_HEIGHT as f32 / height.max(1) as f32)
+        .min(1.0);
+    let pw = ((width as f32 * scale) as u32).max(1);
+    let ph = ((height as f32 * scale) as u32).max(1);
+    (pw, ph)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn downscale_bgra_into(
+    dst: &mut [u8],
+    src: &[u8],
+    src_width: usize,
+    src_height: usize,
+    row_stride: usize,
+    dst_width: usize,
+    dst_height: usize,
+) {
+    for y in 0..dst_height {
+        let sy = y * src_height / dst_height;
+        let s_row = sy * row_stride;
+        let d_row = y * dst_width * 4;
+        for x in 0..dst_width {
+            let sx = x * src_width / dst_width;
+            let s = s_row + sx * 4;
+            let d = d_row + x * 4;
+            if s + 4 <= src.len() && d + 4 <= dst.len() {
+                dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
+            }
         }
-        out[d..d + tight].copy_from_slice(&src[s..s + tight]);
     }
-    out
 }

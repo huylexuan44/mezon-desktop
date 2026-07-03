@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, ClickEvent, Context, FocusHandle, KeyDownEvent, ObjectFit, Rgba, SharedString, Window,
-    div, img, prelude::*, px,
+    App, ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, ObjectFit, Rgba, SharedString,
+    Window, div, img, prelude::*, px,
 };
 use mezon_store::{PlatformStore, ViewerMedia};
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{Avatar, Icon, IconName, h_flex, v_flex};
+use crate::image_cache::{
+    LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+};
 use crate::theme::ActiveTheme;
 
 pub struct ImageViewer {
@@ -16,6 +19,7 @@ pub struct ImageViewer {
     index: usize,
     uploader_name: SharedString,
     uploader_avatar: SharedString,
+    image_cache: Entity<LruImageCache>,
 }
 
 impl ImageViewer {
@@ -31,12 +35,24 @@ impl ImageViewer {
             return;
         }
         let index = index.min(images.len() - 1);
-        let view = cx.new(|cx| Self {
-            focus_handle: cx.focus_handle(),
-            images,
-            index,
-            uploader_name,
-            uploader_avatar,
+        let view = cx.new(|cx| {
+            let image_cache = cx.new(|cx| {
+                LruImageCache::message(
+                    "image-viewer",
+                    MESSAGE_IMAGE_CACHE_CAPACITY,
+                    MESSAGE_IMAGE_CACHE_BYTES,
+                    MESSAGE_ENTRY_MAX_BYTES,
+                    cx,
+                )
+            });
+            Self {
+                focus_handle: cx.focus_handle(),
+                images,
+                index,
+                uploader_name,
+                uploader_avatar,
+                image_cache,
+            }
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
@@ -103,6 +119,7 @@ impl Render for ImageViewer {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context("menu")
+            .image_cache(self.image_cache.clone())
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
             }))

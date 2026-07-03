@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use gpui::{
-    AnyView, App, Context, Entity, SharedString, StyleRefinement, Window, div, prelude::*, px,
+    AnyView, Context, Entity, SharedString, StyleRefinement, Subscription, Window, div, prelude::*,
+    px,
 };
 use mezon_store::{ChannelId, Settings};
 use ui::PopoverMenuHandle;
@@ -12,21 +11,26 @@ use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
+use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::chat::pinned_popover::PinnedPopoverPanel;
-use crate::components::primitives::{InputEvent, InputState};
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
     pub(crate) timeline: Entity<ChannelMessages>,
-    pub(crate) input_state: Option<Entity<InputState>>,
+    pub(crate) mention_input: Option<Entity<MentionInput>>,
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
+    member_avatar_cache: Entity<LruImageCache>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
+    _submit_sub: Option<Subscription>,
 }
 
 impl ChatArea {
@@ -38,15 +42,26 @@ impl ChatArea {
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
+        let member_avatar_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "member-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             timeline,
-            input_state: None,
+            mention_input: None,
             member_panel: None,
             member_source: None,
+            member_avatar_cache,
             replying_to: None,
             settings,
             header,
             typing,
+            _submit_sub: None,
         }
     }
 
@@ -74,7 +89,8 @@ impl ChatArea {
         self.member_source = source;
         self.member_panel = source.map(|source| {
             let settings = self.settings.clone();
-            cx.new(move |cx| MemberListPanel::new(source, settings, cx))
+            let avatar_cache = self.member_avatar_cache.clone();
+            cx.new(move |cx| MemberListPanel::new(source, settings, avatar_cache, cx))
         });
     }
 
@@ -84,21 +100,24 @@ impl ChatArea {
     }
 
     pub fn ensure_input(&mut self, window: &mut Window, cx: &mut Context<crate::ChatLayout>) {
-        if self.input_state.is_none() {
+        if self.mention_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
-            let placeholder = mezon_i18n::t(&locale, "chat.messagePlaceholder");
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-            cx.subscribe_in(
-                &input,
+            let placeholder = mezon_i18n::t(&locale, "messageBox.placeholder");
+            let settings = self.settings.clone();
+            let mention_input = cx.new(|cx| MentionInput::new(placeholder, settings, window, cx));
+            let submit_sub = cx.subscribe_in(
+                &mention_input,
                 window,
-                |this: &mut crate::ChatLayout, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter = event {
-                        this.send_current_message(window, cx);
+                |this: &mut crate::ChatLayout, _, event: &MentionInputEvent, window, cx| match event
+                {
+                    MentionInputEvent::Submit => this.send_current_message(window, cx),
+                    MentionInputEvent::SendSticker { url, filename } => {
+                        this.send_sticker(url.clone(), filename.clone(), cx)
                     }
                 },
-            )
-            .detach();
-            self.input_state = Some(input);
+            );
+            self._submit_sub = Some(submit_sub);
+            self.mention_input = Some(mention_input);
         }
     }
 
@@ -117,7 +136,7 @@ impl ChatArea {
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
-        let input_state = match self.input_state.clone() {
+        let mention_input = match self.mention_input.clone() {
             Some(s) => s,
             None => {
                 return div()
@@ -147,17 +166,9 @@ impl ChatArea {
         self.typing
             .update(cx, |typing, cx| typing.sync(channel_id, cx));
 
-        let layout_entity = cx.entity();
         let theme = cx.theme();
 
-        let on_send = {
-            let handle = layout_entity.clone();
-            Arc::new(move |window: &mut Window, cx: &mut App| {
-                handle.update(cx, |this, cx| this.send_current_message(window, cx));
-            })
-        };
-
-        let input_bar = InputBar::new().with_input(input_state).on_send(on_send);
+        let input_bar = InputBar::new().with_mention_input(mention_input);
 
         let header = AnyView::from(self.header.clone()).cached(
             StyleRefinement::default()

@@ -14,7 +14,9 @@ use gpui::{
 use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
+mod confirm_delete_message_modal;
 use coming_soon_modal::ComingSoonModal;
+use confirm_delete_message_modal::ConfirmDeleteMessageModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
@@ -112,6 +114,43 @@ impl Shell {
             title,
             message,
             close_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    /// Confirm-then-delete a message (mirrors React's `ModalDeleteMess`): shown when the
+    /// user clears an inline edit to empty, or picks Delete from the message context menu.
+    pub fn confirm_delete_message(
+        &mut self,
+        message_id: mezon_store::MessageId,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString = mezon_i18n::t(locale, "message.deleteMessageModal.title")
+            .to_string()
+            .into();
+        let description: SharedString = mezon_i18n::t(
+            locale,
+            "message.deleteMessageModal.deleteMessageDescription",
+        )
+        .to_string()
+        .into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "message.deleteMessageModal.cancel")
+            .to_string()
+            .into();
+        let delete_label: SharedString = mezon_i18n::t(locale, "message.deleteMessageModal.delete")
+            .to_string()
+            .into();
+        let view = cx.new(|cx| ConfirmDeleteMessageModal {
+            focus_handle: cx.focus_handle(),
+            message_id,
+            title,
+            description,
+            cancel_label,
+            delete_label,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

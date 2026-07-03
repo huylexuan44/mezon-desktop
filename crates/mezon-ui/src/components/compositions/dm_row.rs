@@ -17,6 +17,7 @@ pub struct DmRow {
     elem_id: ElementId,
     group_name: SharedString,
     close_id: SharedString,
+    suppress_hover: bool,
 }
 
 impl DmRow {
@@ -42,11 +43,17 @@ impl DmRow {
             elem_id,
             group_name,
             close_id,
+            suppress_hover: false,
         }
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    pub fn suppress_hover(mut self, suppress: bool) -> Self {
+        self.suppress_hover = suppress;
         self
     }
 
@@ -84,6 +91,7 @@ impl DmRow {
         };
 
         let avatar_slot = self.render_avatar(theme);
+        let suppress_hover = self.suppress_hover;
 
         let close_btn = div()
             .id(self.close_id.clone())
@@ -91,12 +99,14 @@ impl DmRow {
             .items_center()
             .justify_center()
             .size(px(20.))
-            .text_size(px(20.))
+            .text_size(px(24.))
             .opacity(0.)
             .text_color(muted)
             .cursor_pointer()
-            .group_hover(self.group_name.clone(), |this| this.opacity(1.))
-            .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
+            .when(!suppress_hover, |this| {
+                this.group_hover(self.group_name.clone(), |this| this.opacity(1.))
+                    .hover(move |this| this.text_color(gpui::rgb(0xef4444)))
+            })
             .on_click(|_, _window, cx| cx.stop_propagation())
             .child("×");
 
@@ -113,7 +123,9 @@ impl DmRow {
             .rounded_md()
             .cursor_pointer()
             .when(selected, |this| this.bg(bg_hover))
-            .hover(move |this| this.bg(bg_hover))
+            .when(!suppress_hover, |this| {
+                this.hover(move |this| this.bg(bg_hover))
+            })
             .on_click(move |_, _window, cx| {
                 navigate(
                     cx,
@@ -128,7 +140,7 @@ impl DmRow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
+                    .text_base()
                     .text_color(name_color)
                     .truncate()
                     .child(self.label.clone()),

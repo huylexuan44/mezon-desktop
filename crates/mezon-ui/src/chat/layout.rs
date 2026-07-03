@@ -63,8 +63,13 @@ impl ActiveChannelSlice {
 #[derive(PartialEq, Eq)]
 struct VoiceMiniSlice {
     channel_id: String,
+    clan_id: String,
     label: String,
+    clan_name: String,
     mic_enabled: bool,
+    camera_enabled: bool,
+    screen_enabled: bool,
+    link_copied: bool,
 }
 
 impl ChatLayout {
@@ -116,10 +121,21 @@ impl ChatLayout {
         let voice_store = VoiceStore::global(cx);
         cx.observe(&voice_store, |this, _, cx| {
             let mini_changed = this.voice_mini_display_changed(cx);
-            if mini_changed || this.is_voice_screen_visible(cx) {
+            if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
             }
         })
+        .detach();
+
+        cx.subscribe(
+            &mezon_store::ClanMembersStore::global(cx),
+            |this, _, event: &mezon_store::ClanMembersEvent, cx| {
+                let mezon_store::ClanMembersEvent::Changed { clan_id } = event;
+                if this.visible_voice_clan_id(cx) == Some(*clan_id) {
+                    cx.notify();
+                }
+            },
+        )
         .detach();
 
         let chat_area = ChatArea::new(settings.clone(), cx);
@@ -409,33 +425,97 @@ impl ChatLayout {
         changed
     }
 
-    fn is_voice_screen_visible(&self, cx: &Context<Self>) -> bool {
-        !self.is_dm_route(cx)
-            && self
-                .channel_list
-                .read(cx)
-                .active_channel()
-                .is_some_and(|ch| ch.channel_type == ChannelType::Voice)
+    fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        let Some(active) = self.channel_list.read(cx).active_channel() else {
+            return false;
+        };
+        if active.channel_type != ChannelType::Voice {
+            return false;
+        }
+        match self.voice_store.read(cx).connection().active_channel_id() {
+            Some(id) => active.id.to_string() == id,
+            None => true,
+        }
     }
 
-    fn current_voice_mini_slice(&self, cx: &Context<Self>) -> Option<VoiceMiniSlice> {
-        let store = self.voice_store.read(cx);
-        let (channel_id, _) = store.connection().connected_channel()?;
-        Some(VoiceMiniSlice {
-            channel_id: channel_id.to_string(),
-            label: store.channel_label().to_string(),
-            mic_enabled: store.mic_enabled(),
-        })
+    fn connected_call_is_active(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        let Some((connected_id, _)) = self.voice_store.read(cx).connection().connected_channel()
+        else {
+            return false;
+        };
+        self.channel_list
+            .read(cx)
+            .active_channel()
+            .is_some_and(|ch| {
+                ch.channel_type == ChannelType::Voice && ch.id.to_string() == connected_id
+            })
+    }
+
+    fn visible_voice_clan_id(&self, cx: &Context<Self>) -> Option<ClanId> {
+        if self.is_dm_route(cx) {
+            return None;
+        }
+        self.channel_list
+            .read(cx)
+            .active_channel()
+            .filter(|ch| ch.channel_type == ChannelType::Voice)
+            .map(|ch| ch.clan_id)
     }
 
     fn voice_mini_display_changed(&mut self, cx: &Context<Self>) -> bool {
-        let next = self.current_voice_mini_slice(cx);
-        if next != self.displayed_voice_mini {
-            self.displayed_voice_mini = next;
-            true
-        } else {
-            false
+        let store = self.voice_store.read(cx);
+        let Some((channel_id, clan_id)) = store.connection().connected_channel() else {
+            return self.displayed_voice_mini.take().is_some();
+        };
+
+        if let Some(prev) = self.displayed_voice_mini.as_mut()
+            && prev.channel_id == channel_id
+            && prev.clan_id == clan_id
+        {
+            let label = store.channel_label();
+            let mic_enabled = store.mic_enabled();
+            let camera_enabled = store.camera_enabled();
+            let screen_enabled = store.screen_share_enabled();
+            let link_copied = store.link_copied();
+            let changed = prev.label != label
+                || prev.mic_enabled != mic_enabled
+                || prev.camera_enabled != camera_enabled
+                || prev.screen_enabled != screen_enabled
+                || prev.link_copied != link_copied;
+            if changed {
+                if prev.label != label {
+                    prev.label = label.to_string();
+                }
+                prev.mic_enabled = mic_enabled;
+                prev.camera_enabled = camera_enabled;
+                prev.screen_enabled = screen_enabled;
+                prev.link_copied = link_copied;
+            }
+            return changed;
         }
+
+        let clan_name = clan_id
+            .parse::<ClanId>()
+            .ok()
+            .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
+            .unwrap_or_default();
+        self.displayed_voice_mini = Some(VoiceMiniSlice {
+            channel_id: channel_id.to_string(),
+            clan_id: clan_id.to_string(),
+            label: store.channel_label().to_string(),
+            clan_name,
+            mic_enabled: store.mic_enabled(),
+            camera_enabled: store.camera_enabled(),
+            screen_enabled: store.screen_share_enabled(),
+            link_copied: store.link_copied(),
+        });
+        true
     }
 }
 
@@ -450,13 +530,17 @@ impl Render for ChatLayout {
         let content = self.render_content(cx);
         let voice_mini_bar = self.render_voice_mini_bar(cx);
         let locale = self.settings.read(cx).language.clone();
-        let fullscreen = crate::chat::voice::render_screen_fullscreen_overlay(
-            cx.theme(),
-            &locale,
-            &self.voice_store,
-            &self.settings,
-            self.voice_store.read(cx),
-        );
+        let fullscreen = if self.connected_call_is_active(cx) {
+            crate::chat::voice::render_screen_fullscreen_overlay(
+                cx.theme(),
+                &locale,
+                &self.voice_store,
+                &self.settings,
+                self.voice_store.read(cx),
+            )
+        } else {
+            None
+        };
         let theme = cx.theme();
 
         div()
@@ -489,16 +573,27 @@ impl Render for ChatLayout {
                             )
                             .child(div().w(px(272.0)).h_full().child(nav_body)),
                     )
-                    .children(voice_mini_bar)
                     .child(
-                        AnyView::from(self.user_info_bar.clone()).cached(
-                            StyleRefinement::default()
-                                .absolute()
-                                .left(px(12.0))
-                                .right(px(8.0))
-                                .bottom(px(12.0))
-                                .h(px(56.0)),
-                        ),
+                        div()
+                            .absolute()
+                            .left(px(12.0))
+                            .right(px(8.0))
+                            .bottom(px(12.0))
+                            .flex()
+                            .flex_col()
+                            .rounded(px(12.0))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(theme.tokens.border_theme_primary)
+                            .shadow_lg()
+                            .bg(theme.tokens.bg_surface)
+                            .occlude()
+                            .children(voice_mini_bar)
+                            .child(
+                                AnyView::from(self.user_info_bar.clone()).cached(
+                                    StyleRefinement::default().w_full().h(px(56.0)),
+                                ),
+                            ),
                     ),
             )
             .child(
@@ -516,46 +611,28 @@ impl Render for ChatLayout {
 
 impl ChatLayout {
     pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.chat_area.input_state.clone() else {
+        let Some(mention_input) = self.chat_area.mention_input.clone() else {
             return;
         };
-        let content = input.read(cx).value().trim().to_string();
-        if content.is_empty() {
+        let Some((content, content_tokens, attachments)) = mention_input
+            .update(cx, |mention_input, cx| {
+                mention_input.take_payload(window, cx)
+            })
+        else {
             return;
-        }
-        input.update(cx, |state, cx| state.set_value("", window, cx));
+        };
         crate::chat::ChatSending::send_text(
             content,
-            mezon_store::OutgoingContent::default(),
-            Vec::new(),
+            content_tokens,
+            attachments,
             &self.auth_state,
             cx,
         );
     }
 
-    // composer: restore by swapping send_current_message for the MentionInput payload
-    // path and re-adding send_sticker:
-    // pub(crate) fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    //     let Some(mention_input) = self.chat_area.mention_input.clone() else {
-    //         return;
-    //     };
-    //     let Some((content, content_tokens, attachments)) = mention_input
-    //         .update(cx, |mention_input, cx| mention_input.take_payload(window, cx))
-    //     else {
-    //         return;
-    //     };
-    //     crate::chat::ChatSending::send_text(
-    //         content,
-    //         content_tokens,
-    //         attachments,
-    //         &self.auth_state,
-    //         cx,
-    //     );
-    // }
-    //
-    // pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
-    //     crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
-    // }
+    pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
+    }
 
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {
         let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
@@ -573,15 +650,34 @@ impl ChatLayout {
 
     fn render_voice_mini_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let store = self.voice_store.read(cx);
-        store.connection().connected_channel()?;
+        let (channel_id, clan_id) = store.connection().connected_channel()?;
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+        let clan_name = clan_id
+            .parse::<ClanId>()
+            .ok()
+            .and_then(|cid| self.clan_list.read(cx).clan(cid).map(|c| c.name.clone()))
+            .unwrap_or_default();
+        let label = store.channel_label().to_string();
+        let mic_enabled = store.mic_enabled();
+        let camera_enabled = store.camera_enabled();
+        let screen_enabled = store.screen_share_enabled();
+        let link_copied = store.link_copied();
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         Some(crate::chat::voice::render_mini_bar(
             theme,
             &locale,
-            store.channel_label(),
+            &label,
+            &clan_name,
+            &channel_id,
+            &clan_id,
             &self.voice_store,
-            store.mic_enabled(),
+            &self.settings,
+            mic_enabled,
+            camera_enabled,
+            screen_enabled,
+            link_copied,
         ))
     }
 

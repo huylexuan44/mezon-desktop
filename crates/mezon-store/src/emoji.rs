@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
@@ -6,8 +6,11 @@ use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
 
 use crate::Freshness;
+use crate::badge::BadgeService;
 use crate::clan::{ClanEvent, ClanList};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+
+const RECENT_EMOJI_CAP: usize = 20;
 
 const EMOJI_ACTION_CREATED: i32 = 1;
 const EMOJI_ACTION_UPDATE: i32 = 2;
@@ -30,6 +33,7 @@ pub enum EmojiEvent {
 pub struct EmojiStore {
     by_id: HashMap<String, Emoji>,
     order: Vec<String>,
+    recent_ids: Vec<String>,
     freshness: Freshness,
     loading: bool,
     api: Arc<AppApi>,
@@ -57,6 +61,15 @@ impl EmojiStore {
         cx.try_global::<GlobalEmojiStore>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.by_id.clear();
+        self.order.clear();
+        self.recent_ids.clear();
+        self.freshness.mark_stale();
+        self.loading = false;
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -68,15 +81,18 @@ impl EmojiStore {
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
-        Self {
+        let mut store = Self {
             by_id: HashMap::new(),
             order: Vec::new(),
+            recent_ids: Vec::new(),
             freshness: Freshness::new(),
             loading: false,
             api,
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
-        }
+        };
+        store.fetch_recent(cx);
+        store
     }
 
     fn register_realtime(cx: &mut Context<Self>) {
@@ -84,6 +100,9 @@ impl EmojiStore {
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             dispatch.on(RealtimeKind::ClanEmoji, &entity, |this, event, cx| {
                 this.handle_event(event, cx)
+            });
+            dispatch.on(RealtimeKind::MessageReaction, &entity, |this, event, cx| {
+                this.handle_reaction_echo(event, cx)
             });
             dispatch.on_lagged(&entity, |this, cx| this.refresh(cx));
         });
@@ -155,6 +174,54 @@ impl EmojiStore {
         .detach();
     }
 
+    fn fetch_recent(&mut self, cx: &mut Context<Self>) {
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.emoji_recent_list().await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(recents) => {
+                    let mut seen = HashSet::new();
+                    this.recent_ids = recents
+                        .into_iter()
+                        .map(|r| r.emoji_id.to_string())
+                        .filter(|id| seen.insert(id.clone()))
+                        .take(RECENT_EMOJI_CAP)
+                        .collect();
+                    cx.emit(EmojiEvent::Changed);
+                    cx.notify();
+                }
+                Err(e) => tracing::error!("emoji_recent_list failed: {e}"),
+            });
+        })
+        .detach();
+    }
+
+    fn handle_reaction_echo(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::MessageReaction(r) = event else {
+            return;
+        };
+        if r.action {
+            return;
+        }
+        let Some(current_uid) = BadgeService::global(cx).read(cx).current_user_id(cx) else {
+            return;
+        };
+        if current_uid.get().to_string() != r.sender_id.to_string() {
+            return;
+        }
+        push_recent(&mut self.recent_ids, r.emoji_id.to_string());
+        cx.emit(EmojiEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn recent(&self, limit: usize) -> Vec<&Emoji> {
+        self.recent_ids
+            .iter()
+            .filter_map(|id| self.by_id.get(id))
+            .take(limit)
+            .collect()
+    }
+
     fn insert(&mut self, emoji: Emoji) {
         let id = emoji.id.clone();
         if self.by_id.insert(id.clone(), emoji).is_none() {
@@ -186,7 +253,12 @@ impl EmojiStore {
     }
 
     pub fn by_category(&self, active_clan_id: Option<&str>) -> Vec<(String, Vec<&Emoji>)> {
-        by_category_in(&self.by_id, &self.order, active_clan_id)
+        let mut groups = by_category_in(&self.by_id, &self.order, active_clan_id);
+        let recent = self.recent(RECENT_EMOJI_CAP);
+        if !recent.is_empty() {
+            groups.insert(0, ("Recent".to_string(), recent));
+        }
+        groups
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
@@ -231,6 +303,12 @@ impl EmojiStore {
             cx.notify();
         }
     }
+}
+
+fn push_recent(recent_ids: &mut Vec<String>, id: String) {
+    recent_ids.retain(|existing| existing != &id);
+    recent_ids.insert(0, id);
+    recent_ids.truncate(RECENT_EMOJI_CAP);
 }
 
 fn ordered_emojis<'a>(
@@ -419,6 +497,22 @@ mod tests {
             emoji("3", "smug", "Faces", "A"),
         ]);
         assert_eq!(suggest_in(&by_id, &order, "sm", "A", 2).len(), 2);
+    }
+
+    #[test]
+    fn push_recent_moves_existing_to_front_and_dedupes() {
+        let mut recent = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        push_recent(&mut recent, "2".to_string());
+        assert_eq!(recent, vec!["2", "1", "3"]);
+    }
+
+    #[test]
+    fn push_recent_caps_at_limit() {
+        let mut recent: Vec<String> = (0..RECENT_EMOJI_CAP).map(|i| i.to_string()).collect();
+        push_recent(&mut recent, "new".to_string());
+        assert_eq!(recent.len(), RECENT_EMOJI_CAP);
+        assert_eq!(recent[0], "new");
+        assert!(!recent.contains(&(RECENT_EMOJI_CAP - 1).to_string()));
     }
 
     #[test]
