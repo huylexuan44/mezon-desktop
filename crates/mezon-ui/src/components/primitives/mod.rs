@@ -27,7 +27,7 @@ pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use checkbox::{Checkbox, Radio};
 pub use context_menu::{ContextMenu, context_menu_at};
 pub use divider::Divider;
-pub use dropdown::Dropdown;
+pub use dropdown::{Dropdown, DropdownTriggerStyle};
 pub use icon::{Icon, IconName};
 pub use input::{Input, InputEvent, InputState};
 pub use label::Label;

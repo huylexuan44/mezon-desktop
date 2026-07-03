@@ -35,7 +35,8 @@ pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
-    ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiPinMessage, ApiVoiceChannelUser,
+    ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiPinMessage, ApiThreadDesc,
+    ApiVoiceChannelUser,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

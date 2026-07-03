@@ -7,7 +7,7 @@ use crate::{
     TransportClient,
     transport::{
         ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
-        ApiMessage, ApiPinMessage, ApiVoiceChannelUser, RealtimeEvent,
+        ApiMessage, ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -190,6 +190,27 @@ impl AppApi {
             .await
     }
 
+    pub async fn update_clan_desc(
+        &self,
+        request: mezon_proto::api::UpdateClanDescRequest,
+    ) -> Result<()> {
+        self.transport.update_clan_desc(request).await
+    }
+
+    pub async fn get_system_message_by_clan_id(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::SystemMessage> {
+        self.transport.get_system_message_by_clan_id(clan_id).await
+    }
+
+    pub async fn update_system_message(
+        &self,
+        request: mezon_proto::api::SystemMessageRequest,
+    ) -> Result<()> {
+        self.transport.update_system_message(request).await
+    }
+
     pub async fn is_open(&self) -> bool {
         self.transport.is_open().await
     }
@@ -208,6 +229,38 @@ impl AppApi {
     ) -> Result<crate::transport::ListChannelMessagesResult> {
         self.transport
             .list_channel_messages(clan_id, channel_id, message_id, direction, limit)
+            .await
+    }
+
+    pub async fn list_thread_descs(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        page: i32,
+    ) -> Result<Vec<ApiThreadDesc>> {
+        self.transport
+            .list_thread_descs(channel_id, clan_id, page)
+            .await
+    }
+
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<ApiThreadDesc>> {
+        self.transport
+            .search_thread(clan_id, channel_id, label)
+            .await
+    }
+
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        self.transport
+            .check_duplicate_thread_name(name, parent_channel_id)
             .await
     }
 
@@ -443,6 +496,19 @@ impl AppApi {
         self.transport.list_roles(clan_id, limit, cursor).await
     }
 
+    pub async fn get_list_permission(&self) -> Result<mezon_proto::api::PermissionList> {
+        self.transport.get_list_permission().await
+    }
+
+    pub async fn get_clan_user_role(
+        &self,
+        clan_id: i64,
+    ) -> Result<mezon_proto::api::RoleList> {
+        self.transport
+            .get_clan_user_role(clan_id, 0)
+            .await
+    }
+
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
         let resp = self.transport.list_stickers_by_user_id().await?;
         Ok(resp.stickers)
@@ -455,9 +521,17 @@ impl AppApi {
         channel_type: u32,
         category_id: Option<i64>,
         parent_id: Option<i64>,
+        channel_private: i32,
     ) -> Result<ApiChannelDesc> {
         self.transport
-            .create_channel(clan_id, channel_label, channel_type, category_id, parent_id)
+            .create_channel(
+                clan_id,
+                channel_label,
+                channel_type,
+                category_id,
+                parent_id,
+                channel_private,
+            )
             .await
     }
 
@@ -886,6 +960,16 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .logout_device(token, refresh_token, device_id)
+            .await
+    }
+
+    pub async fn list_user_permission_in_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::UserPermissionInChannelListResponse> {
+        self.transport
+            .list_user_permission_in_channel(clan_id, channel_id)
             .await
     }
 }

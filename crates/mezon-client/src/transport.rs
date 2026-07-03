@@ -456,6 +456,10 @@ pub struct ApiClanDesc {
     pub logo: String,
     pub banner: String,
     pub welcome_channel_id: i64,
+    pub status: i32,
+    pub is_onboarding: bool,
+    pub is_community: bool,
+    pub prevent_anonymous: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -495,6 +499,21 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
             );
             Vec::new()
         }
+    }
+}
+
+fn parse_message_text(content: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
+        .unwrap_or_else(|| content.to_string())
+}
+
+pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
+    if !clan_avatar.is_empty() {
+        clan_avatar.to_string()
+    } else {
+        user_avatar.to_string()
     }
 }
 
@@ -1315,6 +1334,28 @@ pub struct ApiMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiThreadDesc {
+    pub channel_id: String,
+    pub channel_label: String,
+    pub clan_id: String,
+    pub parent_id: String,
+    pub category_id: String,
+    pub channel_private: i32,
+    pub member_count: i32,
+    pub active: i32,
+    pub creator_id: String,
+    pub last_message_content: String,
+    pub last_message_sender_id: String,
+    pub last_message_sender_name: String,
+    pub last_message_sender_avatar: String,
+    pub last_sent_timestamp: i64,
+}
+
+pub const THREAD_LIST_LIMIT: i32 = 50;
+
+pub const CHECK_NAME_TYPE_THREAD: i32 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiPinMessage {
     pub id: String,
     pub message_id: String,
@@ -1482,13 +1523,14 @@ impl MezonTransport {
             logo: clan.logo,
             banner: clan.banner,
             welcome_channel_id: clan.welcome_channel_id,
+            status: clan.status,
+            is_onboarding: clan.is_onboarding,
+            is_community: clan.is_community,
+            prevent_anonymous: clan.prevent_anonymous,
         }
     }
 
     pub fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
-        // The `content` field is a JSON `IExtendedMessage` payload. Parse it for
-        // rich-text tokens; fall back to treating the whole string as plain text
-        // when it is not valid JSON (some legacy/system payloads).
         let content_tokens = serde_json::from_str::<ApiMessageContent>(&message.content)
             .unwrap_or_else(|_| ApiMessageContent {
                 t: message.content.clone(),
@@ -1518,7 +1560,7 @@ impl MezonTransport {
             code: message.code,
             sender_id: message.sender_id,
             sender_name,
-            avatar: message.avatar,
+            avatar: prioritize_avatar(&message.clan_avatar, &message.avatar),
             create_time: i64::from(message.create_time_seconds),
             update_time: i64::from(message.update_time_seconds),
             hide_editted: message.hide_editted,
@@ -1526,6 +1568,35 @@ impl MezonTransport {
             references,
             reactions,
             entity_mentions,
+        }
+    }
+
+    fn thread_desc_from_proto(channel: api::ChannelDescription) -> ApiThreadDesc {
+        let (last_message_content, last_message_sender_id, last_sent_timestamp) =
+            match channel.last_sent_message.as_ref() {
+                Some(msg) => (
+                    parse_message_text(&msg.content),
+                    msg.sender_id.to_string(),
+                    i64::from(msg.timestamp_seconds),
+                ),
+                None => (String::new(), String::new(), 0),
+            };
+
+        ApiThreadDesc {
+            channel_id: channel.channel_id.to_string(),
+            channel_label: channel.channel_label,
+            clan_id: channel.clan_id.to_string(),
+            parent_id: channel.parent_id.to_string(),
+            category_id: channel.category_id.to_string(),
+            channel_private: channel.channel_private,
+            member_count: channel.member_count,
+            active: channel.active,
+            creator_id: channel.creator_id.to_string(),
+            last_message_content,
+            last_message_sender_id,
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
+            last_sent_timestamp,
         }
     }
 
@@ -2476,28 +2547,40 @@ impl MezonTransport {
         Ok(api::ChannelDescription::decode(response.as_slice())?)
     }
 
-    /// List thread descriptions.
+    /// List thread descriptions for a parent channel.
     pub async fn list_thread_descs(
         &self,
         channel_id: i64,
         clan_id: i64,
         limit: i32,
         page: i32,
-    ) -> Result<api::ChannelDescList> {
+        state: i32,
+        thread_id: Option<&str>,
+    ) -> Result<Vec<ApiThreadDesc>> {
         let cid = self.generate_cid();
+        let thread_id = match thread_id {
+            Some(id) => parse_id(id)?,
+            None => 0,
+        };
         let body = api::ListThreadRequest {
             channel_id,
             clan_id,
             limit,
             page,
-            ..Default::default()
+            state,
+            thread_id,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "ListThreadDescs", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelDescList::decode(response.as_slice())?)
+        let list = api::ChannelDescList::decode(response.as_slice())?;
+        Ok(list
+            .channeldesc
+            .into_iter()
+            .map(Self::thread_desc_from_proto)
+            .collect())
     }
 
     /// List channels by user ID.
@@ -3401,20 +3484,30 @@ impl MezonTransport {
         Ok(api::SearchMessageResponse::decode(response.as_slice())?)
     }
 
-    /// Search thread.
-    pub async fn search_thread(&self, clan_id: i64, label: &str) -> Result<api::ChannelDescList> {
+    /// Search threads by label within a parent channel.
+    pub async fn search_thread(
+        &self,
+        clan_id: &str,
+        channel_id: &str,
+        label: &str,
+    ) -> Result<Vec<ApiThreadDesc>> {
         let cid = self.generate_cid();
         let body = api::SearchThreadRequest {
-            clan_id,
+            clan_id: parse_id(clan_id)?,
+            channel_id: parse_id(channel_id)?,
             label: label.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "SearchThread", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelDescList::decode(response.as_slice())?)
+        let list = api::ChannelDescList::decode(response.as_slice())?;
+        Ok(list
+            .channeldesc
+            .into_iter()
+            .map(Self::thread_desc_from_proto)
+            .collect())
     }
 
     /// List Mezon OAuth client.
@@ -3511,22 +3604,24 @@ impl MezonTransport {
     /// Create a new channel.
     pub async fn create_channel(
         &self,
-        _clan_id: i64,
+        clan_id: i64,
         channel_label: &str,
         channel_type: u32,
         category_id: Option<i64>,
         parent_id: Option<i64>,
+        channel_private: i32,
     ) -> Result<ApiChannelDesc> {
         let cid = self.generate_cid();
 
         let category_id = category_id.unwrap_or(0);
         let parent_id = parent_id.unwrap_or(0);
         let body = api::CreateChannelDescRequest {
-            clan_id: _clan_id,
+            clan_id,
             channel_label: channel_label.to_string(),
             r#type: channel_type as i32,
             category_id,
             parent_id,
+            channel_private,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3814,15 +3909,10 @@ impl MezonTransport {
         Ok(Self::clan_desc_from_proto(clan))
     }
 
-    /// Update clan.
-    pub async fn update_clan_desc(&self, clan_id: i64, clan_name: &str) -> Result<()> {
+    /// Update clan description and settings.
+    pub async fn update_clan_desc(&self, request: api::UpdateClanDescRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::UpdateClanDescRequest {
-            clan_id,
-            clan_name: clan_name.to_string(),
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanDesc", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -4332,6 +4422,18 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
+    }
+
+    /// Check duplicate thread name within a parent channel.
+    pub async fn check_duplicate_thread_name(
+        &self,
+        name: &str,
+        parent_channel_id: &str,
+    ) -> Result<bool> {
+        let resp = self
+            .check_duplicate_name(name, CHECK_NAME_TYPE_THREAD, parse_id(parent_channel_id)?)
+            .await?;
+        Ok(resp.is_duplicate)
     }
 
     /// Check duplicate name.
@@ -5294,13 +5396,9 @@ impl MezonTransport {
     }
 
     /// Update system message.
-    pub async fn update_system_message(&self, clan_id: i64) -> Result<()> {
+    pub async fn update_system_message(&self, request: api::SystemMessageRequest) -> Result<()> {
         let cid = self.generate_cid();
-        let body = api::SystemMessageRequest {
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = request.encode_to_vec();
         let (code, _) = self
             .send_api_request(cid, "UpdateSystemMessage", body)
             .await?;
@@ -6247,6 +6345,33 @@ mod tests {
     fn non_numeric_user_id_is_dropped_not_zeroed() {
         let bad = user_mention("not-a-number", 0, 4);
         assert!(bad.to_proto().is_none());
+    }
+
+    #[test]
+    fn message_from_proto_prefers_clan_avatar() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            sender_id: 42,
+            avatar: "user.png".into(),
+            clan_avatar: "clan.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(msg);
+        assert_eq!(parsed.avatar, "clan.png");
+        assert_eq!(parsed.content, "hi");
+    }
+
+    #[test]
+    fn message_from_proto_falls_back_to_user_avatar() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            avatar: "user.png".into(),
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(msg);
+        assert_eq!(parsed.avatar, "user.png");
     }
 
     #[test]

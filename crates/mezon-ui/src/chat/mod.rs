@@ -2,6 +2,7 @@ pub mod area;
 pub mod channel_header;
 pub mod channel_typing;
 pub mod chat_sending;
+pub mod create_thread_panel;
 pub mod grouping;
 pub mod inbox;
 pub mod input_bar;
@@ -12,6 +13,7 @@ pub mod message;
 pub mod pinned_popover;
 pub mod screen_share_modal;
 pub mod screen_share_pip;
+pub mod threads_popover;
 pub mod user_profile_popover;
 pub mod voice;
 
