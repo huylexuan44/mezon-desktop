@@ -112,6 +112,12 @@ impl ClanMembersStore {
             .map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.cache.clear();
+        self.loading.clear();
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
@@ -410,13 +416,7 @@ pub fn split_members_by_status(
     online: &HashSet<UserId>,
 ) -> (Vec<UserId>, Vec<UserId>) {
     let mut sorted: Vec<&&ClanMember> = members.iter().collect();
-    sorted.sort_by(|a, b| {
-        let a_online = online.contains(&a.id());
-        let b_online = online.contains(&b.id());
-        b_online
-            .cmp(&a_online)
-            .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
-    });
+    sorted.sort_by_cached_key(|m| (!online.contains(&m.id()), m.name().to_lowercase()));
 
     let mut online_ids = Vec::new();
     let mut offline_ids = Vec::new();

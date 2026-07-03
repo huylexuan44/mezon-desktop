@@ -40,27 +40,23 @@ pub fn show(notification: &Notification) {
 fn show_macos(n: &Notification) {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
-    use std::os::raw::c_void;
 
     let title = n.title.clone();
     let body = n.body.clone();
     let category = n.channel_id.clone().unwrap_or_default();
 
-    unsafe extern "C" {
-        fn dispatch_get_main_queue() -> *mut c_void;
-        fn dispatch_async_f(
-            queue: *mut c_void,
-            context: *mut c_void,
-            work: unsafe extern "C" fn(*mut c_void),
-        );
-    }
+    unsafe {
+        let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
+        if bundle.is_null() {
+            tracing::debug!("skipping notification: not running from an app bundle");
+            return;
+        }
+        let bundle_id: *mut Object = msg_send![bundle, bundleIdentifier];
+        if bundle_id.is_null() {
+            tracing::debug!("skipping notification: not running from an app bundle");
+            return;
+        }
 
-    unsafe extern "C" fn trampoline(ctx: *mut c_void) {
-        let work = unsafe { Box::from_raw(ctx as *mut Box<dyn FnOnce()>) };
-        (*work)();
-    }
-
-    let work: Box<dyn FnOnce()> = Box::new(move || unsafe {
         let center_cls = class!(UNUserNotificationCenter);
         let center: *mut Object = msg_send![center_cls, currentNotificationCenter];
 
@@ -76,17 +72,20 @@ fn show_macos(n: &Notification) {
 
         let ns_title = nsstring(&title);
         let _: () = msg_send![content, setTitle: ns_title];
+        let _: () = msg_send![ns_title, release];
 
         let ns_body = nsstring(&body);
         let _: () = msg_send![content, setBody: ns_body];
+        let _: () = msg_send![ns_body, release];
 
         if !category.is_empty() {
             let ns_cat = nsstring(&category);
             let _: () = msg_send![content, setThreadIdentifier: ns_cat];
+            let _: () = msg_send![ns_cat, release];
         }
 
         let counter = NOTIFICATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let uuid_str = format!("mezon-{counter}");
+        let uuid_str = format!("mezon-{}-{counter}", std::process::id());
         let ns_uuid = nsstring(&uuid_str);
         let request_cls = class!(UNNotificationRequest);
         let request: *mut Object = msg_send![
@@ -95,17 +94,14 @@ fn show_macos(n: &Notification) {
             content: content
             trigger: std::ptr::null::<Object>()
         ];
+        let _: () = msg_send![ns_uuid, release];
+        let _: () = msg_send![content, release];
 
         let _: () = msg_send![
             center,
             addNotificationRequest: request
             withCompletionHandler: std::ptr::null::<Object>()
         ];
-    });
-
-    let ctx = Box::into_raw(Box::new(work)) as *mut c_void;
-    unsafe {
-        dispatch_async_f(dispatch_get_main_queue(), ctx, trampoline);
     }
 }
 

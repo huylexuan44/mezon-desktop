@@ -63,6 +63,13 @@ impl ScreenShareModal {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
+        cx.on_release(|this, cx| {
+            for (_, image) in this.previews.drain() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
+
         let cached = peek_screen_share_options();
 
         Self {
@@ -103,7 +110,9 @@ impl ScreenShareModal {
                     Ok(Ok(options)) => {
                         this.options = options;
                         this.loading = false;
-                        this.previews.clear();
+                        for (_, image) in this.previews.drain() {
+                            cx.drop_image(image, None);
+                        }
                         this.preview_requests.clear();
                     }
                     Ok(Err(message)) => {
@@ -159,8 +168,6 @@ impl ScreenShareModal {
                 .name("mezon-screen-previews".into())
                 .spawn(move || {
                     for (kind, id) in targets {
-                        // Always report a result (including `None` on failure) so the
-                        // UI side can clear the in-flight request and allow a retry.
                         let preview = capture_screen_share_preview(kind, id);
                         let _ = tx.send((kind, id, preview));
                     }
@@ -171,17 +178,10 @@ impl ScreenShareModal {
                 let key = PreviewKey { kind, id };
                 let image = preview.and_then(preview_to_render_image);
                 this.update(cx, |this, cx| {
-                    match image {
-                        Some(image) => {
-                            this.previews.insert(key, image);
-                        }
-                        None => {
-                            // Capture failed: drop the in-flight marker so this target
-                            // can be retried on a later render instead of being stuck.
-                            this.preview_requests.remove(&key);
-                        }
+                    if let Some(image) = image {
+                        this.previews.insert(key, image);
+                        cx.notify();
                     }
-                    cx.notify();
                 });
             }
         })

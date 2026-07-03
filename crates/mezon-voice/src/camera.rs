@@ -30,6 +30,12 @@ impl CameraStopper {
     }
 }
 
+impl Drop for CameraStopper {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn start_camera(
     identity: String,
     frame_store: Arc<VideoFrameStore>,

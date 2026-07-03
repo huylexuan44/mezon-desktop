@@ -1,6 +1,19 @@
 use sha2::{Digest, Sha512};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 pub const UPDATE_URL: &str = "https://cdn.mezon.ai/release/";
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &["mezon.ai", "cdn.mezon.ai"];
 
@@ -105,7 +118,9 @@ pub async fn check_for_updates_with_manifest(
 
     tracing::debug!("fetching update manifest from {}", manifest_filename());
 
-    let response = reqwest::get(&manifest_url)
+    let response = http_client()
+        .get(&manifest_url)
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("update manifest fetch failed: {e}"))?;
 

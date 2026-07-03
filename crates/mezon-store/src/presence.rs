@@ -1,15 +1,25 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ids::{ChannelId, UserId};
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
+use gpui::{
+    App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task,
+};
 use mezon_client::RealtimeEvent;
 
 use crate::channel::ChannelList;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const STATUS_NOTIFY_DEBOUNCE_MS: u64 = 5000;
+const TYPING_TTL: Duration = Duration::from_millis(3000);
+const TYPING_SWEEP_MS: u64 = 1000;
+
+#[derive(Debug)]
+struct TypingEntry {
+    name: String,
+    at: Instant,
+}
 
 #[derive(Debug, Clone)]
 pub enum PresenceEvent {
@@ -20,11 +30,12 @@ pub enum PresenceEvent {
 
 #[derive(Debug)]
 pub struct PresenceStore {
-    pub typing_by_channel: HashMap<ChannelId, HashSet<String>>,
+    typing_by_channel: HashMap<ChannelId, HashMap<UserId, TypingEntry>>,
     pub channel_online: HashMap<ChannelId, HashSet<UserId>>,
     pub user_online: HashSet<UserId>,
     pub user_status: HashMap<UserId, String>,
     status_notify_task: Option<Task<()>>,
+    typing_sweep_task: Option<Task<()>>,
     _channel_sub: Subscription,
 }
 
@@ -44,9 +55,32 @@ impl PresenceStore {
         cx.global::<GlobalPresenceStore>().0.clone()
     }
 
-    pub fn typing_users(&self, channel_id: ChannelId) -> &HashSet<String> {
-        static EMPTY: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(HashSet::new);
-        self.typing_by_channel.get(&channel_id).unwrap_or(&EMPTY)
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalPresenceStore>().map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.typing_by_channel.clear();
+        self.typing_sweep_task = None;
+        self.channel_online.clear();
+        self.user_online.clear();
+        self.user_status.clear();
+        cx.emit(PresenceEvent::StatusChanged);
+        cx.notify();
+    }
+
+    pub fn typing_users(&self, channel_id: ChannelId) -> Vec<SharedString> {
+        let now = Instant::now();
+        self.typing_by_channel
+            .get(&channel_id)
+            .map(|users| {
+                users
+                    .values()
+                    .filter(|entry| now.duration_since(entry.at) < TYPING_TTL)
+                    .map(|entry| SharedString::from(entry.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn is_online(&self, user_id: UserId) -> bool {
@@ -77,6 +111,7 @@ impl PresenceStore {
             user_online: HashSet::new(),
             user_status: HashMap::new(),
             status_notify_task: None,
+            typing_sweep_task: None,
             _channel_sub: channel_sub,
         }
     }
@@ -114,9 +149,9 @@ impl PresenceStore {
                     cid,
                     &e.sender_display_name,
                     &e.sender_username,
-                    &e.sender_id.to_string(),
-                    e.mode,
+                    UserId(e.sender_id),
                 );
+                self.schedule_typing_sweep(cx);
                 cx.emit(PresenceEvent::TypingChanged { channel_id });
             }
             RealtimeEvent::ChannelPresence(e) => {
@@ -153,30 +188,72 @@ impl PresenceStore {
         self.status_notify_task = Some(task);
     }
 
+    fn schedule_typing_sweep(&mut self, cx: &mut Context<Self>) {
+        if self.typing_sweep_task.is_some() {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(TYPING_SWEEP_MS))
+                    .await;
+                let keep_going = this.update(cx, |store, cx| {
+                    let expired = store.sweep_expired_typing();
+                    for channel_id in expired {
+                        cx.emit(PresenceEvent::TypingChanged { channel_id });
+                    }
+                    !store.typing_by_channel.is_empty()
+                });
+                match keep_going {
+                    Ok(true) => continue,
+                    _ => break,
+                }
+            }
+            let _ = this.update(cx, |store, _| {
+                store.typing_sweep_task = None;
+            });
+        });
+        self.typing_sweep_task = Some(task);
+    }
+
+    fn sweep_expired_typing(&mut self) -> Vec<ChannelId> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        self.typing_by_channel.retain(|channel_id, users| {
+            let before = users.len();
+            users.retain(|_, entry| now.duration_since(entry.at) < TYPING_TTL);
+            if users.len() != before {
+                expired.push(*channel_id);
+            }
+            !users.is_empty()
+        });
+        expired
+    }
+
     pub(crate) fn apply_typing(
         &mut self,
         channel_id: ChannelId,
         display_name: &str,
         username: &str,
-        sender_id: &str,
-        mode: i32,
+        sender_id: UserId,
     ) -> ChannelId {
         let name = if !display_name.is_empty() {
             display_name.to_owned()
         } else if !username.is_empty() {
             username.to_owned()
         } else {
-            sender_id.to_owned()
+            sender_id.to_string()
         };
-        let entry = self.typing_by_channel.entry(channel_id).or_default();
-        if mode == 0 {
-            entry.insert(name);
-        } else {
-            entry.remove(&name);
-            if entry.is_empty() {
-                self.typing_by_channel.remove(&channel_id);
-            }
-        }
+        self.typing_by_channel
+            .entry(channel_id)
+            .or_default()
+            .insert(
+                sender_id,
+                TypingEntry {
+                    name,
+                    at: Instant::now(),
+                },
+            );
         channel_id
     }
 
@@ -255,47 +332,75 @@ mod tests {
             user_online: HashSet::new(),
             user_status: HashMap::new(),
             status_notify_task: None,
+            typing_sweep_task: None,
             _channel_sub: gpui::Subscription::new(|| {}),
         }
     }
 
     #[test]
-    fn typing_start_adds_user_by_display_name() {
+    fn typing_adds_user_by_display_name() {
         let mut store = empty_store();
-        store.apply_typing(ChannelId(1), "Alice", "alice_user", "uid1", 0);
-        assert!(store.typing_by_channel[&ChannelId(1)].contains("Alice"));
+        store.apply_typing(ChannelId(1), "Alice", "alice_user", UserId(1));
+        assert!(
+            store
+                .typing_users(ChannelId(1))
+                .iter()
+                .any(|u| u == "Alice")
+        );
     }
 
     #[test]
-    fn typing_start_falls_back_to_username_when_no_display_name() {
+    fn typing_falls_back_to_username_when_no_display_name() {
         let mut store = empty_store();
-        store.apply_typing(ChannelId(1), "", "alice_user", "uid1", 0);
-        assert!(store.typing_by_channel[&ChannelId(1)].contains("alice_user"));
+        store.apply_typing(ChannelId(1), "", "alice_user", UserId(1));
+        assert!(
+            store
+                .typing_users(ChannelId(1))
+                .iter()
+                .any(|u| u == "alice_user")
+        );
     }
 
     #[test]
-    fn typing_start_falls_back_to_sender_id_when_no_name() {
+    fn typing_falls_back_to_sender_id_when_no_name() {
         let mut store = empty_store();
-        store.apply_typing(ChannelId(1), "", "", "uid1", 0);
-        assert!(store.typing_by_channel[&ChannelId(1)].contains("uid1"));
+        store.apply_typing(ChannelId(1), "", "", UserId(42));
+        assert!(store.typing_users(ChannelId(1)).iter().any(|u| u == "42"));
     }
 
     #[test]
-    fn typing_stop_removes_user_and_cleans_empty_channel() {
+    fn typing_keys_by_user_id_so_same_user_stays_single() {
         let mut store = empty_store();
-        store.apply_typing(ChannelId(1), "Alice", "", "", 0);
-        store.apply_typing(ChannelId(1), "Alice", "", "", 1);
-        assert!(!store.typing_by_channel.contains_key(&ChannelId(1)));
+        store.apply_typing(ChannelId(1), "Alice", "", UserId(1));
+        store.apply_typing(ChannelId(1), "Alice", "", UserId(1));
+        assert_eq!(store.typing_users(ChannelId(1)).len(), 1);
     }
 
     #[test]
-    fn typing_stop_leaves_other_users_in_channel() {
+    fn typing_keeps_distinct_users() {
         let mut store = empty_store();
-        store.apply_typing(ChannelId(1), "Alice", "", "", 0);
-        store.apply_typing(ChannelId(1), "Bob", "", "", 0);
-        store.apply_typing(ChannelId(1), "Alice", "", "", 1);
-        assert!(!store.typing_by_channel[&ChannelId(1)].contains("Alice"));
-        assert!(store.typing_by_channel[&ChannelId(1)].contains("Bob"));
+        store.apply_typing(ChannelId(1), "Alice", "", UserId(1));
+        store.apply_typing(ChannelId(1), "Bob", "", UserId(2));
+        assert_eq!(store.typing_users(ChannelId(1)).len(), 2);
+    }
+
+    #[test]
+    fn typing_sweep_removes_expired_entries() {
+        let mut store = empty_store();
+        store
+            .typing_by_channel
+            .entry(ChannelId(1))
+            .or_default()
+            .insert(
+                UserId(1),
+                TypingEntry {
+                    name: "Old".to_owned(),
+                    at: Instant::now() - Duration::from_secs(10),
+                },
+            );
+        let expired = store.sweep_expired_typing();
+        assert_eq!(expired, vec![ChannelId(1)]);
+        assert!(store.typing_users(ChannelId(1)).is_empty());
     }
 
     #[test]
@@ -403,9 +508,9 @@ mod tests {
     #[test]
     fn typing_users_returns_set_for_channel() {
         let mut store = empty_store();
-        store.apply_typing(ChannelId(1), "Alice", "", "", 0);
+        store.apply_typing(ChannelId(1), "Alice", "", UserId(1));
         let users = store.typing_users(ChannelId(1));
-        assert!(users.contains("Alice"));
+        assert!(users.iter().any(|u| u == "Alice"));
         assert_eq!(users.len(), 1);
     }
 

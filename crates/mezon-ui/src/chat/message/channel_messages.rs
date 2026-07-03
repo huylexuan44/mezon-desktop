@@ -330,6 +330,8 @@ impl ChannelMessages {
                     added_bottom,
                     removed_bottom,
                 } => {
+                    let was_at_end = this.list_state.is_scrolled_to_end().unwrap_or(true);
+                    let prev_top = this.list_state.logical_scroll_top();
                     let h = usize::from(this.header_shown);
                     if *removed_top > 0 {
                         this.list_state.splice(h..h + *removed_top, 0);
@@ -347,9 +349,10 @@ impl ChannelMessages {
                         this.list_state.splice(n..n, *added_bottom);
                     }
                     let following_new =
-                        *added_bottom > 0 && this.at_bottom && !_store.read(cx).has_more_bottom();
+                        *added_bottom > 0 && was_at_end && !_store.read(cx).has_more_bottom();
                     if following_new {
                         this.list_state.scroll_to_end();
+                        this.at_bottom = true;
                         this.sync_channel_seen(cx);
                     } else if *added_top > 0 {
                         let first_real = h + *added_top;
@@ -360,10 +363,9 @@ impl ChannelMessages {
                             });
                         }
                     } else if *added_bottom > 0 || *removed_top > 0 {
-                        let new_top = this.last_visible_start.saturating_sub(*removed_top);
                         this.list_state.scroll_to(gpui::ListOffset {
-                            item_ix: new_top,
-                            offset_in_item: px(0.),
+                            item_ix: prev_top.item_ix.saturating_sub(*removed_top),
+                            offset_in_item: prev_top.offset_in_item,
                         });
                     }
                 }
@@ -796,7 +798,7 @@ impl ChannelMessages {
             for view in self.gif_videos.values() {
                 view.update(cx, |gif, cx| gif.set_playing(true, cx));
             }
-            if self.at_bottom {
+            if self.list_state.is_scrolled_to_end().unwrap_or(true) {
                 self.sync_channel_seen_when_focused(true, cx);
             }
         } else {
@@ -1413,7 +1415,8 @@ impl Render for ChannelMessages {
         let welcome = self.welcome.clone();
         let onboarding = self.onboarding.clone();
         let has_more_bottom = store.read(cx).has_more_bottom();
-        let show_scroll_down = has_more_bottom || !self.at_bottom;
+        let show_scroll_down =
+            has_more_bottom || !self.list_state.is_scrolled_to_end().unwrap_or(true);
         let unread_count = fab_unread_count(
             self.last_seen_at_bottom,
             store.read(cx).channel_tail_message_id(),

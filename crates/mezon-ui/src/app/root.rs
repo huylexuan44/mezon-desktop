@@ -208,11 +208,11 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
-                    | Route::SettingsAdvanced => cached_fill(self.settings_screen.clone()),
+                    | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::NotFound { .. } => render_not_found(theme, &locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
-                    _ => cached_fill(self.chat_layout.clone()),
+                    _ => uncached_fill(self.chat_layout.clone()),
                 }
             }
         };
@@ -267,6 +267,14 @@ fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
     view.into()
         .cached(StyleRefinement::default().flex_1().min_h_0())
+        .into_any_element()
+}
+
+fn uncached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .child(view.into())
         .into_any_element()
 }
 

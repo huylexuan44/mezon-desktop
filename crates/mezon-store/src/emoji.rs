@@ -61,6 +61,15 @@ impl EmojiStore {
         cx.try_global::<GlobalEmojiStore>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.by_id.clear();
+        self.order.clear();
+        self.recent_ids.clear();
+        self.freshness.mark_stale();
+        self.loading = false;
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 

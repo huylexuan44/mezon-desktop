@@ -286,6 +286,7 @@ pub enum IconName {
     ReportMessageRightClick,
     DollarIconRightClick,
     ForwardAllRightClick,
+    ForwardRightClick,
     EndPollNowIcon,
     MarkUnreadIcon,
     AddToInboxIcon,
@@ -579,6 +580,7 @@ impl IconName {
             Self::ReportMessageRightClick => "icons/report-message-right-click.svg",
             Self::DollarIconRightClick => "icons/dollar-icon-right-click.svg",
             Self::ForwardAllRightClick => "icons/forward-all-right-click.svg",
+            Self::ForwardRightClick => "icons/forward-right-click.svg",
             Self::EndPollNowIcon => "icons/end-poll-now.svg",
             Self::MarkUnreadIcon => "icons/mark-unread.svg",
             Self::AddToInboxIcon => "icons/add-to-inbox.svg",
@@ -595,3 +597,4 @@ impl Icon {
         svg().path(name.path()).size(px(16.)).flex_none()
     }
 }
+

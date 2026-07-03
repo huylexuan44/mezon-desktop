@@ -588,7 +588,11 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
                     ),
                 ));
         }
-        WelcomeContext::Thread { name, private } => {
+        WelcomeContext::Thread {
+            name,
+            private,
+            username,
+        } => {
             col = col
                 .child(welcome_icon_circle(
                     if private {
@@ -611,7 +615,10 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
                 )
                 .child(welcome_subtext(
                     subtext_color,
-                    mezon_i18n::t(ctx.locale, "chatWelcome.welcome.startOfThread").to_string(),
+                    fmt_i18n(
+                        mezon_i18n::t(ctx.locale, "chatWelcome.welcome.startOfThread"),
+                        &[("username", &username)],
+                    ),
                 ));
         }
         WelcomeContext::Direct {
@@ -785,9 +792,17 @@ pub fn build_welcome_context(
 
     let name = SharedString::from(channel.name.clone());
     if channel.channel_type == ChannelType::Thread {
+        let creator_id = channel.creator_id;
+        let clan_id = channel.clan_id;
+        let username = mezon_store::ClanMembersStore::global(cx)
+            .read(cx)
+            .member(clan_id, creator_id)
+            .map(|m| SharedString::from(m.name().to_string()))
+            .unwrap_or_default();
         return Some(WelcomeContext::Thread {
             name,
             private: channel.private,
+            username,
         });
     }
     Some(WelcomeContext::Channel {

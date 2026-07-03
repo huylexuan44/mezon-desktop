@@ -5,10 +5,12 @@ use super::content::render_message_content;
 use super::context::{
     AVATAR_LEFT, AVATAR_SIZE, CONTENT_INSET, CONTENT_RIGHT_PAD, DEFAULT_DISPLAY_NAME_COLOR, RowCtx,
 };
+use super::ogp_embed::render_ogp_embed;
 use super::parts::{
     avatar_element, render_attachments, render_head, render_hover_actions, render_reactions,
     render_reply,
 };
+use super::poll_card::render_poll_card;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Icon, IconName, Input};
 
@@ -40,27 +42,29 @@ pub fn render_user_message(
         .pl(px(CONTENT_INSET))
         .pr(px(CONTENT_RIGHT_PAD));
 
-    if msg.is_forwarded {
+    if show_head {
+        body_column = body_column.child(render_head(msg, ctx, DEFAULT_DISPLAY_NAME_COLOR));
+    }
+
+    if msg.show_forwarded_label {
         body_column = body_column.child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .mb_0p5()
-                .text_xs()
-                .text_color(theme.text_muted)
+                .w_full()
+                .italic()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.tokens.text_theme_primary)
+                .opacity(0.6)
                 .child(
-                    Icon::new(IconName::ReplyCorner)
+                    Icon::new(IconName::ForwardRightClick)
                         .size_4()
-                        .text_color(theme.text_muted),
+                        .text_color(theme.tokens.text_theme_primary),
                 )
                 .child(mezon_i18n::t(ctx.locale, "chat.forwarded")),
         );
-    }
-
-    if show_head {
-        body_column = body_column.child(render_head(msg, ctx, DEFAULT_DISPLAY_NAME_COLOR));
     }
 
     let editing_input = (ctx.editing_id == Some(msg.id))
@@ -68,8 +72,13 @@ pub fn render_user_message(
         .flatten();
     body_column = body_column.child(match editing_input {
         Some(input) => render_edit_box(msg.id, input, ctx),
+        None if msg.poll.is_some() => render_poll_card(msg, ctx),
         None => render_message_content(msg, ctx),
     });
+
+    if let Some(ogp) = render_ogp_embed(msg, ctx) {
+        body_column = body_column.child(ogp);
+    }
 
     if let Some(attachments) = render_attachments(msg, ctx) {
         body_column = body_column.child(attachments);
@@ -81,6 +90,20 @@ pub fn render_user_message(
     let body = div()
         .relative()
         .w_full()
+        .when(msg.send_failed, |d| d.opacity(0.5))
+        .when(msg.is_forwarded, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left(px(58.))
+                    .bottom_0()
+                    .when(show_head, |b| b.top(px(50.)))
+                    .when(!show_head, |b| b.top_0())
+                    .w(px(4.))
+                    .rounded(px(4.))
+                    .bg(theme.tokens.text_theme_primary),
+            )
+        })
         .when_some(
             show_head.then(|| build_avatar_element(msg, ctx, cx)),
             |d, avatar_element| {
@@ -222,6 +245,7 @@ fn build_avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         user_id,
         profile_ctx,
         settings,
+        ctx.avatar_cache.clone(),
     )
     .anchor(Anchor::TopLeft)
     .attach(Anchor::TopRight)

@@ -13,9 +13,7 @@ use mezon_store::{
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Avatar, ContextMenu, Icon, IconName, context_menu_at};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::reactive::Derived;
@@ -70,14 +68,37 @@ pub struct MemberListPanel {
     list_scroll: UniformListScrollHandle,
     avatar_image_cache: Entity<LruImageCache>,
     active_context: Option<ProfileContext>,
+    route_key: RouteKey,
     open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
     rebuild_pending: bool,
 }
 
+#[derive(PartialEq, Eq)]
+enum RouteKey {
+    None,
+    Channel {
+        clan_id: ClanId,
+        channel_id: Option<ChannelId>,
+        filtered: bool,
+    },
+    Group(ChannelId),
+}
+
 impl MemberListPanel {
-    pub fn new(source: MemberSource, settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&Router::global(cx), |this, _, cx| this.rebuild(cx))
-            .detach();
+    pub fn new(
+        source: MemberSource,
+        settings: Entity<Settings>,
+        avatar_image_cache: Entity<LruImageCache>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&Router::global(cx), |this, _, cx| {
+            let key = route_key(this.source, cx);
+            if key != this.route_key {
+                this.route_key = key;
+                this.rebuild(cx);
+            }
+        })
+        .detach();
         cx.subscribe(
             &PresenceStore::global(cx),
             |this, _, event, cx| match event {
@@ -135,15 +156,6 @@ impl MemberListPanel {
             }
         }
 
-        let avatar_image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "member-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
         let mut this = Self {
             source,
             settings,
@@ -151,6 +163,7 @@ impl MemberListPanel {
             list_scroll: UniformListScrollHandle::new(),
             avatar_image_cache,
             active_context: None,
+            route_key: route_key(source, cx),
             open_menu: None,
             rebuild_pending: false,
         };
@@ -194,6 +207,51 @@ fn shows_channel(channel_id: ChannelId, cx: &App) -> bool {
 
 fn shows_group(channel_id: ChannelId, cx: &App) -> bool {
     active_group_dm(cx) == Some(channel_id)
+}
+
+fn route_key(source: MemberSource, cx: &App) -> RouteKey {
+    match source {
+        MemberSource::Group => match active_group_dm(cx) {
+            Some(id) => RouteKey::Group(id),
+            None => RouteKey::None,
+        },
+        MemberSource::Channel => {
+            if matches!(
+                Router::global(cx).read(cx).route(),
+                Route::DirectMessage { .. } | Route::Direct | Route::Friends
+            ) {
+                return RouteKey::None;
+            }
+            let channels = ChannelList::global(cx);
+            let channels = channels.read(cx);
+            let (channel_id, filtered, clan_id) = match channels.active_channel() {
+                Some(channel) => {
+                    let is_thread = channel.parent_id.map(|p| !p.is_zero()).unwrap_or(false);
+                    (
+                        Some(channel.id),
+                        channel.private || is_thread,
+                        channel.clan_id,
+                    )
+                }
+                None => (
+                    None,
+                    false,
+                    ClanList::global(cx)
+                        .read(cx)
+                        .active_clan_id
+                        .unwrap_or_default(),
+                ),
+            };
+            if clan_id.is_zero() {
+                return RouteKey::None;
+            }
+            RouteKey::Channel {
+                clan_id,
+                channel_id,
+                filtered,
+            }
+        }
+    }
 }
 
 fn compute_rows(source: MemberSource, cx: &mut Context<MemberListPanel>) -> Vec<Row> {
@@ -564,19 +622,23 @@ fn render_member(
     let rcm_id = member.rcm_id.clone();
 
     let inner = match context {
-        Some(ctx) => {
-            profile_popover_menu(member.popover_id.clone(), user_id, ctx, settings.clone())
-                .anchor(Anchor::TopRight)
-                .attach(Anchor::TopLeft)
-                .trigger(
-                    ClickableContainer::new(member.trigger_id.clone())
-                        .flex()
-                        .flex_1()
-                        .cursor_pointer()
-                        .child(row_content),
-                )
-                .into_any_element()
-        }
+        Some(ctx) => profile_popover_menu(
+            member.popover_id.clone(),
+            user_id,
+            ctx,
+            settings.clone(),
+            avatar_image_cache.clone(),
+        )
+        .anchor(Anchor::TopRight)
+        .attach(Anchor::TopLeft)
+        .trigger(
+            ClickableContainer::new(member.trigger_id.clone())
+                .flex()
+                .flex_1()
+                .cursor_pointer()
+                .child(row_content),
+        )
+        .into_any_element(),
         None => row_content.into_any_element(),
     };
 

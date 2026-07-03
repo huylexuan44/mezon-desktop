@@ -136,6 +136,13 @@ impl VoicePage {
                 (Vec::new(), Vec::new(), None, None)
             };
 
+        let router = crate::router::Router::global(cx);
+        subs.push(cx.observe(&router, |this, router, cx| {
+            if !matches!(router.read(cx).route(), crate::router::Route::SettingsVoice) {
+                this.stop_mic_test(cx);
+            }
+        }));
+
         Self {
             settings,
             mic_slider,
@@ -570,14 +577,21 @@ impl VoicePage {
             .detach();
     }
 
+    fn stop_mic_test(&mut self, cx: &mut Context<Self>) {
+        if !self.is_testing {
+            return;
+        }
+        self.mic_capture = None;
+        self._test_task = None;
+        self.is_testing = false;
+        self.mic_level = 0.0;
+        self.error_text = None;
+        cx.notify();
+    }
+
     fn toggle_mic_test(&mut self, cx: &mut Context<Self>) {
         if self.is_testing {
-            self.mic_capture = None;
-            self._test_task = None;
-            self.is_testing = false;
-            self.mic_level = 0.0;
-            self.error_text = None;
-            cx.notify();
+            self.stop_mic_test(cx);
         } else {
             let device_id = match &self.selected_input_id {
                 Some(id) => id.clone(),

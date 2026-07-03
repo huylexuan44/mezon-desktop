@@ -101,6 +101,7 @@ pub struct Channel {
     pub last_sent_timestamp: i64,
     pub voice_members: Vec<VoiceMember>,
     pub is_favorite: bool,
+    pub creator_id: UserId,
 }
 
 impl Channel {
@@ -213,14 +214,41 @@ impl ChannelList {
         cx.try_global::<GlobalChannelList>().map(|g| g.0.clone())
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.cache.clear();
+        self.app_channels_cache.clear();
+        self.topic_parent_badges.clear();
+        self.pending_channel_badges.clear();
+        self.loading.clear();
+        self.remembered_channels.clear();
+        self.invalidate_channel_index_all();
+        self.active_clan_id = None;
+        if self.active_channel_id.take().is_some() {
+            cx.emit(ChannelEvent::ActiveChannelChanged(None));
+        }
+        cx.notify();
+    }
+
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         Self::register_realtime(cx);
 
         let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
-            if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
-                this.active_clan_id = Some(*clan_id);
-                this.load_for_clan(*clan_id, cx);
-                cx.notify();
+            if let ClanEvent::ActiveClanChanged(active) = event {
+                match active {
+                    Some(clan_id) => {
+                        this.active_clan_id = Some(*clan_id);
+                        this.load_for_clan(*clan_id, cx);
+                        cx.notify();
+                    }
+                    None => {
+                        this.active_clan_id = None;
+                        if this.active_channel_id.is_some() {
+                            this.active_channel_id = None;
+                            cx.emit(ChannelEvent::ActiveChannelChanged(None));
+                        }
+                        cx.notify();
+                    }
+                }
             }
         });
 
@@ -380,10 +408,7 @@ impl ChannelList {
         );
 
         let api_channels = channels_res?;
-        let api_categories = categories_res.unwrap_or_else(|e| {
-            tracing::warn!("list_categories failed: {e}");
-            Vec::new()
-        });
+        let api_categories = categories_res?;
         let badge_descs = badges_res.unwrap_or_else(|e| {
             tracing::warn!("list_channel_badge_counts failed: {e}");
             Vec::new()
@@ -475,12 +500,7 @@ impl ChannelList {
     }
 
     pub fn channel_badge_count(&self, clan_id: ClanId, channel_id: ChannelId) -> u32 {
-        self.cache
-            .get(&clan_id)
-            .into_iter()
-            .flatten()
-            .flat_map(|category| &category.channels)
-            .find(|ch| ch.id == channel_id)
+        self.channel(clan_id, channel_id)
             .map(|ch| ch.badge_count)
             .unwrap_or(0)
     }
@@ -509,11 +529,26 @@ impl ChannelList {
         cleared_badge
     }
 
+    fn clan_total_badge(&self, clan_id: ClanId) -> Option<u32> {
+        self.cache.get(&clan_id).map(|categories| {
+            let mut seen = HashSet::new();
+            categories
+                .iter()
+                .flat_map(|category| &category.channels)
+                .filter(|ch| seen.insert(ch.id))
+                .map(|ch| ch.badge_count)
+                .sum()
+        })
+    }
+
     fn sync_clan_after_read(&self, clan_id: ClanId, cleared_badge: u32, cx: &mut Context<Self>) {
         let has_unread = self.clan_has_any_unread(clan_id);
+        let total = self.clan_total_badge(clan_id);
         ClanList::global(cx).update(cx, |cls, cx| {
-            if cleared_badge > 0 {
-                cls.decrement_badge(clan_id, cleared_badge, cx);
+            match total {
+                Some(count) => cls.set_badge_count(clan_id, count, cx),
+                None if cleared_badge > 0 => cls.decrement_badge(clan_id, cleared_badge, cx),
+                None => {}
             }
             cls.set_has_unread(clan_id, has_unread, cx);
         });
@@ -555,6 +590,15 @@ impl ChannelList {
                 }
                 cleared_badge += Self::mark_channels_read(&mut category.channels);
             }
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| parent_ids.contains(&ch.id))
+            {
+                ch.badge_count = 0;
+                ch.last_seen_timestamp = ch.last_sent_timestamp;
+                ch.last_seen_message_id = ch.last_sent_message_id;
+            }
         }
         self.topic_parent_badges
             .retain(|_, tracked| !parent_ids.contains(&tracked.parent_id));
@@ -576,32 +620,33 @@ impl ChannelList {
     ) {
         let mut visible_changed = false;
         let mut found = false;
-        if let Some((cat_idx, ch_idx)) = self.channel_location(clan_id, channel_id)
-            && let Some(ch) = self
-                .cache
-                .get_mut(&clan_id)
-                .and_then(|cats| cats.get_mut(cat_idx))
-                .and_then(|cat| cat.channels.get_mut(ch_idx))
-        {
-            found = true;
-            let was_unread = ch.is_unread();
-            let was_badge = ch.badge_count;
-            if ts > 0 {
-                ch.last_sent_timestamp = ts;
-                if !message_id.is_zero() {
-                    ch.last_sent_message_id = message_id;
-                }
-                if seen {
-                    ch.last_seen_timestamp = ts;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for ch in categories
+                .iter_mut()
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                found = true;
+                let was_unread = ch.is_unread();
+                let was_badge = ch.badge_count;
+                if ts > 0 {
+                    ch.last_sent_timestamp = ts;
                     if !message_id.is_zero() {
-                        ch.last_seen_message_id = message_id;
+                        ch.last_sent_message_id = message_id;
+                    }
+                    if seen {
+                        ch.last_seen_timestamp = ts;
+                        if !message_id.is_zero() {
+                            ch.last_seen_message_id = message_id;
+                        }
                     }
                 }
+                if is_mention && !seen {
+                    ch.badge_count = ch.badge_count.saturating_add(1);
+                }
+                visible_changed =
+                    visible_changed || was_unread != ch.is_unread() || was_badge != ch.badge_count;
             }
-            if is_mention && !seen {
-                ch.badge_count = ch.badge_count.saturating_add(1);
-            }
-            visible_changed = was_unread != ch.is_unread() || was_badge != ch.badge_count;
         }
         if !found && is_mention && !seen {
             *self.pending_channel_badges.entry(channel_id).or_default() += 1;
@@ -634,18 +679,21 @@ impl ChannelList {
         let mut cleared_badge = 0;
         let mut should_notify = false;
         let mut found = false;
-        if let Some(categories) = self.cache.get_mut(&clan_id)
-            && let Some(ch) = categories
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for ch in categories
                 .iter_mut()
-                .flat_map(|c| &mut c.channels)
-                .find(|ch| ch.id == channel_id)
-        {
-            found = true;
-            cleared_badge = ch.badge_count;
-            should_notify = ch.is_unread() || cleared_badge > 0;
-            ch.badge_count = 0;
-            ch.last_seen_timestamp = ch.last_sent_timestamp;
-            ch.last_seen_message_id = ch.last_sent_message_id;
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                if !found {
+                    found = true;
+                    cleared_badge = ch.badge_count;
+                    should_notify = ch.is_unread() || cleared_badge > 0;
+                }
+                ch.badge_count = 0;
+                ch.last_seen_timestamp = ch.last_sent_timestamp;
+                ch.last_seen_message_id = ch.last_sent_message_id;
+            }
         }
         let overlaid = self.pending_channel_badges.remove(&channel_id);
         if !found {
@@ -669,24 +717,29 @@ impl ChannelList {
     ) {
         let mut visible_changed = false;
         let mut badge_delta = 0;
-        if let Some(categories) = self.cache.get_mut(&clan_id)
-            && let Some(ch) = categories
+        let mut computed = false;
+        if let Some(categories) = self.cache.get_mut(&clan_id) {
+            for ch in categories
                 .iter_mut()
-                .flat_map(|c| &mut c.channels)
-                .find(|ch| ch.id == channel_id)
-        {
-            let was_unread = ch.is_unread();
-            let was_badge = ch.badge_count;
-            ch.badge_count = new_badge;
-            if seen_ts > ch.last_seen_timestamp {
-                ch.last_seen_timestamp = seen_ts;
-            }
-            if !seen_message_id.is_zero() {
-                ch.last_seen_message_id = seen_message_id;
-            }
-            visible_changed = was_unread != ch.is_unread() || was_badge != ch.badge_count;
-            if was_badge > new_badge {
-                badge_delta = was_badge - new_badge;
+                .flat_map(|c| c.channels.iter_mut())
+                .filter(|ch| ch.id == channel_id)
+            {
+                let was_unread = ch.is_unread();
+                let was_badge = ch.badge_count;
+                ch.badge_count = new_badge;
+                if seen_ts > ch.last_seen_timestamp {
+                    ch.last_seen_timestamp = seen_ts;
+                }
+                if !seen_message_id.is_zero() {
+                    ch.last_seen_message_id = seen_message_id;
+                }
+                if !computed {
+                    computed = true;
+                    visible_changed = was_unread != ch.is_unread() || was_badge != ch.badge_count;
+                    if was_badge > new_badge {
+                        badge_delta = was_badge - new_badge;
+                    }
+                }
             }
         }
         clear_topic_badges_for_parent(&mut self.topic_parent_badges, channel_id);
@@ -758,6 +811,7 @@ impl ChannelList {
                         last_sent_timestamp: 0,
                         voice_members: Vec::new(),
                         is_favorite: false,
+                        creator_id: UserId(e.creator_id),
                     };
                     let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
                         insert_channel(cats, channel)
@@ -813,23 +867,19 @@ impl ChannelList {
                     display_name,
                     avatar_url: String::new(),
                 };
-                let changed = self
-                    .cache
-                    .get_mut(&clan_id)
-                    .and_then(|cats| {
-                        cats.iter_mut()
-                            .flat_map(|c| &mut c.channels)
-                            .find(|ch| ch.id == channel_id)
-                    })
-                    .map(|ch| {
+                let mut changed = false;
+                if let Some(cats) = self.cache.get_mut(&clan_id) {
+                    for ch in cats
+                        .iter_mut()
+                        .flat_map(|c| c.channels.iter_mut())
+                        .filter(|ch| ch.id == channel_id)
+                    {
                         if !ch.voice_members.iter().any(|m| m.user_id == user_id) {
-                            ch.voice_members.push(member);
-                            true
-                        } else {
-                            false
+                            ch.voice_members.push(member.clone());
+                            changed = true;
                         }
-                    })
-                    .unwrap_or(false);
+                    }
+                }
                 if changed {
                     cx.notify();
                 }
@@ -838,20 +888,20 @@ impl ChannelList {
                 let clan_id = ClanId(e.clan_id);
                 let channel_id = ChannelId(e.voice_channel_id);
                 let user_id = UserId(e.voice_user_id);
-                let changed = self
-                    .cache
-                    .get_mut(&clan_id)
-                    .and_then(|cats| {
-                        cats.iter_mut()
-                            .flat_map(|c| &mut c.channels)
-                            .find(|ch| ch.id == channel_id)
-                    })
-                    .map(|ch| {
+                let mut changed = false;
+                if let Some(cats) = self.cache.get_mut(&clan_id) {
+                    for ch in cats
+                        .iter_mut()
+                        .flat_map(|c| c.channels.iter_mut())
+                        .filter(|ch| ch.id == channel_id)
+                    {
                         let before = ch.voice_members.len();
                         ch.voice_members.retain(|m| m.user_id != user_id);
-                        ch.voice_members.len() != before
-                    })
-                    .unwrap_or(false);
+                        if ch.voice_members.len() != before {
+                            changed = true;
+                        }
+                    }
+                }
                 if changed {
                     cx.notify();
                 }
@@ -895,6 +945,7 @@ impl ChannelList {
                     last_sent_timestamp: 0,
                     voice_members: Vec::new(),
                     is_favorite: false,
+                    creator_id: UserId(desc.creator_id),
                 };
                 let inserted = insert_channel(cats, channel);
                 if inserted {
@@ -1216,6 +1267,7 @@ fn thread_channel_from_context(
         last_sent_timestamp: 0,
         voice_members: Vec::new(),
         is_favorite: false,
+        creator_id: UserId(0),
     }
 }
 
@@ -1251,6 +1303,7 @@ fn channel_from_desc(
         last_sent_timestamp: c.last_sent_timestamp,
         voice_members,
         is_favorite,
+        creator_id: UserId(c.creator_id),
     }
 }
 
@@ -1469,40 +1522,55 @@ fn merge_pending_badges_into(pending: &mut HashMap<ChannelId, u32>, categories: 
     if pending.is_empty() {
         return;
     }
+    let mut applied: Vec<ChannelId> = Vec::new();
     for category in categories.iter_mut() {
         for ch in category.channels.iter_mut() {
-            if let Some(overlay) = pending.remove(&ch.id) {
+            if let Some(&overlay) = pending.get(&ch.id) {
                 ch.badge_count = ch.badge_count.max(overlay);
+                applied.push(ch.id);
             }
         }
+    }
+    for id in applied {
+        pending.remove(&id);
     }
 }
 
 fn add_channel_badge(categories: &mut [Category], channel_id: ChannelId) -> bool {
-    if let Some(ch) = categories
+    let mut changed = false;
+    let mut computed = false;
+    for ch in categories
         .iter_mut()
-        .flat_map(|category| &mut category.channels)
-        .find(|ch| ch.id == channel_id)
+        .flat_map(|category| category.channels.iter_mut())
+        .filter(|ch| ch.id == channel_id)
     {
         let was_unread = ch.is_unread();
         let was_badge = ch.badge_count;
         ch.badge_count = ch.badge_count.saturating_add(1);
-        return was_badge != ch.badge_count || was_unread != ch.is_unread();
+        if !computed {
+            computed = true;
+            changed = was_badge != ch.badge_count || was_unread != ch.is_unread();
+        }
     }
-    false
+    changed
 }
 
 fn subtract_channel_badge(categories: &mut [Category], channel_id: ChannelId, amount: u32) -> u32 {
-    if let Some(ch) = categories
+    let mut cleared = 0;
+    let mut computed = false;
+    for ch in categories
         .iter_mut()
-        .flat_map(|category| &mut category.channels)
-        .find(|ch| ch.id == channel_id)
+        .flat_map(|category| category.channels.iter_mut())
+        .filter(|ch| ch.id == channel_id)
     {
         let was_badge = ch.badge_count;
         ch.badge_count = ch.badge_count.saturating_sub(amount);
-        return was_badge - ch.badge_count;
+        if !computed {
+            computed = true;
+            cleared = was_badge - ch.badge_count;
+        }
     }
-    0
+    cleared
 }
 
 fn decrement_channel_badge_on_delete(
@@ -1510,18 +1578,19 @@ fn decrement_channel_badge_on_delete(
     channel_id: ChannelId,
     message_ts: i64,
 ) -> bool {
-    if let Some(ch) = categories
+    let mut changed = false;
+    for ch in categories
         .iter_mut()
-        .flat_map(|category| &mut category.channels)
-        .find(|ch| ch.id == channel_id)
+        .flat_map(|category| category.channels.iter_mut())
+        .filter(|ch| ch.id == channel_id)
     {
         let last_seen = ch.last_seen_timestamp;
         if last_seen > 0 && message_ts > last_seen && ch.badge_count > 0 {
             ch.badge_count = ch.badge_count.saturating_sub(1);
-            return true;
+            changed = true;
         }
     }
-    false
+    changed
 }
 
 fn record_topic_parent_badge(
@@ -1629,6 +1698,7 @@ mod tests {
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: false,
+            creator_id: UserId(0),
         }
     }
 
@@ -1910,6 +1980,7 @@ mod tests {
             last_sent_message_id: 0,
             last_sent_timestamp: 0,
             badge_count: badge,
+            creator_id: 0,
         };
 
         let badge_descs = vec![
@@ -2032,6 +2103,7 @@ mod tests {
             last_sent_timestamp: 0,
             voice_members: Vec::new(),
             is_favorite: true,
+            creator_id: UserId(0),
         };
         assert!(ch.is_favorite);
     }
@@ -2057,6 +2129,7 @@ mod tests {
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: false,
+                creator_id: UserId(0),
             },
             Channel {
                 id: ChannelId(2),
@@ -2076,6 +2149,7 @@ mod tests {
                 last_sent_timestamp: 0,
                 voice_members: Vec::new(),
                 is_favorite: true,
+                creator_id: UserId(0),
             },
         ];
 

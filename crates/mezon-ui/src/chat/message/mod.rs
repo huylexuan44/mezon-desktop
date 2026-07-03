@@ -6,7 +6,10 @@ mod gif_video;
 // image-viewer: disabled, reimplement later
 // mod image_viewer;
 mod message_context_menu;
+mod ogp_embed;
 mod parts;
+mod poll_card;
+mod poll_detail_modal;
 mod reaction_detail;
 mod reaction_picker;
 mod skeleton;

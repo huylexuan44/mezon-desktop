@@ -28,6 +28,7 @@ pub enum WelcomeContext {
     Thread {
         name: SharedString,
         private: bool,
+        username: SharedString,
     },
     Direct {
         display_name: SharedString,

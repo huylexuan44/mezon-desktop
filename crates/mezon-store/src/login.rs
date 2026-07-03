@@ -92,6 +92,56 @@ impl LoginStore {
             *state = AuthState::NotAuthenticated;
             cx.notify();
         });
+
+        Self::reset_all_user_stores(cx);
+    }
+
+    pub fn reset_all_user_stores(cx: &mut App) {
+        if let Some(e) = crate::account::AccountStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::presence::PresenceStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::clan_members::ClanMembersStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::channel_members::ChannelMembersStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::group_members::GroupMembersStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::roles::RolesStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::sticker::StickerStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::emoji::EmojiStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::pinned::PinnedMessagesStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::badge::BadgeService::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::users_by_user::UsersByUserStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::direct::DirectMessageStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::messages::MessagesStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::clan::ClanList::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::channel::ChannelList::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
     }
 }
 

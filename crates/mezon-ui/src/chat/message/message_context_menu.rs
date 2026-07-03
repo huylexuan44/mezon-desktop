@@ -164,10 +164,15 @@ pub(crate) fn build(
     }
 
     if is_poll && is_own_message {
+        let message_id = msg.id;
+        let poll_id = msg.poll.as_ref().map(|p| p.poll_id).unwrap_or(0);
         menu = menu.item_icon(
             t("contextMenu.endPollNow"),
             IconName::EndPollNowIcon,
-            coming_soon_click(coming_soon_msg.clone()),
+            move |_window, cx| {
+                mezon_store::MessagesStore::global(cx)
+                    .update(cx, |store, cx| store.close_poll(poll_id, message_id, cx));
+            },
         );
     }
 

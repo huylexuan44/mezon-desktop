@@ -179,6 +179,25 @@ impl AccountStore {
         cx.global::<GlobalAccountStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalAccountStore>().map(|g| g.0.clone())
+    }
+
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.account = None;
+        self.account_loading = false;
+        self.account_error = false;
+        self.devices.clear();
+        self.devices_loading = false;
+        self.devices_error = None;
+        self.clan_profile = None;
+        self.clan_profile_loading = false;
+        self.nickname_duplicate = false;
+        self.account_freshness.mark_stale();
+        self.devices_freshness.mark_stale();
+        cx.notify();
+    }
+
     fn spawn_persist_cache(account: &UserAccount, cx: &App) {
         let account = account.clone();
         cx.background_executor()
@@ -402,11 +421,9 @@ impl AccountStore {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.clan_profile = Some(UserClanProfile {
-                            clan_id,
-                            nick_name: String::new(),
-                            avatar_url: None,
-                        });
+                        if this.clan_profile.as_ref().map(|p| p.clan_id) != Some(clan_id) {
+                            this.clan_profile = None;
+                        }
                         this.clan_profile_loading = false;
                         cx.emit(AccountEvent::ClanProfileLoadFailed(e.to_string()));
                         cx.notify();

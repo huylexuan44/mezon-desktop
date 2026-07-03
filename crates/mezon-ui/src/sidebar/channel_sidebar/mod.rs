@@ -9,7 +9,9 @@ use gpui::{
     MouseDownEvent, SharedString, Subscription, Task, WeakEntity, Window, div, ease_in_out, list,
     prelude::*, px,
 };
-use mezon_store::{ChannelList, ClanId, ClanList, FAVOR_CATE_ID, Settings};
+use mezon_store::{
+    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, Settings, VoiceMember,
+};
 
 use crate::components::compositions::channel_row::ChannelRow;
 use crate::components::primitives::{
@@ -22,6 +24,27 @@ mod menu;
 mod skeleton;
 use items::{AppChannelSlot, SidebarItem, VoiceMemberSlot};
 use menu::{OpenMenu, build_channel_menu, on_category_click, on_channel_click};
+
+fn resolve_voice_member_slot(cx: &App, clan_id: Option<ClanId>, m: &VoiceMember) -> VoiceMemberSlot {
+    let mut slot = VoiceMemberSlot::from(m);
+    if let Some(clan_id) = clan_id
+        && let Some(store) = ClanMembersStore::try_global(cx)
+        && let Some(member) = store.read(cx).member(clan_id, m.user_id)
+    {
+        let name = member.name();
+        if !name.is_empty() {
+            slot.display_name = name.to_string();
+        }
+        let avatar = member.avatar();
+        if !avatar.is_empty() {
+            slot.avatar_url = avatar.to_string();
+        }
+    }
+    if !slot.avatar_url.is_empty() {
+        slot.avatar_url = crate::util::imgproxy::avatar_url(cx, &slot.avatar_url);
+    }
+    slot
+}
 
 pub struct ChannelSidebar {
     clan_list: Entity<ClanList>,
@@ -44,6 +67,7 @@ pub struct ChannelSidebar {
     _channel_observe: Subscription,
     _settings_observe: Subscription,
     _router_observe: Subscription,
+    _members_observe: Subscription,
 }
 
 impl ChannelSidebar {
@@ -107,6 +131,11 @@ impl ChannelSidebar {
                 cx.notify();
             }
         });
+        let members_observe = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            if this.rebuild_items(cx) {
+                cx.notify();
+            }
+        });
 
         let mut this = Self {
             clan_list,
@@ -129,6 +158,7 @@ impl ChannelSidebar {
             _channel_observe: channel_observe,
             _settings_observe: settings_observe,
             _router_observe: router_observe,
+            _members_observe: members_observe,
         };
         this.rebuild_items(cx);
         this
@@ -240,16 +270,7 @@ impl ChannelSidebar {
                                 voice_members: ch
                                     .voice_members
                                     .iter()
-                                    .map(|m| {
-                                        let mut slot = VoiceMemberSlot::from(m);
-                                        if !slot.avatar_url.is_empty() {
-                                            slot.avatar_url = crate::util::imgproxy::avatar_url(
-                                                cx,
-                                                &slot.avatar_url,
-                                            );
-                                        }
-                                        slot
-                                    })
+                                    .map(|m| resolve_voice_member_slot(cx, new_clan_id, m))
                                     .collect(),
                             });
                         }

@@ -13,6 +13,9 @@ use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::chat::pinned_popover::PinnedPopoverPanel;
+use crate::image_cache::{
+    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
+};
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
@@ -20,6 +23,7 @@ pub struct ChatArea {
     pub(crate) mention_input: Option<Entity<MentionInput>>,
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
+    member_avatar_cache: Entity<LruImageCache>,
     #[allow(dead_code)]
     replying_to: Option<ReplyTarget>,
     settings: Entity<Settings>,
@@ -37,11 +41,21 @@ impl ChatArea {
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
+        let member_avatar_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "member-avatar",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             timeline,
             mention_input: None,
             member_panel: None,
             member_source: None,
+            member_avatar_cache,
             replying_to: None,
             settings,
             header,
@@ -74,7 +88,8 @@ impl ChatArea {
         self.member_source = source;
         self.member_panel = source.map(|source| {
             let settings = self.settings.clone();
-            cx.new(move |cx| MemberListPanel::new(source, settings, cx))
+            let avatar_cache = self.member_avatar_cache.clone();
+            cx.new(move |cx| MemberListPanel::new(source, settings, avatar_cache, cx))
         });
     }
 

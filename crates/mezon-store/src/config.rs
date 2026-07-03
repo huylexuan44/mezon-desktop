@@ -375,6 +375,15 @@ impl AppConfig {
         format!("{}/{}{}", base, self.imgproxy_key, path)
     }
 
+    pub fn voice_link(&self, clan_id: &str, channel_id: &str) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        if clan_id.is_empty() || clan_id == "0" {
+            format!("{base}/chat/direct/message/{channel_id}/3")
+        } else {
+            format!("{base}/chat/clans/{clan_id}/channels/{channel_id}")
+        }
+    }
+
     pub fn avatar_proxy(&self, source: &str) -> String {
         self.imgproxy_url(source, 100, 100, "fill")
     }

@@ -6,9 +6,7 @@ use mezon_store::{
 };
 
 use crate::components::primitives::{Avatar, Icon, IconName};
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 pub struct UserReactionPanel {
@@ -24,6 +22,7 @@ impl UserReactionPanel {
         message_id: MessageId,
         emoji_id: SharedString,
         emoji: SharedString,
+        image_cache: Entity<LruImageCache>,
         cx: &mut Context<Self>,
     ) -> Self {
         let store = MessagesStore::global(cx);
@@ -33,15 +32,6 @@ impl UserReactionPanel {
             {
                 cx.notify();
             }
-        });
-        let image_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "reaction-panel",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
         });
         Self {
             message_id,
@@ -131,7 +121,7 @@ impl Render for UserReactionPanel {
             let avatar_url = if avatar.is_empty() {
                 String::new()
             } else {
-                crate::util::imgproxy::profile_url(cx, &avatar)
+                crate::util::imgproxy::avatar_url(cx, &avatar)
             };
             let mut avatar_el = Avatar::new().size_px(px(32.)).name(display_name.clone());
             if !avatar_url.is_empty() {

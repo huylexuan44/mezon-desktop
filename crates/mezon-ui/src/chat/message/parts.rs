@@ -109,7 +109,10 @@ fn reply_preview_line(content: &str) -> String {
 
 pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
-    let preview = if reference.content.is_empty() {
+    let is_deleted = reference.message_ref_id.is_zero();
+    let preview = if is_deleted {
+        mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()
+    } else if reference.content.is_empty() {
         if reference.has_attachment {
             mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()
         } else {
@@ -168,6 +171,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .min_w_0()
                 .truncate()
                 .text_color(theme.tokens.text_theme_message)
+                .when(is_deleted, |d| d.italic())
                 .child(preview),
         )
         .into_any_element()
@@ -543,6 +547,7 @@ fn reaction_pill(
     let add_emoji = reaction.emoji.clone();
     let panel_emoji_id = reaction.emoji_id.clone();
     let panel_emoji = reaction.emoji.clone();
+    let avatar_cache = ctx.avatar_cache.clone();
 
     let mut pill = div()
         .id(("reaction", index))
@@ -572,7 +577,13 @@ fn reaction_pill(
         })
         .hoverable_tooltip(move |_window, cx| {
             cx.new(|cx| {
-                UserReactionPanel::new(message_id, panel_emoji_id.clone(), panel_emoji.clone(), cx)
+                UserReactionPanel::new(
+                    message_id,
+                    panel_emoji_id.clone(),
+                    panel_emoji.clone(),
+                    avatar_cache.clone(),
+                    cx,
+                )
             })
             .into()
         });

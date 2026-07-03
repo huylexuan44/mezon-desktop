@@ -79,10 +79,8 @@ impl SettingsScreen {
     }
 
     pub fn set_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
-        tracing::warn!("DBG set_page {:?}", page);
         self.current_page = page;
         self.ensure_page(page, cx);
-        tracing::warn!("DBG set_page done {:?} profile_page_some={}", page, self.profile_page.is_some());
         cx.notify();
     }
 
@@ -191,7 +189,6 @@ impl SettingsScreen {
 
 impl Render for SettingsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        tracing::warn!("DBG SettingsScreen::render page={:?}", self.current_page);
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let page = self.current_page;
@@ -248,7 +245,6 @@ impl Render for SettingsScreen {
                 })
                 .child(label)
                 .on_click(move |_, _, cx| {
-                    tracing::warn!("DBG nav click path={path}");
                     crate::router::replace(cx, crate::router::Route::from_path(&path));
                 })
         }

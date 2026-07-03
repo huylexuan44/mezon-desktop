@@ -289,6 +289,35 @@ impl AppApi {
             .await
     }
 
+    pub async fn vote_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+        answer_indices: Vec<i32>,
+    ) -> Result<mezon_proto::api::VotePollResponse> {
+        self.transport
+            .vote_poll(poll_id, message_id, channel_id, answer_indices)
+            .await
+    }
+
+    pub async fn get_poll(
+        &self,
+        poll_id: i64,
+        message_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::GetPollResponse> {
+        self.transport
+            .get_poll(poll_id, message_id, channel_id)
+            .await
+    }
+
+    pub async fn close_poll(&self, poll_id: i64, message_id: i64, channel_id: i64) -> Result<()> {
+        self.transport
+            .close_poll(poll_id, message_id, channel_id)
+            .await
+    }
+
     pub async fn delete_channel_message(
         &self,
         clan_id: i64,
