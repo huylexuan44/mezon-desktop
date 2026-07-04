@@ -74,12 +74,15 @@ impl GalleryModal {
         let subscription = cx.observe(&gallery, |this, _, cx| {
             this.rebuild_rows(cx);
         });
+        let cache_for_release = image_cache.clone();
         let release = cx.on_release(move |_, cx| {
+            cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
             if let Some(store) = GalleryStore::try_global(cx) {
                 store.update(cx, |store, _| {
                     store.reset_channel_attachments(channel_id);
                 });
             }
+            crate::image_viewer::trim_process_memory();
         });
         let from_date_picker = cx.new(DatePicker::new);
         let to_date_picker = cx.new(DatePicker::new);
@@ -859,14 +862,10 @@ fn render_image_row(
         let entity = entity.clone();
         let is_video = att.is_video;
         let thumb_src = att.thumb_src.clone();
-        let media = if is_video {
-            div().size_full().into_any_element()
-        } else {
-            img(thumb_src)
-                .size_full()
-                .object_fit(gpui::ObjectFit::Cover)
-                .into_any_element()
-        };
+        let media = img(thumb_src)
+            .size_full()
+            .object_fit(gpui::ObjectFit::Cover)
+            .into_any_element();
         row = row.child(
             div()
                 .id(("gallery-tile", id as usize))
