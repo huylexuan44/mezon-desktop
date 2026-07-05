@@ -40,41 +40,38 @@ pub fn render_ogp_embed(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
     });
 
     let image_box = div()
-        .relative()
         .w_full()
         .h(px(200.))
+        .flex_shrink_0()
         .mt_1()
         .rounded(px(4.))
         .overflow_hidden()
         .bg(theme.tokens.theme_setting_primary)
         .child(ogp_image(ogp.image_proxied.clone(), theme.text_muted));
 
-    let card = div()
-        .id(SharedString::from(format!(
-            "msg-ogp-{}",
-            msg.row_anchor_id.0
-        )))
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap(px(6.))
-        .p(px(10.))
-        .rounded(px(8.))
-        .bg(theme.tokens.theme_setting_nav)
-        .cursor_pointer()
-        .on_click(move |_, _, cx| open_message_link(url.clone(), cx))
-        .when_some(text_block, |d, block| d.child(block))
-        .child(image_box);
-
     Some(
         div()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .w_full()
+            .id(SharedString::from(format!(
+                "msg-ogp-{}",
+                msg.row_anchor_id.0
+            )))
+            .relative()
             .max_w(px(350.))
             .mt_1()
-            .child(card)
+            .mb_1()
+            .rounded(px(8.))
+            .bg(theme.tokens.theme_setting_nav)
+            .cursor_pointer()
+            .on_click(move |_, _, cx| open_message_link(url.clone(), cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .p(px(10.))
+                    .when_some(text_block, |d, block| d.child(block))
+                    .child(image_box),
+            )
             .into_any_element(),
     )
 }
@@ -84,10 +81,9 @@ fn ogp_image(src: SharedString, fallback_fg: gpui::Rgba) -> AnyElement {
         return ogp_image_fallback(fallback_fg);
     }
     img(src)
-        .absolute()
-        .inset_0()
-        .size_full()
-        .object_fit(ObjectFit::Cover)
+        .w_full()
+        .max_h(px(200.))
+        .object_fit(ObjectFit::Contain)
         .with_fallback(move || ogp_image_fallback(fallback_fg))
         .into_any_element()
 }

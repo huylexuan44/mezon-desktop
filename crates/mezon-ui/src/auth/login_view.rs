@@ -190,7 +190,7 @@ impl LoginView {
             let placeholder = mezon_i18n::t(&locale, "common.login.enterEmail");
             let input = cx.new(|cx| Self::login_input(window, cx, placeholder));
             self._field_subs
-                .push(cx.subscribe(&input, Self::on_field_change));
+                .push(cx.subscribe_in(&input, window, Self::on_field_change));
             self.email_input = Some(input);
         }
 
@@ -202,7 +202,7 @@ impl LoginView {
                 input
             });
             self._field_subs
-                .push(cx.subscribe(&input, Self::on_field_change));
+                .push(cx.subscribe_in(&input, window, Self::on_field_change));
             self.password_input = Some(input);
         }
 
@@ -218,13 +218,29 @@ impl LoginView {
 
     fn on_field_change(
         &mut self,
-        _input: Entity<InputState>,
+        _input: &Entity<InputState>,
         event: &InputEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, InputEvent::Change) {
-            self.signin_failed = false;
-            cx.notify();
+        match event {
+            InputEvent::Change => {
+                self.signin_failed = false;
+                cx.notify();
+            }
+            InputEvent::PressEnter => {
+                let entity = cx.entity();
+                let method = self.method;
+                let otp_step = self.otp_step;
+                window.defer(cx, move |window, cx| match method {
+                    LoginMethod::Password => Self::handle_sign_in(&entity, cx),
+                    LoginMethod::Otp => {
+                        if otp_step == 0 {
+                            Self::handle_send_otp(&entity, window, cx);
+                        }
+                    }
+                });
+            }
         }
     }
 

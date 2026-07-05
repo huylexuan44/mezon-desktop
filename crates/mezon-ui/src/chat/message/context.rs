@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use gpui::{App, Entity, SharedString, WeakEntity};
 use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings};
 
+use super::audio_player::AudioPlayerView;
 use super::channel_messages::ChannelMessages;
 use super::gif_video::GifVideoView;
 use super::video_player::VideoPlayerView;
-use crate::components::primitives::InputState;
+use crate::chat::mention_input::MentionInput;
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -56,9 +57,11 @@ pub struct RowCtx<'a> {
     pub avatar_cache: Entity<LruImageCache>,
     pub unread_boundary_id: Option<MessageId>,
     pub highlight_id: Option<MessageId>,
+    pub reply_highlight_id: Option<MessageId>,
     pub profile_context: Option<ProfileContext>,
     pub settings: Entity<Settings>,
     pub active_videos: &'a HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
+    pub active_audios: &'a HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,
@@ -71,7 +74,7 @@ pub struct RowCtx<'a> {
     pub is_clan_owner: bool,
     /// Message currently being edited inline, if any (shared across all rows).
     pub editing_id: Option<MessageId>,
-    pub edit_input: Option<Entity<InputState>>,
+    pub edit_input: Option<Entity<MentionInput>>,
     /// Up to 3 most-recently-used emoji for the hover toolbar's quick-react pills.
     pub emoji_recent: &'a [Emoji],
     /// `common.comingSoon`, resolved once per render pass (not per row).

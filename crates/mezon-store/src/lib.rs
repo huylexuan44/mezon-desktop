@@ -23,6 +23,7 @@ pub mod permissions;
 pub mod pinned;
 pub mod platform;
 pub mod presence;
+pub mod presign;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
@@ -79,7 +80,9 @@ pub use permissions::{
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
 };
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
-pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
+pub use platform::{
+    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};

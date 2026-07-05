@@ -10,6 +10,7 @@ use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, http};
 use reqwest_client::ReqwestClient;
 use std::sync::OnceLock;
+use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -31,7 +32,7 @@ pub fn new_http_client_with_user_agent(agent: &str) -> ReqwestClient {
     ReqwestClient::user_agent(agent).unwrap_or_else(|_| ReqwestClient::new())
 }
 
-fn runtime() -> &'static Runtime {
+pub(crate) fn runtime() -> &'static Runtime {
     TRANSPORT_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -136,6 +137,58 @@ pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
         .await
         .map_err(|e| anyhow::anyhow!("file read task failed: {e}"))?
         .map_err(Into::into)
+}
+
+pub async fn download_to(url: &str, dest: std::path::PathBuf) -> Result<()> {
+    let url = url.to_string();
+    runtime()
+        .spawn(async move {
+            let outcome = stream_to_file(&url, &dest).await;
+            if outcome.is_err() {
+                let _ = tokio::fs::remove_file(&dest).await;
+            }
+            outcome
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("download task failed: {e}"))?
+}
+
+async fn stream_to_file(url: &str, dest: &std::path::Path) -> Result<()> {
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(url)
+        .body(AsyncBody::empty())?;
+    let mut response =
+        match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, http_client().send(request)).await {
+            Ok(result) => result?,
+            Err(_) => anyhow::bail!(
+                "download request timed out after {}s",
+                HTTP_TRANSFER_TIMEOUT.as_secs()
+            ),
+        };
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("HTTP GET failed with status {status}");
+    }
+    let mut file = tokio::fs::File::create(dest).await?;
+    let body = response.body_mut();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, body.read(&mut buffer)).await;
+        let count = match read {
+            Ok(result) => result?,
+            Err(_) => anyhow::bail!(
+                "download stalled (no data for {}s)",
+                HTTP_TRANSFER_TIMEOUT.as_secs()
+            ),
+        };
+        if count == 0 {
+            break;
+        }
+        file.write_all(&buffer[..count]).await?;
+    }
+    file.flush().await?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -660,19 +713,28 @@ impl TransportClient {
     }
 
     /// Update a channel message's content.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
         content: &str,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        mode: i32,
+        is_public: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
         let content = content.to_string();
         runtime()
             .spawn(async move {
                 transport
-                    .update_channel_message(clan_id, channel_id, message_id, &content)
+                    .update_channel_message(
+                        clan_id, channel_id, message_id, &content, mentions, hashtags, emojis,
+                        mode, is_public,
+                    )
                     .await
             })
             .await
@@ -725,6 +787,161 @@ impl TransportClient {
                         mode,
                         timestamp_seconds,
                         badge_count,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn report_message_abuse(&self, message_id: i64, abuse_type: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let abuse_type = abuse_type.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .report_message_abuse(message_id, &abuse_type)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_message_2_inbox(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        content: &str,
+    ) -> Result<mezon_proto::api::ChannelMessageHeader> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_message_2_inbox(message_id, channel_id, clan_id, &content)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_sd_topic(
+        &self,
+        message_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::SdTopic> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .create_sd_topic(message_id, clan_id, channel_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn message_button_click(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        button_id: &str,
+        sender_id: i64,
+        user_id: i64,
+        extra_data: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let button_id = button_id.to_string();
+        let extra_data = extra_data.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .message_button_click(
+                        message_id,
+                        channel_id,
+                        &button_id,
+                        sender_id,
+                        user_id,
+                        &extra_data,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn dropdown_box_selected(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        selectbox_id: &str,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let selectbox_id = selectbox_id.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .dropdown_box_selected(message_id, channel_id, &selectbox_id)
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn forward_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .forward_channel_message(
+                        clan_id,
+                        channel_id,
+                        &content,
+                        is_public,
+                        mode,
+                        attachments,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        attachments: Vec<mezon_proto::api::MessageAttachment>,
+        mode: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+        runtime()
+            .spawn(async move {
+                transport
+                    .update_channel_message_with_attachments(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        &content,
+                        attachments,
+                        mode,
+                        is_public,
                     )
                     .await
             })
@@ -903,6 +1120,19 @@ impl TransportClient {
                     )
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn create_direct_channel(
+        &self,
+        user_ids: &[i64],
+    ) -> Result<crate::transport::ApiChannelDesc> {
+        let transport = self.inner.clone();
+        let user_ids = user_ids.to_vec();
+
+        runtime()
+            .spawn(async move { transport.create_direct_channel(&user_ids).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

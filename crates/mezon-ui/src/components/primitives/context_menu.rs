@@ -114,8 +114,8 @@ impl RenderOnce for ContextMenu {
         let dismiss = self.on_dismiss.clone();
 
         let mut panel = v_flex()
-            .min_w(px(180.))
-            .p(px(4.))
+            .min_w(px(220.))
+            .p(px(6.))
             .rounded_md()
             .border_1()
             .border_color(border)
@@ -132,7 +132,7 @@ impl RenderOnce for ContextMenu {
         for (index, item) in self.items.into_iter().enumerate() {
             match item {
                 Item::Separator => {
-                    panel = panel.child(div().my(px(4.)).h(px(1.)).w_full().bg(border));
+                    panel = panel.child(div().my(px(5.)).h(px(1.)).w_full().bg(border));
                 }
                 Item::Entry {
                     label,
@@ -148,8 +148,8 @@ impl RenderOnce for ContextMenu {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .px(px(8.))
-                            .py(px(6.))
+                            .px(px(10.))
+                            .py(px(8.))
                             .rounded(px(4.))
                             .text_sm()
                             .text_color(label_color)

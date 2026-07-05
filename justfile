@@ -4,7 +4,7 @@
 
 # Crates we own — vendored Zed crates are excluded (we don't lint/test their code;
 # some of their test targets don't even compile against our pinned deps).
-pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater"
+pkgs := "-p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-audio"
 
 # Formatting scope — pkgs plus mezon-voice (excluded from clippy/test above),
 # still excluding vendored crates (read-only, carry upstream fmt drift).

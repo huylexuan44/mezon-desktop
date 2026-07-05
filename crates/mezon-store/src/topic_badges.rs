@@ -233,7 +233,7 @@ impl TopicBadgeStore {
         message_id: Option<&str>,
         dedupe_key: &str,
     ) -> bool {
-        let dedupable = message_id.is_some_and(|id| !id.is_empty());
+        let dedupable = message_id.is_some_and(|id| !id.is_empty() && id != "0");
         if dedupable {
             if self.processed_keys.contains(dedupe_key) {
                 return false;
@@ -383,12 +383,20 @@ fn parse_message_mentions(bytes: &[u8]) -> Vec<ParsedMention> {
             .map(|value| {
                 let user_id = value
                     .get("user_id")
-                    .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
-                    .and_then(|s| if s.is_empty() { None } else { s.parse().ok() });
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    })
+                    .and_then(|s| s.parse().ok());
                 let role_id = value
                     .get("role_id")
-                    .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
-                    .and_then(|s| if s.is_empty() { None } else { s.parse().ok() });
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    })
+                    .and_then(|s| s.parse().ok());
                 ParsedMention { user_id, role_id }
             })
             .collect();
