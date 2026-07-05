@@ -1,5 +1,21 @@
-use gpui::{App, AppContext, Entity, Global};
+use gpui::{App, AppContext, Entity, Global, SharedString};
 use std::sync::Arc;
+
+pub fn download_url_with_dialog(url: SharedString, filename: SharedString, cx: &mut App) {
+    let directory = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let suggested = filename.to_string();
+    let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
+    cx.spawn(async move |_cx| {
+        if let Ok(Ok(Some(path))) = receiver.await
+            && let Err(error) = mezon_client::transport_runtime::download_to(&url, path).await
+        {
+            tracing::error!("attachment download failed: {error}");
+        }
+    })
+    .detach();
+}
 
 pub type OpenUrlFn = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
 pub type NotifyFn = Arc<dyn Fn(DesktopNotification) + Send + Sync>;

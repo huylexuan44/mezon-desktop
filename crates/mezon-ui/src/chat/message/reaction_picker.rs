@@ -152,7 +152,7 @@ impl ReactionPicker {
                             emoji: PickerEmoji {
                                 emoji_id: e.id.clone().into(),
                                 emoji: e.shortname.clone().into(),
-                                src: e.src.clone().into(),
+                                src: crate::util::imgproxy::emoji_url(cx, &e.id).into(),
                                 cell_id: SharedString::from(format!("react-pick-{}", e.id)),
                             },
                             lower: e.shortname.to_lowercase(),

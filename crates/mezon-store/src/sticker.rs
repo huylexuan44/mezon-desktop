@@ -93,7 +93,7 @@ impl StickerStore {
                 let connected = *status_rx.borrow() == ConnectionStatus::Connected;
                 if connected && !was_connected {
                     was_connected = true;
-                    if this.update(cx, |this, _| this.invalidate()).is_err() {
+                    if this.update(cx, |this, cx| this.ensure_loaded(cx)).is_err() {
                         break;
                     }
                 } else if !connected {
@@ -111,10 +111,6 @@ impl StickerStore {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.fetch(cx);
-    }
-
-    fn invalidate(&mut self) {
-        self.freshness.mark_stale();
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {

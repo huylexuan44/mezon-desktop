@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global};
-use mezon_client::{AppApi, TopicDiscussion};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
+use mezon_client::{AppApi, ConnectionStatus, TopicDiscussion};
 
 use crate::CACHE_TTL;
 
@@ -15,11 +15,13 @@ pub enum TopicsEvent {
 
 pub struct TopicsStore {
     topics: Vec<TopicDiscussion>,
+    topic_index: std::collections::HashMap<String, usize>,
     clan_id: Option<String>,
     loading: bool,
     fetch_generation: u64,
     fetched_at: Option<Instant>,
     api: Arc<AppApi>,
+    _conn_watch: Task<()>,
 }
 
 struct GlobalTopicsStore(Entity<TopicsStore>);
@@ -29,16 +31,54 @@ impl EventEmitter<TopicsEvent> for TopicsStore {}
 
 impl TopicsStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
-        let entity = cx.new(|_| Self {
+        let entity = cx.new(|cx| Self::new(api, cx));
+        cx.set_global(GlobalTopicsStore(entity.clone()));
+        entity
+    }
+
+    fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        Self {
             topics: Vec::new(),
+            topic_index: std::collections::HashMap::new(),
             clan_id: None,
             loading: false,
             fetch_generation: 0,
             fetched_at: None,
             api,
-        });
-        cx.set_global(GlobalTopicsStore(entity.clone()));
-        entity
+            _conn_watch: conn_watch,
+        }
+    }
+
+    fn spawn_connection_watch(api: Arc<AppApi>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut status_rx = api.status();
+            let mut was_connected = false;
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break;
+                }
+                let connected = *status_rx.borrow() == ConnectionStatus::Connected;
+                if connected && !was_connected {
+                    was_connected = true;
+                    if this
+                        .update(cx, |this, cx| this.refetch_active_clan(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                } else if !connected {
+                    was_connected = false;
+                }
+            }
+        })
+    }
+
+    fn refetch_active_clan(&mut self, cx: &mut Context<Self>) {
+        self.fetched_at = None;
+        if let Some(clan_id) = self.clan_id.clone() {
+            self.fetch(&clan_id, cx);
+        }
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
@@ -51,6 +91,7 @@ impl TopicsStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.topics.clear();
+        self.topic_index.clear();
         self.clan_id = None;
         self.loading = false;
         self.fetch_generation = self.fetch_generation.wrapping_add(1);
@@ -61,6 +102,12 @@ impl TopicsStore {
 
     pub fn topics(&self) -> &[TopicDiscussion] {
         &self.topics
+    }
+
+    pub fn topic_by_id(&self, id: &str) -> Option<&TopicDiscussion> {
+        self.topic_index
+            .get(id)
+            .and_then(|&index| self.topics.get(index))
     }
 
     pub fn topics_for(&self, clan_id: &str) -> &[TopicDiscussion] {
@@ -93,6 +140,7 @@ impl TopicsStore {
         }
         if self.clan_id.as_deref() != Some(clan_id) {
             self.topics.clear();
+            self.topic_index.clear();
             self.clan_id = Some(clan_id.to_string());
             self.fetched_at = None;
         }
@@ -127,6 +175,12 @@ impl TopicsStore {
             Ok(mut topics) => {
                 topics.sort_by_key(|t| std::cmp::Reverse(t.last_message_timestamp));
                 self.topics = topics;
+                self.topic_index = self
+                    .topics
+                    .iter()
+                    .enumerate()
+                    .map(|(index, topic)| (topic.id.clone(), index))
+                    .collect();
                 self.clan_id = Some(clan_id.to_string());
                 self.fetched_at = Some(Instant::now());
                 cx.emit(TopicsEvent::Updated);

@@ -1,8 +1,9 @@
 use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, Entity, SharedString, Subscription, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    BadgeService, ClanList, ClanMembersStore, MessageId, MessagesEvent, MessagesStore, UserId,
+    AccountStore, BadgeService, ChannelId, ClanId, ClanList, ClanMembersStore, DirectKind,
+    DirectMessageStore, GroupMembersStore, MessageId, MessagesEvent, MessagesStore, UserId,
 };
 
 use crate::components::primitives::{Avatar, Icon, IconName};
@@ -53,7 +54,38 @@ impl Render for UserReactionPanel {
         let emoji_src = crate::util::imgproxy::emoji_url(cx, &self.emoji_id);
         let current_uid = BadgeService::global(cx).read(cx).current_user_id(cx);
         let clan_id = ClanList::global(cx).read(cx).active_clan_id;
-        let members = ClanMembersStore::global(cx);
+        let dm_context = clan_id
+            .is_none()
+            .then(|| {
+                let direct = DirectMessageStore::global(cx);
+                let direct = direct.read(cx);
+                direct
+                    .current()
+                    .and_then(|(cid, _)| direct.find(cid))
+                    .map(|dm| DmContext {
+                        id: dm.id,
+                        kind: dm.kind,
+                        peer: dm.peer_user_id,
+                        label: dm.label.clone(),
+                        avatar: dm.avatar.clone(),
+                    })
+            })
+            .flatten();
+        let self_profile = clan_id
+            .is_none()
+            .then(|| {
+                AccountStore::try_global(cx).and_then(|store| {
+                    store.read(cx).account.as_ref().map(|account| {
+                        let name = if account.display_name.is_empty() {
+                            account.username.clone()
+                        } else {
+                            account.display_name.clone()
+                        };
+                        (name, account.avatar_url.clone().unwrap_or_default())
+                    })
+                })
+            })
+            .flatten();
 
         let emoji_glyph = self.emoji.clone();
         let header_emoji = if emoji_src.is_empty() {
@@ -105,14 +137,14 @@ impl Render for UserReactionPanel {
             .overflow_y_scroll();
         for (index, (sender_id, sender_count)) in senders.iter().enumerate() {
             let uid = sender_id.parse::<i64>().ok().map(UserId::new);
-            let (name, avatar) = match (clan_id, uid) {
-                (Some(cid), Some(u)) => members
-                    .read(cx)
-                    .member(cid, u)
-                    .map(|m| (m.name().to_string(), m.avatar().to_string()))
-                    .unwrap_or_default(),
-                _ => (String::new(), String::new()),
-            };
+            let (name, avatar) = resolve_reactor(
+                uid,
+                clan_id,
+                current_uid,
+                dm_context.as_ref(),
+                self_profile.as_ref(),
+                cx,
+            );
             let display_name = if name.is_empty() {
                 SharedString::from(sender_id.clone())
             } else {
@@ -197,6 +229,49 @@ impl Render for UserReactionPanel {
             .child(header)
             .child(list)
     }
+}
+
+struct DmContext {
+    id: ChannelId,
+    kind: DirectKind,
+    peer: Option<UserId>,
+    label: String,
+    avatar: String,
+}
+
+fn resolve_reactor(
+    uid: Option<UserId>,
+    clan_id: Option<ClanId>,
+    current_uid: Option<UserId>,
+    dm: Option<&DmContext>,
+    self_profile: Option<&(String, String)>,
+    cx: &App,
+) -> (String, String) {
+    let Some(u) = uid else {
+        return (String::new(), String::new());
+    };
+    if let Some(cid) = clan_id {
+        return ClanMembersStore::global(cx)
+            .read(cx)
+            .member(cid, u)
+            .map(|m| (m.name().to_string(), m.avatar().to_string()))
+            .unwrap_or_default();
+    }
+    if current_uid == Some(u)
+        && let Some((name, avatar)) = self_profile
+    {
+        return (name.clone(), avatar.clone());
+    }
+    if let Some(dm) = dm {
+        if dm.kind == DirectKind::Group {
+            if let Some(m) = GroupMembersStore::global(cx).read(cx).member(dm.id, u) {
+                return (m.name().to_string(), m.avatar().to_string());
+            }
+        } else if dm.peer == Some(u) {
+            return (dm.label.clone(), dm.avatar.clone());
+        }
+    }
+    (String::new(), String::new())
 }
 
 pub fn emoji_error_fallback(

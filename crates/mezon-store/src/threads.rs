@@ -23,8 +23,6 @@ pub const THREAD_STATUS_ACTIVE_PRIVATE: i32 = 3;
 
 pub const CHANNEL_TYPE_THREAD: u32 = 7;
 
-pub const MIN_THREAD_NAME_LEN: usize = 3;
-
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(500);
 const LOAD_MORE_THRESHOLD: usize = 6;
 const MESSAGE_CODE_CHAT: i32 = 0;
@@ -50,14 +48,8 @@ pub struct ThreadSummary {
 
 #[derive(Debug, Clone)]
 pub enum ThreadsEvent {
-    ThreadCreated {
-        channel_id: String,
-        clan_id: String,
-    },
-    CreateFailed {
-        message: String,
-    },
-    /// Request the threads popover to open (e.g. from the "all threads" system-message link).
+    ThreadCreated { channel_id: String, clan_id: String },
+    CreateFailed { message: String },
     OpenPopoverRequested,
 }
 
@@ -413,7 +405,6 @@ impl ThreadsStore {
         self.fetch(cx);
     }
 
-    /// Ask any listening view (the chat layout) to open the threads popover.
     pub fn request_open_popover(&mut self, cx: &mut Context<Self>) {
         cx.emit(ThreadsEvent::OpenPopoverRequested);
     }
@@ -688,7 +679,7 @@ impl ThreadsStore {
         let name = name.trim().to_string();
         let message = message.trim().to_string();
 
-        if name.len() <= MIN_THREAD_NAME_LEN {
+        if name.is_empty() {
             self.name_error = Some("thread_name_too_short".into());
             cx.notify();
             return;
@@ -903,7 +894,7 @@ fn patch_thread_from_updated(thread: &mut ThreadSummary, ev: &realtime::ChannelU
 fn patch_thread_from_message(thread: &mut ThreadSummary, msg: &api::ChannelMessage) {
     thread.last_sent_timestamp = i64::from(msg.create_time_seconds);
     if msg.code == MESSAGE_CODE_CHAT || msg.code == MESSAGE_CODE_CHAT_UPDATE {
-        let api_msg = MezonTransport::message_from_proto(msg.clone());
+        let api_msg = MezonTransport::message_from_proto(msg);
         thread.last_message_content = api_msg.content;
         thread.last_message_sender_id = api_msg.sender_id.to_string();
         thread.last_message_sender_name = api_msg.sender_name;
