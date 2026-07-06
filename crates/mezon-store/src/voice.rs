@@ -43,6 +43,27 @@ pub enum VoiceCallStatus {
     Reconnecting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceModerationError {
+    MuteFailed,
+    KickFailed,
+}
+
+#[derive(Clone, Copy)]
+enum ModerationAction {
+    Mute,
+    Kick,
+}
+
+impl ModerationAction {
+    fn error(self) -> VoiceModerationError {
+        match self {
+            ModerationAction::Mute => VoiceModerationError::MuteFailed,
+            ModerationAction::Kick => VoiceModerationError::KickFailed,
+        }
+    }
+}
+
 impl VoiceConnection {
     pub fn active_channel_id(&self) -> Option<&str> {
         match self {
@@ -75,6 +96,10 @@ pub struct VoiceStore {
     focused_tile: Option<String>,
     fullscreen_screen: Option<u64>,
     pip: Option<PipWindow>,
+    room_name: String,
+    participant_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
+    pending_kick: Option<(String, String)>,
+    moderation_error: Option<VoiceModerationError>,
     participants: Vec<VoiceParticipant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
@@ -133,6 +158,10 @@ impl VoiceStore {
             focused_tile: None,
             fullscreen_screen: None,
             pip: None,
+            room_name: String::new(),
+            participant_menu: None,
+            pending_kick: None,
+            moderation_error: None,
             participants: Vec::new(),
             session: None,
             frame_store: None,
@@ -284,8 +313,7 @@ impl VoiceStore {
     }
 
     fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
-        let drops: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_drops.lock());
+        let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
@@ -404,7 +432,9 @@ impl VoiceStore {
 
     pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
-            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            let _ = prev
+                .handle
+                .update(cx, |_, window, _| window.remove_window());
         }
         self.pip = Some(PipWindow { key, handle });
         self.sync_screen_full_res();
@@ -413,7 +443,9 @@ impl VoiceStore {
 
     pub fn close_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
-            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            let _ = prev
+                .handle
+                .update(cx, |_, window, _| window.remove_window());
             self.sync_screen_full_res();
             cx.notify();
         }
@@ -425,6 +457,99 @@ impl VoiceStore {
             self.sync_screen_full_res();
             cx.notify();
         }
+    }
+
+    pub fn participant_menu(&self) -> Option<(&str, gpui::Point<gpui::Pixels>)> {
+        self.participant_menu
+            .as_ref()
+            .map(|(identity, position)| (identity.as_str(), *position))
+    }
+
+    pub fn open_participant_menu(
+        &mut self,
+        identity: String,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.participant_menu = Some((identity, position));
+        cx.notify();
+    }
+
+    pub fn close_participant_menu(&mut self, cx: &mut Context<Self>) {
+        if self.participant_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn take_moderation_error(&mut self) -> Option<VoiceModerationError> {
+        self.moderation_error.take()
+    }
+
+    pub fn mute_participant(&mut self, identity: String, cx: &mut Context<Self>) {
+        self.moderate_participant(identity, ModerationAction::Mute, cx);
+    }
+
+    pub fn pending_kick(&self) -> Option<(&str, &str)> {
+        self.pending_kick
+            .as_ref()
+            .map(|(identity, name)| (identity.as_str(), name.as_str()))
+    }
+
+    pub fn request_kick(&mut self, identity: String, name: String, cx: &mut Context<Self>) {
+        self.pending_kick = Some((identity, name));
+        cx.notify();
+    }
+
+    pub fn cancel_kick(&mut self, cx: &mut Context<Self>) {
+        if self.pending_kick.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn confirm_kick(&mut self, cx: &mut Context<Self>) {
+        let Some((identity, _)) = self.pending_kick.take() else {
+            return;
+        };
+        cx.notify();
+        self.moderate_participant(identity, ModerationAction::Kick, cx);
+    }
+
+    fn moderate_participant(
+        &mut self,
+        identity: String,
+        action: ModerationAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((channel_id, clan_id)) = self.connection.connected_channel() else {
+            return;
+        };
+        if self.room_name.is_empty() {
+            return;
+        }
+        let channel_id = channel_id.to_string();
+        let clan_id = clan_id.to_string();
+        let room_name = self.room_name.clone();
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match action {
+                ModerationAction::Mute => {
+                    api.mute_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                        .await
+                }
+                ModerationAction::Kick => {
+                    api.remove_participant_mezon_meet(&channel_id, &clan_id, &room_name, &identity)
+                        .await
+                }
+            };
+            if let Err(e) = result {
+                tracing::warn!("participant moderation failed: {e:#}");
+                let _ = this.update(cx, |this, cx| {
+                    this.moderation_error = Some(action.error());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn prune_screen_targets(&mut self, cx: &mut Context<Self>) {
@@ -623,7 +748,8 @@ impl VoiceStore {
 
     fn handle_engine_event(&mut self, event: VoiceEvent, cx: &mut Context<Self>) {
         match event {
-            VoiceEvent::Connected => {
+            VoiceEvent::Connected { room_name } => {
+                self.room_name = room_name;
                 if let VoiceConnection::Connecting {
                     channel_id,
                     clan_id,
@@ -655,6 +781,7 @@ impl VoiceStore {
             VoiceEvent::Participants(list) => {
                 self.participants = list;
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
+                    self.mic_enabled = !local.muted;
                     self.camera_enabled = local.camera.is_some();
                     self.screen_share_enabled = local.screenshare.is_some();
                 }
@@ -686,6 +813,11 @@ impl VoiceStore {
 
     pub fn leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.teardown(Some(window), cx);
+        cx.notify();
+    }
+
+    pub fn logout_teardown(&mut self, cx: &mut Context<Self>) {
+        self.teardown(None, cx);
         cx.notify();
     }
 
@@ -762,6 +894,10 @@ impl VoiceStore {
         self.camera_enabled = false;
         self.screen_share_enabled = false;
         self.focused_tile = None;
+        self.room_name.clear();
+        self.participant_menu = None;
+        self.pending_kick = None;
+        self.moderation_error = None;
         self.participants.clear();
         self.meet_token_prefetching = None;
         self.last_repaint_seq = None;

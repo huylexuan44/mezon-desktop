@@ -128,6 +128,39 @@ pub fn resolve_user_profile(
     }
 }
 
+pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) -> Option<String> {
+    match context {
+        ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
+            .read(cx)
+            .member(clan_id, user_id)
+            .map(|member| member.avatar().to_string()),
+        ProfileContext::Direct(channel_id) => {
+            let kind = DirectMessageStore::global(cx)
+                .read(cx)
+                .find(channel_id)
+                .map(|dm| dm.kind)?;
+            match kind {
+                DirectKind::Group => GroupMembersStore::global(cx)
+                    .read(cx)
+                    .member(channel_id, user_id)
+                    .map(|member| member.avatar().to_string()),
+                DirectKind::Dm => {
+                    if let Some(url) = UsersByUserStore::global(cx)
+                        .read(cx)
+                        .user(user_id)
+                        .map(|user| user.avatar_url.clone())
+                    {
+                        return Some(url);
+                    }
+                    let store = DirectMessageStore::global(cx);
+                    let dm = store.read(cx).find(channel_id)?;
+                    (dm.peer_user_id == Some(user_id)).then(|| dm.avatar.clone())
+                }
+            }
+        }
+    }
+}
+
 fn resolve_direct(
     channel_id: ChannelId,
     user_id: UserId,

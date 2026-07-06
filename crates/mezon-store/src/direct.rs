@@ -278,6 +278,18 @@ impl DirectMessageStore {
         self.channels.find(id)
     }
 
+    pub fn create_dm_with_user(
+        &self,
+        user_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<(ChannelId, i32)>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            let desc = api.create_direct_channel(&[user_id.0]).await?;
+            Ok((ChannelId(desc.channel_id), desc.channel_type as i32))
+        })
+    }
+
     pub fn set_current(&mut self, id: ChannelId, channel_type: i32) {
         self.current = Some((id, channel_type));
     }
@@ -343,10 +355,8 @@ impl DirectMessageStore {
         self.loading = true;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let (result, badges) = tokio::join!(
-                api.list_dm_channels(1),
-                api.list_channel_badge_counts(0),
-            );
+            let (result, badges) =
+                tokio::join!(api.list_dm_channels(1), api.list_channel_badge_counts(0),);
             let badge_map = badge_map_from_descs(badges.unwrap_or_default());
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;

@@ -32,6 +32,9 @@ tracy-client = { version = "0.18.2", features = ["enable", "ondemand"], optional
 dirs.workspace = true
 serde.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+
 [features]
 tracy = ["dep:tracing-tracy", "dep:tracy-client"]
 

@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla, ObjectFit, SharedString,
-    StyledImage, div, img, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    ObjectFit, SharedString, StyledImage, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
     AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, NetworkQuality, Settings, UserId,
@@ -8,7 +8,7 @@ use mezon_store::{
 };
 
 use crate::ChatLayout;
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, ContextMenu, Icon, IconName, context_menu_at};
 use crate::theme::Theme;
 use ui::Tooltip;
 
@@ -34,7 +34,9 @@ pub fn render_voice_channel(
     );
 
     if store.is_connected_to(&channel.id.to_string()) || connecting {
-        return render_in_call(theme, locale, channel, voice, settings, store, connecting, cx);
+        return render_in_call(
+            theme, locale, channel, voice, settings, store, connecting, cx,
+        );
     }
 
     let error = match store.connection() {
@@ -548,6 +550,7 @@ fn render_pre_join(
 
 struct VideoCell {
     id: String,
+    identity: String,
     name: String,
     avatar_url: String,
     key: Option<u64>,
@@ -561,6 +564,7 @@ impl VideoCell {
     fn camera(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
             id: mezon_store::camera_tile_id(&p.identity),
+            identity: p.identity.clone(),
             name,
             avatar_url,
             key: p.camera,
@@ -574,6 +578,7 @@ impl VideoCell {
     fn screen(p: &VoiceParticipant, name: String, avatar_url: String) -> Self {
         Self {
             id: mezon_store::screen_tile_id(&p.identity),
+            identity: p.identity.clone(),
             name,
             avatar_url,
             key: p.screenshare,
@@ -705,6 +710,27 @@ fn render_in_call(
         .mic_permission_denied()
         .then(|| mic_permission_modal(theme, locale, voice));
 
+    let participant_menu = store.participant_menu().and_then(|(identity, position)| {
+        let participant = store
+            .participants()
+            .iter()
+            .find(|p| p.identity == identity)?;
+        let (name, _) = resolve_voice_identity(cx, channel.clan_id, identity, &participant.name);
+        let menu = build_participant_menu(
+            voice,
+            identity.to_string(),
+            name,
+            participant.is_local,
+            participant.muted,
+            locale,
+        );
+        Some(context_menu_at(position, menu).into_any_element())
+    });
+
+    let kick_modal = store
+        .pending_kick()
+        .map(|(_, name)| kick_confirm_modal(theme, locale, voice, name));
+
     div()
         .relative()
         .flex()
@@ -717,6 +743,8 @@ fn render_in_call(
             this.child(control_bar(theme, locale, voice, settings, store))
         })
         .children(mic_modal)
+        .children(participant_menu)
+        .children(kick_modal)
         .into_any_element()
 }
 
@@ -832,6 +860,7 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
         .items_center()
         .justify_center()
         .bg(gpui::rgba(0x000000b3))
+        .occlude()
         .child(
             div()
                 .flex()
@@ -920,6 +949,122 @@ fn mic_permission_modal(theme: &Theme, locale: &str, voice: &Entity<VoiceStore>)
         .into_any_element()
 }
 
+fn kick_confirm_modal(
+    theme: &Theme,
+    locale: &str,
+    voice: &Entity<VoiceStore>,
+    name: &str,
+) -> AnyElement {
+    let title =
+        SharedString::from(mezon_i18n::t(locale, "channelVoice.kickModal.title").to_string());
+    let body = SharedString::from(
+        mezon_i18n::t(locale, "channelVoice.kickModal.content").replace("{{userName}}", name),
+    );
+    let cancel_label = SharedString::from(mezon_i18n::t(locale, "common.cancel").to_string());
+    let kick_label =
+        SharedString::from(mezon_i18n::t(locale, "channelVoice.kickModal.kick").to_string());
+
+    let cancel_hover = darken(theme.bg_tertiary, 0.03);
+    let kick_hover = darken(theme.status_dnd, 0.12);
+    let voice_cancel = voice.clone();
+    let voice_confirm = voice.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(0x000000b3))
+        .occlude()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_4()
+                .w(px(380.))
+                .p_6()
+                .rounded_xl()
+                .bg(theme.bg_floating)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(56.))
+                        .h(px(56.))
+                        .rounded_full()
+                        .bg(theme.bg_hover)
+                        .child(
+                            Icon::new(IconName::CloseIcon)
+                                .size(px(26.))
+                                .text_color(theme.status_dnd),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_center()
+                        .text_color(theme.text_muted)
+                        .child(body),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .w_full()
+                        .child(
+                            div()
+                                .id("kick-cancel")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .py_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(theme.bg_tertiary)
+                                .text_color(theme.text_primary)
+                                .hover(move |s| s.bg(cancel_hover))
+                                .on_click(move |_, _, cx| {
+                                    voice_cancel.update(cx, |store, cx| store.cancel_kick(cx))
+                                })
+                                .child(cancel_label),
+                        )
+                        .child(
+                            div()
+                                .id("kick-confirm")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .py_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(theme.status_dnd)
+                                .text_color(gpui::rgb(0xffffff))
+                                .hover(move |s| s.bg(kick_hover))
+                                .on_click(move |_, _, cx| {
+                                    voice_confirm.update(cx, |store, cx| store.confirm_kick(cx))
+                                })
+                                .child(kick_label),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_grid(
     theme: &Theme,
@@ -962,12 +1107,7 @@ fn render_grid(
                         .rounded_lg()
                         .bg(theme.bg_secondary)
                         .child(avatar)
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_primary)
-                                .child(name),
-                        )
+                        .child(div().text_sm().text_color(theme.text_primary).child(name))
                 }))
                 .into_any_element();
         }
@@ -1059,6 +1199,74 @@ fn render_focus_layout(
         .into_any_element()
 }
 
+fn participant_menu_trigger(
+    voice: &Entity<VoiceStore>,
+    identity: String,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let voice = voice.clone();
+    move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+        let position = event.position;
+        let identity = identity.clone();
+        voice.update(cx, |store, cx| {
+            store.open_participant_menu(identity, position, cx);
+        });
+    }
+}
+
+fn build_participant_menu(
+    voice: &Entity<VoiceStore>,
+    identity: String,
+    name: String,
+    is_local: bool,
+    muted: bool,
+    locale: &str,
+) -> ContextMenu {
+    let dismiss = {
+        let voice = voice.clone();
+        move |_window: &mut Window, cx: &mut App| {
+            voice.update(cx, |store, cx| store.close_participant_menu(cx));
+        }
+    };
+
+    let mut menu = ContextMenu::new().on_dismiss(dismiss);
+
+    if !is_local {
+        if !muted {
+            let voice = voice.clone();
+            let identity = identity.clone();
+            menu = menu.danger_item_icon(
+                mezon_i18n::t(locale, "contextMenu.muteMic").to_string(),
+                IconName::VoiceMicDisabledIcon,
+                move |_window, cx| {
+                    let identity = identity.clone();
+                    voice.update(cx, |store, cx| store.mute_participant(identity, cx));
+                },
+            );
+        }
+        let voice = voice.clone();
+        let identity = identity.clone();
+        menu = menu
+            .danger_item_icon(
+                mezon_i18n::t(locale, "contextMenu.member.kick").to_string(),
+                IconName::CloseIcon,
+                move |_window, cx| {
+                    let identity = identity.clone();
+                    let name = name.clone();
+                    voice.update(cx, |store, cx| store.request_kick(identity, name, cx));
+                },
+            )
+            .separator();
+    }
+
+    menu.item_icon(
+        mezon_i18n::t(locale, "contextMenu.copyUserId").to_string(),
+        IconName::CopyIcon,
+        move |_window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(identity.clone()));
+        },
+    )
+}
+
 fn focus_main_tile(
     theme: &Theme,
     locale: &str,
@@ -1085,6 +1293,10 @@ fn focus_main_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .on_mouse_down(
+            MouseButton::Right,
+            participant_menu_trigger(&voice, cell.identity.clone()),
+        )
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.clear_focus(cx));
         })
@@ -1127,6 +1339,10 @@ fn strip_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .on_mouse_down(
+            MouseButton::Right,
+            participant_menu_trigger(&voice, cell.identity.clone()),
+        )
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.set_focus(id.clone(), cx));
         })
@@ -1168,6 +1384,10 @@ fn video_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .on_mouse_down(
+            MouseButton::Right,
+            participant_menu_trigger(&voice, cell.identity.clone()),
+        )
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.toggle_focus(id.clone(), cx));
         })

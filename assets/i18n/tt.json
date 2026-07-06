@@ -2806,6 +2806,8 @@
   "notifications.empty.messages.description": "Керү почтасын ачу өчен CTRL+I басыгыз, һәм төп хәбәрегезне укылган дип билгеләү өчен CTRL+Shift+E кулланыгыз.",
   "notifications.empty.messages.protip": "Киңәш:",
   "notifications.empty.messages.title": "Сез барысын да укыдыгыз!",
+  "notifications.empty.topics.description": "Кемдер сез катнашкан темага җавап бирсә, ул монда күренәчәк.",
+  "notifications.empty.topics.title": "Әлегә тема яңартулары юк",
   "notifications.inbox": "Керү почтасы",
   "notifications.tabs.forYou": "Сез өчен",
   "notifications.tabs.mentions": "Искәртүләр",

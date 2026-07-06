@@ -118,7 +118,9 @@ impl ClanSidebar {
     fn sync_chrome(&mut self, cx: &App) {
         let locale = self.settings.read(cx).language.clone();
         self.discover_title = mezon_i18n::t(&locale, "common.discover").to_string().into();
-        self.create_clan_title = mezon_i18n::t(&locale, "common.createClan").to_string().into();
+        self.create_clan_title = mezon_i18n::t(&locale, "common.createClan")
+            .to_string()
+            .into();
         let custom_logo = AccountStore::global(cx)
             .read(cx)
             .account
@@ -219,7 +221,6 @@ impl Render for ClanSidebar {
             .w_full()
             .h_full()
             .pb(px(68.))
-            .bg(theme.bg_tertiary)
             .items_center()
             .child(
                 div()

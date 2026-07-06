@@ -178,9 +178,7 @@ impl SingleInstance {
     #[cfg(windows)]
     fn create_pipe_server() -> anyhow::Result<std::sync::mpsc::Receiver<String>> {
         use std::time::Duration;
-        use windows::Win32::Foundation::{
-            ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE,
-        };
+        use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
         use windows::Win32::Storage::FileSystem::{
             FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND,
         };
@@ -197,7 +195,6 @@ impl SingleInstance {
             .chain(std::iter::once(0))
             .collect();
 
-        // so a second server creation attempt fails (mutex semantics).
         let handle = unsafe {
             CreateNamedPipeW(
                 windows::core::PCWSTR(pipe_name.as_ptr()),
@@ -234,7 +231,7 @@ impl SingleInstance {
                     let connected =
                         match unsafe { windows::Win32::System::Pipes::ConnectNamedPipe(h, None) } {
                             Ok(()) => true,
-                            Err(_) => unsafe { GetLastError() == ERROR_PIPE_CONNECTED },
+                            Err(e) => e.code() == ERROR_PIPE_CONNECTED.to_hresult(),
                         };
                     if !connected {
                         unsafe {

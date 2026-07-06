@@ -185,7 +185,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let app = application()
         .with_http_client(Arc::new(
             mezon_client::image_disk_cache::DiskImageCacheClient::new(
-                mezon_client::transport_runtime::new_http_client_with_user_agent(IMAGE_CLIENT_USER_AGENT),
+                mezon_client::transport_runtime::new_http_client_with_user_agent(
+                    IMAGE_CLIENT_USER_AGENT,
+                ),
             ),
         ))
         .with_assets(mezon_ui::util::assets::Assets);
@@ -293,6 +295,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         cx.set_global(MainWindowGlobal(window_handle));
 
+        #[cfg(target_os = "windows")]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(Some(RawWindowHandle::Win32(win32))) = cx
+                .update_window(window_handle, |_, window, _| {
+                    window.window_handle().ok().map(|handle| handle.as_raw())
+                })
+            {
+                mezon_native::badge::set_main_window_hwnd(win32.hwnd.get());
+            }
+        }
+
         install_badge_bridge(cx);
 
         let deep_link_task = {
@@ -311,7 +325,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                             )
                         });
                         if !flow_pending {
-                            tracing::warn!("Ignoring OAuth callback deep link: no login flow pending");
+                            tracing::warn!(
+                                "Ignoring OAuth callback deep link: no login flow pending"
+                            );
                             continue;
                         }
                         if let Some(token) = mezon_store::token_from_oauth_callback_url(&url) {
@@ -470,6 +486,9 @@ fn open_main_window(
     mezon_store::BadgeService::init(auth_state.clone(), cx);
     mezon_store::MessagesStore::init(api.clone(), cx);
     mezon_store::ThreadsStore::init(api.clone(), cx);
+    mezon_store::InboxStore::init(api.clone(), cx);
+    mezon_store::TopicsStore::init(api.clone(), cx);
+    mezon_store::TopicBadgeStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::PinnedMessagesStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);

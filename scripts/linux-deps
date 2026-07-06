@@ -14,6 +14,8 @@ install_apt() {
   local deps=(
     build-essential
     pkg-config
+    cmake
+    clang
     libgtk-3-dev
     libatk1.0-dev
     libpango1.0-dev
@@ -28,17 +30,23 @@ install_apt() {
     libxdo-dev
     libsecret-1-dev
     libssl-dev
+    libzstd-dev
     libvulkan-dev
+    mesa-vulkan-drivers
     libva-dev
     libpipewire-0.3-dev
     libdbus-1-dev
     libxcb1-dev
+    libxcb-render0-dev
+    libxcb-shape0-dev
     libxcb-randr0-dev
     libxcb-xfixes0-dev
     libxcb-xkb-dev
     libxcb-cursor-dev
     libx11-dev
     libx11-xcb-dev
+    libayatana-appindicator3-dev
+    protobuf-compiler
     xdg-desktop-portal
     libgstreamer1.0-dev
     libgstreamer-plugins-base1.0-dev
@@ -48,7 +56,7 @@ install_apt() {
   )
 
   $maysudo apt-get update
-  $maysudo apt-get install -y "${deps[@]}"
+  $maysudo apt-get install -y --no-install-recommends "${deps[@]}"
 }
 
 install_dnf() {
@@ -67,6 +75,8 @@ install_dnf() {
     gcc-c++
     make
     pkg-config
+    cmake
+    clang
     gtk3-devel
     atk-devel
     pango-devel
@@ -80,13 +90,17 @@ install_dnf() {
     libxkbcommon-x11-devel
     libsecret-devel
     openssl-devel
+    libzstd-devel
     vulkan-loader-devel
+    mesa-vulkan-drivers
     libva-devel
     pipewire-devel
     dbus-devel
     libxcb-devel
     libX11-devel
     libx11-xcb-devel
+    libappindicator-gtk3-devel
+    protobuf-compiler
     xdg-desktop-portal
     gstreamer1-devel
     gstreamer1-plugins-base-devel

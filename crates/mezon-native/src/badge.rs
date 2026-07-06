@@ -14,6 +14,17 @@ pub fn set_badge_count(count: u32) {
     set_badge_windows(count);
 }
 
+#[cfg(target_os = "windows")]
+static MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+pub fn set_main_window_hwnd(hwnd: isize) {
+    MAIN_HWND.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_main_window_hwnd(_hwnd: isize) {}
+
 // ─── macOS ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
@@ -70,11 +81,18 @@ fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
     };
     use windows::core::Interface as _;
 
+    use windows::Win32::Foundation::HWND;
+
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 
-    let hwnd = unsafe { GetActiveWindow() };
+    let stored = MAIN_HWND.load(std::sync::atomic::Ordering::Relaxed);
+    let hwnd = if stored != 0 {
+        HWND(stored as *mut core::ffi::c_void)
+    } else {
+        unsafe { GetActiveWindow() }
+    };
 
     let taskbar: ITaskbarList3 = unsafe {
         windows::Win32::System::Com::CoCreateInstance(

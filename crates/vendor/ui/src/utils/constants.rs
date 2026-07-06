@@ -23,3 +23,5 @@ pub fn platform_title_bar_height(_window: &Window) -> Pixels {
     // todo(windows) instead of hard coded size report the actual size to the Windows platform API
     px(32.)
 }
+
+pub const ROUNDED_BORDER_WINDOW: f32 = 12.0;

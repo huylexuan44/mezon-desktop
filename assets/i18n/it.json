@@ -3272,6 +3272,8 @@
   "notifications.empty.messages.description": "Apri l'inbox premendo CTRL+I e segna il primo messaggio come letto con CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Suggerimento:",
   "notifications.empty.messages.title": "Hai visto tutto!",
+  "notifications.empty.topics.description": "Quando qualcuno risponde a un argomento a cui partecipi, apparirà qui.",
+  "notifications.empty.topics.title": "Ancora nessun aggiornamento sugli argomenti",
   "notifications.inbox": "Inbox",
   "notifications.tabs.forYou": "Per te",
   "notifications.tabs.mentions": "Menzioni",

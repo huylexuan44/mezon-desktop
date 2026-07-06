@@ -6,8 +6,9 @@ use anyhow::Result;
 use crate::{
     TransportClient,
     transport::{
-        ApiAccount, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc, ApiDirectChannel,
-        ApiMessage, ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser, RealtimeEvent,
+        ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc,
+        ApiDirectChannel, ApiMessage, ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser,
+        RealtimeEvent,
     },
 };
 
@@ -298,15 +299,24 @@ impl AppApi {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
         content: &str,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        mode: i32,
+        is_public: bool,
     ) -> Result<()> {
         self.transport
-            .update_channel_message(clan_id, channel_id, message_id, content)
+            .update_channel_message(
+                clan_id, channel_id, message_id, content, mentions, hashtags, emojis, mode,
+                is_public,
+            )
             .await
     }
 
@@ -477,6 +487,121 @@ impl AppApi {
             .await
     }
 
+    pub async fn report_message_abuse(&self, message_id: i64, abuse_type: &str) -> Result<()> {
+        self.transport
+            .report_message_abuse(message_id, abuse_type)
+            .await
+    }
+
+    pub async fn create_message_2_inbox(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        clan_id: i64,
+        content: &str,
+    ) -> Result<()> {
+        self.transport
+            .create_message_2_inbox(message_id, channel_id, clan_id, content)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn create_sd_topic(
+        &self,
+        message_id: i64,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<mezon_proto::api::SdTopic> {
+        self.transport
+            .create_sd_topic(message_id, clan_id, channel_id)
+            .await
+    }
+
+    pub async fn message_button_click(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        button_id: &str,
+        sender_id: i64,
+        user_id: i64,
+        extra_data: &str,
+    ) -> Result<()> {
+        self.transport
+            .message_button_click(
+                message_id, channel_id, button_id, sender_id, user_id, extra_data,
+            )
+            .await
+    }
+
+    pub async fn dropdown_box_selected(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        selectbox_id: &str,
+    ) -> Result<()> {
+        self.transport
+            .dropdown_box_selected(message_id, channel_id, selectbox_id)
+            .await
+    }
+
+    pub async fn forward_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<ApiAttachment>,
+    ) -> Result<()> {
+        let proto = attachments
+            .into_iter()
+            .map(|a| mezon_proto::api::MessageAttachment {
+                filename: a.filename,
+                size: a.size,
+                url: a.url,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+            })
+            .collect();
+        self.transport
+            .forward_channel_message(clan_id, channel_id, content, is_public, mode, proto)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        attachments: Vec<ApiAttachment>,
+        mode: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let proto = attachments
+            .into_iter()
+            .map(|a| mezon_proto::api::MessageAttachment {
+                filename: a.filename,
+                size: a.size,
+                url: a.url,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+            })
+            .collect();
+        self.transport
+            .update_channel_message_with_attachments(
+                clan_id, channel_id, message_id, content, proto, mode, is_public,
+            )
+            .await
+    }
+
     pub async fn list_emojis_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanEmoji>> {
         let resp = self.transport.list_emojis_by_user_id().await?;
         Ok(resp.emoji_list)
@@ -500,13 +625,8 @@ impl AppApi {
         self.transport.get_list_permission().await
     }
 
-    pub async fn get_clan_user_role(
-        &self,
-        clan_id: i64,
-    ) -> Result<mezon_proto::api::RoleList> {
-        self.transport
-            .get_clan_user_role(clan_id, 0)
-            .await
+    pub async fn get_clan_user_role(&self, clan_id: i64) -> Result<mezon_proto::api::RoleList> {
+        self.transport.get_clan_user_role(clan_id, 0).await
     }
 
     pub async fn list_stickers_by_user_id(&self) -> Result<Vec<mezon_proto::api::ClanSticker>> {
@@ -533,6 +653,10 @@ impl AppApi {
                 channel_private,
             )
             .await
+    }
+
+    pub async fn create_direct_channel(&self, user_ids: &[i64]) -> Result<ApiChannelDesc> {
+        self.transport.create_direct_channel(user_ids).await
     }
 
     /// Create a category in a clan; returns its id.
@@ -607,6 +731,7 @@ impl AppApi {
                 height: a.height,
                 thumbnail: a.thumbnail.clone(),
                 duration: a.duration,
+                size: a.size,
             })
             .collect();
         let mut sent = self
@@ -655,6 +780,7 @@ impl AppApi {
                 height: 0,
                 thumbnail: String::new(),
                 duration: 0,
+                size: 0,
             })
             .collect();
         let mut sent = self
@@ -673,10 +799,16 @@ impl AppApi {
         } = file;
         let filename = sanitize_filename(&filename);
         let size = clamp_i32(data.len());
-        let (width, height) = if filetype.starts_with("image/") {
-            image_dimensions(&data)
+        let (data, width, height) = if filetype.starts_with("image/") {
+            crate::transport_runtime::runtime()
+                .spawn_blocking(move || {
+                    let (w, h) = image_dimensions(&data);
+                    (data, w, h)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("image dimensions task failed: {e}"))?
         } else {
-            (0, 0)
+            (data, 0, 0)
         };
         let url = self
             .upload_bytes(&filename, &filetype, size, width, height, data)
@@ -876,6 +1008,35 @@ impl AppApi {
         self.transport.get_notification_clan(clan_id).await
     }
 
+    pub async fn list_notifications(
+        &self,
+        clan_id: &str,
+        limit: i32,
+        notification_id: &str,
+        category: i32,
+        direction: i32,
+    ) -> Result<Vec<crate::InboxNotification>> {
+        self.transport
+            .list_notifications(clan_id, limit, notification_id, category, direction)
+            .await
+    }
+
+    pub async fn delete_notifications(&self, ids: &[&str], category: i32) -> Result<()> {
+        self.transport.delete_notifications(ids, category).await
+    }
+
+    pub async fn list_sd_topics(
+        &self,
+        clan_id: &str,
+        limit: i32,
+    ) -> Result<Vec<crate::TopicDiscussion>> {
+        self.transport.list_sd_topics(clan_id, limit).await
+    }
+
+    pub async fn get_topic_detail(&self, topic_id: &str) -> Result<crate::TopicDiscussion> {
+        self.transport.get_topic_detail(topic_id).await
+    }
+
     pub async fn list_channel_badge_counts(&self, clan_id: i64) -> Result<Vec<ApiChannelDesc>> {
         self.transport.list_channel_badge_counts(clan_id).await
     }
@@ -887,6 +1048,30 @@ impl AppApi {
     pub async fn generate_meet_token(&self, channel_id: &str, room_name: &str) -> Result<String> {
         self.transport
             .generate_meet_token(channel_id, room_name)
+            .await
+    }
+
+    pub async fn remove_participant_mezon_meet(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        room_name: &str,
+        username: &str,
+    ) -> Result<()> {
+        self.transport
+            .remove_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .await
+    }
+
+    pub async fn mute_participant_mezon_meet(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        room_name: &str,
+        username: &str,
+    ) -> Result<()> {
+        self.transport
+            .mute_participant_mezon_meet(channel_id, clan_id, room_name, username)
             .await
     }
 

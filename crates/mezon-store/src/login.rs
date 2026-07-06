@@ -136,11 +136,23 @@ impl LoginStore {
         if let Some(e) = crate::messages::MessagesStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::inbox::InboxStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::topic_badges::TopicBadgeStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::topics::TopicsStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::clan::ClanList::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
         if let Some(e) = crate::channel::ChannelList::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
+        }
+        if let Some(e) = crate::voice::VoiceStore::try_global(cx) {
+            e.update(cx, |s, cx| s.logout_teardown(cx));
         }
     }
 }

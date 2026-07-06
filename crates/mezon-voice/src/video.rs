@@ -240,6 +240,20 @@ pub fn i420_to_bgra_into(
             out_px[6] = clamp_u8((c1 + r_off) >> 8);
             out_px[7] = 255;
         }
+
+        if width % 2 == 1 && u_start + cw < u_plane.len() && v_start + cw < v_plane.len() {
+            let d = u_plane[u_start + cw] as i32 - 128;
+            let e = v_plane[v_start + cw] as i32 - 128;
+            let r_off = 409 * e + 128;
+            let g_off = -100 * d - 208 * e + 128;
+            let b_off = 516 * d + 128;
+            let c = 298 * (y_row[width - 1] as i32 - 16);
+            let px = out_start + (width - 1) * 4;
+            out[px] = clamp_u8((c + b_off) >> 8);
+            out[px + 1] = clamp_u8((c + g_off) >> 8);
+            out[px + 2] = clamp_u8((c + r_off) >> 8);
+            out[px + 3] = 255;
+        }
     }
 }
 
@@ -340,6 +354,42 @@ mod tests {
         let width = 8usize;
         let height = 6usize;
         let stride_y = width + 3;
+        let cw = width / 2;
+        let ch = height / 2;
+        let stride_u = cw + 2;
+        let stride_v = cw + 1;
+
+        let y_plane: Vec<u8> = (0..stride_y * height)
+            .map(|i| (i * 7 % 256) as u8)
+            .collect();
+        let u_plane: Vec<u8> = (0..stride_u * ch).map(|i| (i * 13 % 256) as u8).collect();
+        let v_plane: Vec<u8> = (0..stride_v * ch).map(|i| (i * 29 % 256) as u8).collect();
+
+        let expected = reference_i420_to_bgra(
+            &y_plane, &u_plane, &v_plane, stride_y, stride_u, stride_v, width, height,
+        );
+
+        let mut actual = vec![0u8; width * height * 4];
+        i420_to_bgra_into(
+            &mut actual,
+            &y_plane,
+            &u_plane,
+            &v_plane,
+            stride_y,
+            stride_u,
+            stride_v,
+            width,
+            height,
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn i420_to_bgra_matches_reference_odd_width() {
+        let width = 7usize;
+        let height = 6usize;
+        let stride_y = width + 2;
         let cw = width / 2;
         let ch = height / 2;
         let stride_u = cw + 2;

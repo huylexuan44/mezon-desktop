@@ -3282,6 +3282,8 @@
   "notifications.empty.messages.description": "Откройте Входящие, нажав CTRL+I, и отметьте ваше главное сообщение как прочитанное с помощью CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Совет:",
   "notifications.empty.messages.title": "Вы всё прочитали!",
+  "notifications.empty.topics.description": "Когда кто-то ответит в теме, в которой вы участвуете, это появится здесь.",
+  "notifications.empty.topics.title": "Пока нет обновлений по темам",
   "notifications.inbox": "Входящие",
   "notifications.tabs.forYou": "Для Вас",
   "notifications.tabs.mentions": "Упоминания",

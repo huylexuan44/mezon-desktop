@@ -18,11 +18,16 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let primary = theme.tokens.text_theme_primary;
     let icon_fill = theme.tokens.bg_icon_theme;
-    let is_custom = matches!(msg.code, MessageCode::CreatePin | MessageCode::CreateThread);
+    let is_custom = matches!(
+        msg.code,
+        MessageCode::CreatePin | MessageCode::CreateThread | MessageCode::DeleteThread
+    );
 
     let (icon, icon_size) = match msg.code {
         MessageCode::CreatePin => (IconName::PinRight, px(SYSTEM_SMALL_ICON)),
-        MessageCode::CreateThread => (IconName::ThreadIcon, px(SYSTEM_SMALL_ICON)),
+        MessageCode::CreateThread | MessageCode::DeleteThread => {
+            (IconName::ThreadIcon, px(SYSTEM_SMALL_ICON))
+        }
         MessageCode::AuditLog => (IconName::AuditLogIcon, px(SYSTEM_ARROW_ICON)),
         MessageCode::UpcomingEvent => (IconName::UpcomingEventIcon, px(SYSTEM_ARROW_ICON)),
         _ => (IconName::WelcomeIcon, px(SYSTEM_ARROW_ICON)),
@@ -86,17 +91,22 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 ),
         );
 
-    if matches!(msg.code, MessageCode::Welcome) {
-        return div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .child(row)
-            .child(render_wave_button(msg, ctx))
-            .into_any_element();
+    let reactions = super::parts::render_reactions(msg, ctx)
+        .map(|pills| div().pl(px(CONTENT_INSET)).child(pills));
+    let is_welcome = matches!(msg.code, MessageCode::Welcome);
+
+    if reactions.is_none() && !is_welcome {
+        return row.into_any_element();
     }
 
-    row.into_any_element()
+    let mut col = div().flex().flex_col().w_full().child(row);
+    if let Some(reactions) = reactions {
+        col = col.child(reactions);
+    }
+    if is_welcome {
+        col = col.child(render_wave_button(msg, ctx));
+    }
+    col.into_any_element()
 }
 
 const WAVE_STICKERS: &[&str] = &[
@@ -207,7 +217,7 @@ fn system_icon_color(code: MessageCode, primary: gpui::Rgba, icon_fill: gpui::Rg
         MessageCode::Welcome => gpui::rgb(0x16_a3_4a),
         MessageCode::AuditLog => gpui::rgb(0x18_6c_f2),
         MessageCode::UpcomingEvent => gpui::rgb(0xa31616),
-        MessageCode::CreateThread => icon_fill,
+        MessageCode::CreateThread | MessageCode::DeleteThread => icon_fill,
         MessageCode::CreatePin => primary,
         _ => primary,
     }
@@ -271,6 +281,27 @@ fn append_system_suffix(msg: &Message, ctx: &RowCtx, mut row: gpui::Div) -> gpui
                     mezon_i18n::t(locale, "message.systemMessages.allThreads"),
                     open_threads_popover,
                 ))
+                .child(".")
+            } else if !thread_content.is_empty() {
+                row.child(thread_content)
+            } else {
+                row
+            }
+        }
+        MessageCode::DeleteThread => {
+            let (thread_label, _thread_id, thread_content) = parse_thread_info(&msg.content);
+            if !thread_label.is_empty() {
+                row.child(format!(
+                    "{} ",
+                    mezon_i18n::t(locale, "message.systemMessages.deletedAThread")
+                ))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(primary)
+                        .child(thread_label),
+                )
                 .child(".")
             } else if !thread_content.is_empty() {
                 row.child(thread_content)

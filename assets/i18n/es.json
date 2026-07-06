@@ -3283,6 +3283,8 @@
   "notifications.empty.messages.description": "Abre la Bandeja de entrada presionando CTRL+I, y marca tu mensaje superior como leído con CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Consejo extra:",
   "notifications.empty.messages.title": "¡Estás al día!",
+  "notifications.empty.topics.description": "Cuando alguien responda a un tema en el que participas, aparecerá aquí.",
+  "notifications.empty.topics.title": "Aún no hay novedades de temas",
   "notifications.inbox": "Bandeja de entrada",
   "notifications.tabs.forYou": "Para ti",
   "notifications.tabs.mentions": "Menciones",

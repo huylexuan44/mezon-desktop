@@ -1,13 +1,15 @@
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, MessagesStore, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceStore,
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PinnedMessagesStore,
+    Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceStore, VoiceModerationError
 };
 use ui::PopoverMenuHandle;
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
+use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
@@ -31,6 +33,7 @@ pub struct ChatLayout {
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
     show_member_list: bool,
+    inbox_handle: PopoverMenuHandle<InboxPopoverPanel>,
     pub(crate) thread_popover_handle: PopoverMenuHandle<ThreadsPopoverPanel>,
     pub(crate) thread_search_input: Option<Entity<InputState>>,
     thread_name_input: Option<Entity<InputState>>,
@@ -38,7 +41,23 @@ pub struct ChatLayout {
     pin_popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     displayed_active_channel: Option<ActiveChannelSlice>,
     displayed_voice_mini: Option<VoiceMiniSlice>,
+    displayed_threads_panel: ThreadsPanelSlice,
+    displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct ThreadsPanelSlice {
+    creating: bool,
+    submitting: bool,
+    create_private: bool,
+    name_error: Option<String>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct InboxDisplaySlice {
+    clan_id: Option<String>,
+    has_badge: bool,
 }
 
 struct ActiveChannelSlice {
@@ -125,7 +144,16 @@ impl ChatLayout {
         .detach();
 
         let voice_store = VoiceStore::global(cx);
-        cx.observe(&voice_store, |this, _, cx| {
+        cx.observe(&voice_store, |this, voice, cx| {
+            if let Some(err) = voice.update(cx, |store, _| store.take_moderation_error()) {
+                let locale = this.settings.read(cx).language.clone();
+                let key = match err {
+                    VoiceModerationError::MuteFailed => "channelVoice.muteMemberFailed",
+                    VoiceModerationError::KickFailed => "channelVoice.kickMemberFailed",
+                };
+                let msg = mezon_i18n::t(&locale, key).to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+            }
             let mini_changed = this.voice_mini_display_changed(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
@@ -134,14 +162,16 @@ impl ChatLayout {
         .detach();
 
         let threads_store = ThreadsStore::global(cx);
-        cx.observe(&threads_store, |_, _, cx| cx.notify()).detach();
+        cx.observe(&threads_store, |this, _, cx| {
+            if this.threads_panel_state_changed(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
         cx.subscribe(&threads_store, |this, _, event, cx| {
             this.on_threads_event(event, cx);
         })
         .detach();
-
-        let pinned_store = PinnedMessagesStore::global(cx);
-        cx.observe(&pinned_store, |_, _, cx| cx.notify()).detach();
 
         cx.subscribe(
             &mezon_store::ClanMembersStore::global(cx),
@@ -158,9 +188,9 @@ impl ChatLayout {
         cx.observe(&channel_list, |this, _, cx| {
             this.apply_pending_channel(cx);
             this.ensure_active_channel_for_clan(cx);
-            this.dismiss_threads_popover(cx);
-            //TODO: recheck behaviour
+            this.sync_inbox_context(cx);
             if this.active_channel_display_changed(cx) {
+                this.dismiss_threads_popover(cx);
                 this.pin_popover_handle.hide(cx);
                 cx.notify();
             }
@@ -176,7 +206,15 @@ impl ChatLayout {
             }
             this.sync_active_from_route(cx);
             this.ensure_active_channel_for_clan(cx);
+            this.dismiss_inbox_popover(cx);
             cx.notify();
+        })
+        .detach();
+        cx.observe(&clan_list, |this, _, cx| {
+            this.sync_inbox_context(cx);
+            if this.inbox_display_changed(cx) {
+                cx.notify();
+            }
         })
         .detach();
         let mut this = Self {
@@ -194,6 +232,7 @@ impl ChatLayout {
             pending_channel_id: None,
             prefetched_voice_channel: None,
             show_member_list: true,
+            inbox_handle: PopoverMenuHandle::default(),
             thread_popover_handle: PopoverMenuHandle::default(),
             thread_search_input: None,
             thread_name_input: None,
@@ -201,15 +240,45 @@ impl ChatLayout {
             pin_popover_handle: PopoverMenuHandle::default(),
             displayed_active_channel: None,
             displayed_voice_mini: None,
+            displayed_threads_panel: ThreadsPanelSlice::default(),
+            displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
         };
         this.sync_active_from_route(cx);
+        this.sync_inbox_context(cx);
         this
     }
 
     pub(crate) fn toggle_member_list(&mut self, cx: &mut Context<Self>) {
         self.show_member_list = !self.show_member_list;
         cx.notify();
+    }
+
+    fn dismiss_inbox_popover(&self, cx: &mut App) {
+        self.inbox_handle.hide(cx);
+    }
+
+    fn sync_inbox_context(&self, cx: &mut Context<Self>) {
+        let clan_id = self
+            .clan_list
+            .read(cx)
+            .active_clan_id
+            .map(|id| id.to_string());
+        let channel_id = self
+            .channel_list
+            .read(cx)
+            .active_channel_id
+            .map(|id| id.to_string());
+        InboxStore::global(cx).update(cx, |store, cx| {
+            store.set_active_context(clan_id, channel_id, cx);
+        });
+    }
+
+    fn active_clan_id(&self, cx: &Context<Self>) -> Option<String> {
+        self.clan_list
+            .read(cx)
+            .active_clan_id
+            .map(|id| id.to_string())
     }
 
     fn sync_active_from_route(&mut self, cx: &mut Context<Self>) {
@@ -388,6 +457,39 @@ impl ChatLayout {
         }
     }
 
+    fn threads_panel_state_changed(&mut self, cx: &Context<Self>) -> bool {
+        let store = ThreadsStore::global(cx);
+        let store = store.read(cx);
+        let next = ThreadsPanelSlice {
+            creating: store.is_creating(),
+            submitting: store.is_submitting(),
+            create_private: store.create_private(),
+            name_error: store.name_error().map(str::to_string),
+        };
+        if self.displayed_threads_panel == next {
+            return false;
+        }
+        self.displayed_threads_panel = next;
+        true
+    }
+
+    fn inbox_display_changed(&mut self, cx: &Context<Self>) -> bool {
+        let clan_id = self
+            .clan_list
+            .read(cx)
+            .active_clan_id
+            .map(|id| id.to_string());
+        let has_badge = clan_id
+            .as_deref()
+            .is_some_and(|id| clan_has_inbox_badge(id, cx));
+        let next = InboxDisplaySlice { clan_id, has_badge };
+        if self.displayed_inbox == next {
+            return false;
+        }
+        self.displayed_inbox = next;
+        true
+    }
+
     fn active_channel_display_changed(&mut self, cx: &Context<Self>) -> bool {
         let changed = {
             let channels = self.channel_list.read(cx);
@@ -545,7 +647,6 @@ impl Render for ChatLayout {
             chat_content
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
-        let locale = self.settings.read(cx).language.clone();
         let fullscreen = if self.connected_call_is_active(cx) {
             crate::chat::voice::render_screen_fullscreen_overlay(
                 cx.theme(),
@@ -567,7 +668,6 @@ impl Render for ChatLayout {
             .h_full()
             .min_h_0()
             .relative()
-            .bg(theme.bg_primary)
             .child(
                 div()
                     .flex()
@@ -581,6 +681,9 @@ impl Render for ChatLayout {
                             .flex_row()
                             .flex_1()
                             .min_h_0()
+                            .bg(theme.bg_tertiary)
+                            .rounded_bl(px(ROUNDED_BORDER_WINDOW))
+                            .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
                                     AnyView::from(self.clan_sidebar.clone())
@@ -606,9 +709,8 @@ impl Render for ChatLayout {
                             .occlude()
                             .children(voice_mini_bar)
                             .child(
-                                AnyView::from(self.user_info_bar.clone()).cached(
-                                    StyleRefinement::default().w_full().h(px(56.0)),
-                                ),
+                                AnyView::from(self.user_info_bar.clone())
+                                    .cached(StyleRefinement::default().w_full().h(px(56.0))),
                             ),
                     ),
             )
@@ -621,7 +723,6 @@ impl Render for ChatLayout {
                     .h_full()
                     .min_h_0()
                     .overflow_hidden()
-                    .bg(theme.bg_primary)
                     .child(main_content),
             )
             .children(fullscreen)
@@ -763,7 +864,11 @@ impl ChatLayout {
         }
     }
 
-    pub(crate) fn ensure_thread_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_thread_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.thread_search_input.is_some() {
             return;
         }
@@ -795,20 +900,14 @@ impl ChatLayout {
         if self.thread_name_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "channelTopbar.createThread.placeholder.threadName");
-            self.thread_name_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(ph)
-                    .embedded(true)
-            }));
+            self.thread_name_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
         }
         if self.create_thread_message_input.is_none() {
             let locale = self.settings.read(cx).language.clone();
             let ph = mezon_i18n::t(&locale, "chat.messagePlaceholder");
-            self.create_thread_message_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(ph)
-                    .embedded(true)
-            }));
+            self.create_thread_message_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder(ph).embedded(true)));
         }
     }
 
@@ -832,18 +931,20 @@ impl ChatLayout {
         let submitting = ThreadsStore::global(cx).read(cx).is_submitting();
         let create_private = ThreadsStore::global(cx).read(cx).create_private();
 
-        Some(crate::chat::create_thread_panel::render_create_thread_panel(
-            crate::chat::create_thread_panel::CreateThreadPanelParams {
-                thread_name_input: name_input,
-                message_input,
-                name_error: name_error.as_deref(),
-                submitting,
-                create_private,
-                locale,
-                theme: &theme,
-                layout: cx.entity(),
-            },
-        ))
+        Some(
+            crate::chat::create_thread_panel::render_create_thread_panel(
+                crate::chat::create_thread_panel::CreateThreadPanelParams {
+                    thread_name_input: name_input,
+                    message_input,
+                    name_error: name_error.as_deref(),
+                    submitting,
+                    create_private,
+                    locale,
+                    theme: &theme,
+                    layout: cx.entity(),
+                },
+            ),
+        )
     }
 
     pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
@@ -910,6 +1011,9 @@ impl ChatLayout {
     fn render_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
+        let inbox_handle = self.inbox_handle.clone();
+        let active_clan_id = self.active_clan_id(cx);
+        let pin_handle = self.pin_popover_handle.clone();
 
         if self.is_dm_route(cx) {
             if let Some(dm) = self.current_dm(cx) {
@@ -923,6 +1027,9 @@ impl ChatLayout {
                         Some(dm.id),
                         is_group,
                         is_group && self.show_member_list,
+                        false,
+                        None,
+                        None,
                         None,
                         cx,
                     )
@@ -934,7 +1041,9 @@ impl ChatLayout {
             ) {
                 return self
                     .chat_area
-                    .render(&locale, None, true, None, false, false, None, cx)
+                    .render(
+                        &locale, None, true, None, false, false, false, None, None, None, cx,
+                    )
                     .into_any_element();
             }
             return div()
@@ -994,7 +1103,10 @@ impl ChatLayout {
                     Some(channel_id),
                     true,
                     self.show_member_list,
-                    Some(self.pin_popover_handle.clone()),
+                    true,
+                    Some(inbox_handle),
+                    active_clan_id,
+                    Some(pin_handle),
                     cx,
                 )
                 .into_any_element();
@@ -1016,6 +1128,9 @@ impl ChatLayout {
                     None,
                     true,
                     self.show_member_list,
+                    true,
+                    Some(inbox_handle),
+                    active_clan_id,
                     None,
                     cx,
                 )
