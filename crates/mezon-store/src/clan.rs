@@ -538,14 +538,11 @@ impl ClanList {
     pub fn update_clans(&mut self, clans: Vec<Clan>, cx: &mut Context<Self>) {
         let prev_active = self.active_clan_id;
         self.clans = clans;
-        if !self.clans.is_empty() {
-            let active_still_valid = self
-                .active_clan_id
-                .as_ref()
-                .is_some_and(|id| self.clans.iter().any(|c| c.id == *id));
-            if !active_still_valid {
-                self.active_clan_id = Some(self.clans[0].id);
-            }
+        let active_missing = self
+            .active_clan_id
+            .is_some_and(|active| !self.clans.iter().any(|c| c.id == active));
+        if active_missing {
+            self.active_clan_id = None;
         }
         if self.active_clan_id != prev_active {
             cx.emit(ClanEvent::ActiveClanChanged(self.active_clan_id));

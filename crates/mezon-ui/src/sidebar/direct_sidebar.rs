@@ -2,7 +2,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, img,
+    prelude::*, px, uniform_list,
 };
 use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
 
@@ -162,11 +163,7 @@ impl DirectSidebar {
             .when(active, |this| this.bg(bg_hover))
             .hover(move |this| this.bg(bg_hover))
             .on_click(|_, _window, cx| navigate(cx, Route::Friends))
-            .child(
-                Icon::new(IconName::IconFriends)
-                    .size(px(20.))
-                    .text_color(theme.text_secondary),
-            )
+            .child(img("icons/icon-friends.svg").size(px(20.)).flex_none())
             .child(
                 div()
                     .text_base()

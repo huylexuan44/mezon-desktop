@@ -7,6 +7,7 @@ members = [
     "crates/mezon-store",
     "crates/mezon-voice",
     "crates/mezon-video",
+    "crates/mezon-audio",
     "crates/mezon-native",
     "crates/mezon-updater",
     "crates/mezon-proto",
@@ -111,6 +112,7 @@ mezon-client  = { path = "crates/mezon-client" }
 mezon-store   = { path = "crates/mezon-store" }
 mezon-voice   = { path = "crates/mezon-voice" }
 mezon-video   = { path = "crates/mezon-video" }
+mezon-audio   = { path = "crates/mezon-audio" }
 mezon-native  = { path = "crates/mezon-native" }
 mezon-proto   = { path = "crates/mezon-proto" }
 mezon-updater = { path = "crates/mezon-updater" }
@@ -268,6 +270,7 @@ lsp-types            = { version = "0.97.0", features = ["proposed"] }
 profiling            = "1"
 chrono               = { version = "0.4", features = ["serde"] }
 cpal                 = "0.17.3"
+rodio                = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", default-features = false, features = ["playback"] }
 livekit              = { version = "0.7", features = ["rustls-tls-native-roots"] }
 flume                = "0.11"
 rayon                = "1.8"

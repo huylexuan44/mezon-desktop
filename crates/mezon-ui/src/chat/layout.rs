@@ -1,10 +1,11 @@
 use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings,
-    ThreadsEvent, ThreadsStore, VoiceMember, VoiceStore,
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PinnedMessagesStore,
+    Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceStore, VoiceModerationError
 };
 use ui::PopoverMenuHandle;
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
@@ -143,7 +144,16 @@ impl ChatLayout {
         .detach();
 
         let voice_store = VoiceStore::global(cx);
-        cx.observe(&voice_store, |this, _, cx| {
+        cx.observe(&voice_store, |this, voice, cx| {
+            if let Some(err) = voice.update(cx, |store, _| store.take_moderation_error()) {
+                let locale = this.settings.read(cx).language.clone();
+                let key = match err {
+                    VoiceModerationError::MuteFailed => "channelVoice.muteMemberFailed",
+                    VoiceModerationError::KickFailed => "channelVoice.kickMemberFailed",
+                };
+                let msg = mezon_i18n::t(&locale, key).to_string();
+                Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+            }
             let mini_changed = this.voice_mini_display_changed(cx);
             if mini_changed || this.is_voice_frame_relevant(cx) {
                 cx.notify();
@@ -658,7 +668,6 @@ impl Render for ChatLayout {
             .h_full()
             .min_h_0()
             .relative()
-            .bg(theme.bg_primary)
             .child(
                 div()
                     .flex()
@@ -672,6 +681,9 @@ impl Render for ChatLayout {
                             .flex_row()
                             .flex_1()
                             .min_h_0()
+                            .bg(theme.bg_tertiary)
+                            .rounded_bl(px(ROUNDED_BORDER_WINDOW))
+                            .overflow_hidden()
                             .child(
                                 div().w(px(72.0)).h_full().child(
                                     AnyView::from(self.clan_sidebar.clone())
@@ -711,7 +723,6 @@ impl Render for ChatLayout {
                     .h_full()
                     .min_h_0()
                     .overflow_hidden()
-                    .bg(theme.bg_primary)
                     .child(main_content),
             )
             .children(fullscreen)

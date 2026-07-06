@@ -15,6 +15,7 @@ use mezon_store::{
     Settings, UserId, message::Message,
 };
 
+use super::audio_player::{AudioActivation, AudioPlayerView};
 use super::context::{OnboardingContext, RowCtx, WelcomeContext};
 use super::dispatch::render_message_item;
 use super::gif_video::GifVideoView;
@@ -24,8 +25,9 @@ use super::skeleton::message_skeleton;
 use super::system_row::{build_onboarding_context, build_welcome_context};
 use super::video_player::{VideoActivation, VideoPlayerView};
 use crate::app::shell::Shell;
+use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::user_profile_popover::UserProfilePopover;
-use crate::components::primitives::{Icon, IconName, InputEvent, InputState, context_menu_at};
+use crate::components::primitives::{Icon, IconName, context_menu_at};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
     MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
@@ -40,6 +42,7 @@ const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
 const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
 const MAX_GIF_VIDEOS: usize = 6;
+const MAX_AUDIO_PLAYERS: usize = 8;
 
 struct PendingGif {
     key: (MessageId, usize),
@@ -162,6 +165,7 @@ pub struct ChannelMessages {
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
     active_videos: HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
+    active_audios: HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
     gif_videos: HashMap<(MessageId, usize), Entity<GifVideoView>>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
@@ -204,9 +208,10 @@ pub struct ChannelMessages {
     cached_role_ids: Rc<Vec<i64>>,
     cached_is_clan_owner: bool,
     identity_inputs: (Option<ClanId>, Option<UserId>),
-    edit_input: Option<(MessageId, Entity<InputState>)>,
+    edit_input: Option<(MessageId, Entity<MentionInput>)>,
     _edit_input_sub: Option<Subscription>,
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
+    context_menu_forward_all: bool,
     emoji_recent: Rc<Vec<Emoji>>,
     _emoji_observe: Subscription,
 }
@@ -244,7 +249,9 @@ impl ChannelMessages {
         cx.subscribe(&store, |this, _store, event, cx| {
             let structural = matches!(
                 event,
-                MessagesEvent::Reset { .. } | MessagesEvent::Shifted { .. }
+                MessagesEvent::Reset { .. }
+                    | MessagesEvent::Shifted { .. }
+                    | MessagesEvent::RemovedAt { .. }
             );
             match event {
                 MessagesEvent::Reset { count } => {
@@ -262,6 +269,7 @@ impl ChannelMessages {
                     this.edit_input = None;
                     this._edit_input_sub = None;
                     this.active_videos.clear();
+                    this.active_audios.clear();
                     this.gif_videos.clear();
                     this.list_state.reset(*count);
                     this.header_shown = false;
@@ -380,7 +388,34 @@ impl ChannelMessages {
                         });
                     }
                 }
-                MessagesEvent::Updated { .. } => {}
+                MessagesEvent::Updated { message_id } => {
+                    if let Some(id) = message_id {
+                        let vp_index = _store
+                            .read(cx)
+                            .viewport_messages()
+                            .iter()
+                            .position(|m| m.id == *id);
+                        if let Some(vp_index) = vp_index {
+                            let at = usize::from(this.header_shown) + vp_index;
+                            if at < this.list_state.item_count() {
+                                this.list_state.remeasure_items(at..at + 1);
+                                cx.notify();
+                            }
+                        }
+                    }
+                }
+                MessagesEvent::RemovedAt { index, message_id } => {
+                    this.active_videos.retain(|(id, _), _| id != message_id);
+                    this.active_audios.retain(|(id, _), _| id != message_id);
+                    this.gif_videos.retain(|(id, _), _| id != message_id);
+                    let at = usize::from(this.header_shown) + *index;
+                    if at < this.list_state.item_count() {
+                        this.list_state.splice(at..at + 1, 0);
+                        if at < this.list_state.item_count() {
+                            this.list_state.remeasure_items(at..at + 1);
+                        }
+                    }
+                }
                 MessagesEvent::JumpTo { message_id } => {
                     this.pending_jump = Some(*message_id);
                     this.highlight_id = Some(*message_id);
@@ -543,6 +578,7 @@ impl ChannelMessages {
             image_cache,
             avatar_image_cache,
             active_videos: HashMap::new(),
+            active_audios: HashMap::new(),
             gif_videos: HashMap::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
@@ -588,6 +624,7 @@ impl ChannelMessages {
             edit_input: None,
             _edit_input_sub: None,
             context_menu_target: None,
+            context_menu_forward_all: false,
             emoji_recent,
             _emoji_observe: emoji_observe,
         }
@@ -649,27 +686,34 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let initial_content = MessagesStore::global(cx)
+        let (initial_content, initial_spans) = MessagesStore::global(cx)
             .read(cx)
             .viewport_messages()
             .iter()
             .find(|m| m.id == message_id)
-            .map(|m| m.content.clone())
+            .map(|m| (m.content.clone(), m.spans.clone()))
             .unwrap_or_default();
+        let settings = self.settings.clone();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx);
-            state.set_value(initial_content, window, cx);
-            state
+            MentionInput::new_edit(
+                "Edit message…",
+                settings,
+                &initial_content,
+                &initial_spans,
+                window,
+                cx,
+            )
         });
-        input.update(cx, |state, cx| state.focus(window, cx));
-        self._edit_input_sub =
-            Some(
-                cx.subscribe_in(&input, window, move |this, _input, event, window, cx| {
-                    if matches!(event, InputEvent::PressEnter) {
-                        this.save_edit(window, cx);
-                    }
-                }),
-            );
+        input.update(cx, |input, cx| input.focus_input(window, cx));
+        self._edit_input_sub = Some(cx.subscribe_in(
+            &input,
+            window,
+            move |this, _input, event: &MentionInputEvent, window, cx| match event {
+                MentionInputEvent::Submit => this.save_edit(window, cx),
+                MentionInputEvent::Cancel => this.cancel_edit(cx),
+                MentionInputEvent::SendSticker { .. } => {}
+            },
+        ));
         self.edit_input = Some((message_id, input));
         MessagesStore::global(cx).update(cx, |store, cx| store.start_edit(message_id, cx));
         cx.notify();
@@ -687,16 +731,10 @@ impl ChannelMessages {
             return;
         };
         self._edit_input_sub = None;
-        let content = input.read(cx).value().to_string();
+        let payload = input.update(cx, |input, cx| input.take_payload(window, cx));
         let store = MessagesStore::global(cx);
-        let original = store
-            .read(cx)
-            .viewport_messages()
-            .iter()
-            .find(|m| m.id == message_id)
-            .map(|m| m.content.clone());
 
-        if content.trim().is_empty() {
+        let Some((text, content_tokens, _attachments)) = payload else {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             let locale = self.cached_locale.clone();
             Shell::global(cx).update(cx, |shell, cx| {
@@ -704,15 +742,24 @@ impl ChannelMessages {
             });
             cx.notify();
             return;
-        }
+        };
 
-        if original.as_deref() == Some(content.as_str()) {
+        let original = store
+            .read(cx)
+            .viewport_messages()
+            .iter()
+            .find(|m| m.id == message_id)
+            .map(|m| m.content.clone());
+
+        if original.as_deref() == Some(text.as_str()) {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             cx.notify();
             return;
         }
 
-        store.update(cx, |store, cx| store.edit_message(message_id, content, cx));
+        store.update(cx, |store, cx| {
+            store.edit_message(message_id, text, content_tokens, cx)
+        });
         cx.notify();
     }
 
@@ -722,6 +769,23 @@ impl ChannelMessages {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let sender_and_poll = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            store
+                .messages()
+                .iter()
+                .find(|m| m.id == message_id)
+                .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll))
+        };
+        self.context_menu_forward_all = match sender_and_poll {
+            Some((sender_id, false)) => {
+                message_context_menu::resolve_forward_group(message_id, sender_id.as_str(), cx)
+                    .len()
+                    > 1
+            }
+            _ => false,
+        };
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
@@ -828,6 +892,25 @@ impl ChannelMessages {
         }
         let view = cx.new(|cx| VideoPlayerView::new(activation, window, cx));
         self.active_videos.insert(key, view);
+        cx.notify();
+    }
+
+    pub fn activate_audio(
+        &mut self,
+        key: (MessageId, usize),
+        activation: AudioActivation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_audios.contains_key(&key) {
+            return;
+        }
+        if self.active_audios.len() >= MAX_AUDIO_PLAYERS
+            && let Some(evicted) = self.active_audios.keys().next().copied()
+        {
+            self.active_audios.remove(&evicted);
+        }
+        let view = cx.new(|cx| AudioPlayerView::new(activation, cx));
+        self.active_audios.insert(key, view);
         cx.notify();
     }
 
@@ -1419,9 +1502,11 @@ impl Render for ChannelMessages {
         let avatar_image_cache = self.avatar_image_cache.clone();
         let unread_boundary_id = self.cached_unread_boundary;
         let highlight_id = self.highlight_id;
+        let reply_highlight_id = store.read(cx).reply_target().map(|d| d.message_ref_id);
         let profile_context = channel_profile_context(is_dm, dm_channel, active_clan, cx);
         let settings = self.settings.clone();
         let active_videos = self.active_videos.clone();
+        let active_audios = self.active_audios.clone();
         let gif_videos = self.gif_videos.clone();
         let video_host = cx.entity().downgrade();
         let current_user_id = self.cached_current_user_id.clone();
@@ -1468,9 +1553,11 @@ impl Render for ChannelMessages {
                         avatar_cache: avatar_image_cache.clone(),
                         unread_boundary_id,
                         highlight_id,
+                        reply_highlight_id,
                         profile_context,
                         settings: settings.clone(),
                         active_videos: &active_videos,
+                        active_audios: &active_audios,
                         gif_videos: &gif_videos,
                         video_host: video_host.clone(),
                         now: frame_now,
@@ -1549,6 +1636,7 @@ impl Render for ChannelMessages {
                     &self.cached_current_user_id,
                     self.cached_is_clan_owner,
                     &self.cached_locale,
+                    self.context_menu_forward_all,
                     cx.entity().downgrade(),
                     cx,
                 );

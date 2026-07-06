@@ -166,6 +166,10 @@ impl ChannelMembersStore {
         self.cache.contains(&channel_id)
     }
 
+    pub fn is_loading(&self, channel_id: ChannelId) -> bool {
+        self.loading.get(&channel_id).copied().unwrap_or(false)
+    }
+
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
         if let Some(channel_id) = ChannelList::global(cx).read(cx).active_channel_id {
             self.fetch(channel_id, cx);
@@ -226,7 +230,8 @@ impl ChannelMembersStore {
                         cx.notify();
                     }
                     Err(e) => {
-                        tracing::error!("list_channel_users failed for {channel_id}: {e}")
+                        tracing::error!("list_channel_users failed for {channel_id}: {e}");
+                        cx.emit(ChannelMembersEvent::Changed { channel_id });
                     }
                 }
             });

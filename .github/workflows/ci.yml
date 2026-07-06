@@ -28,7 +28,7 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt -p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-voice -- --check
+        run: cargo fmt -p mezon-app -p mezon-ui -p mezon-store -p mezon-client -p mezon-native -p mezon-proto -p mezon-i18n -p mezon-updater -p mezon-audio -p mezon-voice -- --check
 
   lint:
     name: Lint
@@ -90,3 +90,17 @@ jobs:
 
       - name: Run tests
         run: just test
+
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check advisories and bans
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans
