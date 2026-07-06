@@ -29,6 +29,7 @@ pub struct MessageAttachment {
     pub display_width: f32,
     pub display_height: f32,
     pub tenor_mp4: Option<SharedString>,
+    pub local_source: Option<std::path::PathBuf>,
 }
 
 pub fn format_file_size(bytes: u64) -> String {
@@ -183,6 +184,8 @@ pub struct MessageReference {
     pub content: String,
     pub content_preview: SharedString,
     pub has_attachment: bool,
+    pub has_embed: bool,
+    pub is_poll: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

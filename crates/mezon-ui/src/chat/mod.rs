@@ -31,5 +31,4 @@ pub use mezon_store::COMBINE_TIME_WINDOW;
 #[derive(Debug, Clone)]
 pub struct ReplyTarget {
     pub sender_name: String,
-    pub content_preview: String,
 }

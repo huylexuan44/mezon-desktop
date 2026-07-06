@@ -99,6 +99,12 @@ pub fn render_user_message(
         render_token_transaction_card(msg, ctx)
     } else if msg.poll.is_some() {
         render_poll_card(msg, ctx)
+    } else if sending {
+        div()
+            .w_full()
+            .opacity(0.5)
+            .child(render_message_content(msg, ctx))
+            .into_any_element()
     } else {
         render_message_content(msg, ctx)
     };

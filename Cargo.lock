@@ -5567,6 +5567,7 @@ dependencies = [
  "flume",
  "gpui",
  "image",
+ "mezon-audio",
  "mezon-client",
  "mezon-proto",
  "mezon-voice",
@@ -5669,6 +5670,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-capture 2.0.0",
+ "yuv",
  "zed-scap",
 ]
 
@@ -11792,6 +11794,15 @@ dependencies = [
  "quote",
  "syn 2.0.118",
  "synstructure",
+]
+
+[[package]]
+name = "yuv"
+version = "0.8.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d85a782d94ee43f078bcfd6fa82d4e6a5b2d1cfbbad168e4df5a9f7b39ef48c"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]

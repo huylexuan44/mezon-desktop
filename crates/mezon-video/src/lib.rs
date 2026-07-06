@@ -36,6 +36,32 @@ pub enum PlayerError {
     Open,
 }
 
+/// Natural pixel dimensions of a local video plus an optional downscaled JPEG poster
+/// frame, extracted from the file without full playback. The analog of the web app's
+/// `captureVideoPosterFromUrl` (hidden `<video>` + canvas): both feed a message
+/// attachment's `width`/`height`/`thumbnail` so a sent video renders at the right size
+/// with a preview frame instead of a tiny default box.
+#[derive(Debug, Clone)]
+pub struct VideoProbe {
+    pub width: u32,
+    pub height: u32,
+    pub poster_jpeg: Option<Vec<u8>>,
+}
+
+/// Read a local video's natural dimensions and a poster frame (bounded to
+/// `max_poster_edge` on its longest side). Returns `None` when the path is not a
+/// decodable video (or on platforms without a native probe); poster generation
+/// degrades to `None` independently so dimensions still come through.
+#[cfg(target_os = "macos")]
+pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
+    macos::probe_video(path, max_poster_edge)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn probe_video(_path: &str, _max_poster_edge: u32) -> Option<VideoProbe> {
+    None
+}
+
 pub struct VideoPlayer {
     inner: platform::PlayerImpl,
 }

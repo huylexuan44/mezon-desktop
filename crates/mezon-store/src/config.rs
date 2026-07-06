@@ -80,7 +80,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self::dev_defaults()
+        Self::prod_defaults()
     }
 }
 
@@ -150,14 +150,75 @@ impl AppConfig {
         }
     }
 
-    // pub fn prod_defaults() -> Self {
-    //     Self {
-    //     }
-    // }
+    pub fn prod_defaults() -> Self {
+        Self {
+            api_host: "api.mezon.ai".into(),
+            api_port: 443,
+            api_secure: true,
+            api_key: "REDACTED".into(),
+            api_gw_host: "gw.mezon.ai".into(),
+            api_gw_port: 443,
 
-    /// Load configuration from environment variables, falling back to [`dev_defaults`].
+            tcp_port: None,
+            stream_ws_url: "wss://stn.mezon.ai".into(),
+            meet_ws_url: "wss://meet.mezon.ai".into(),
+            notification_ws_url: "wss://gotify.mezon.ai".into(),
+
+            oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
+            oauth2_client_id: "25f63a1f-16b8-488b-8b14-68520eeab77f".into(),
+            oauth2_redirect_uri: "http://127.0.0.1:4200/login/callback".into(),
+            oauth2_response_type: "code".into(),
+            oauth2_scope: "openid+offline".into(),
+            oauth2_code_challenge_method: "S256".into(),
+            oauth2_log_out: "https://oauth2.mezon.ai/oauth2/sessions/logout".into(),
+            oauth2_log_out_callback: "https://mezon.ai/logout/callback".into(),
+            google_client_id:
+                "391688022389-1k9kb377ea6dccpqii7m5pifjj0agsjc.apps.googleusercontent.com".into(),
+
+            domain_url: "https://mezon.ai".into(),
+            redirect_uri: "https://mezon.ai".into(),
+            logo_mezon: "https://cdn.mezon.ai/images/mezon_logo.png".into(),
+            base_img_url: "https://cdn.mezon.ai".into(),
+            profile_img_url: "https://profile.mezon.ai".into(),
+            imgproxy_base_url: "https://imgproxy.mezon.ai".into(),
+            imgproxy_key: "REDACTED".into(),
+
+            tenor_key: "REDACTED".into(),
+            tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
+            tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
+            tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
+
+            mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
+            mezon_treasury_key: "REDACTED".into(),
+            contract_address: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50".into(),
+            mezon_treasury_url_network: "https://sepolia.etherscan.io".into(),
+
+            webrtc_ice_servers_url: "turn:relay.mezon.ai:5349".into(),
+            webrtc_ice_servers_username: "turnmezon".into(),
+            webrtc_ice_servers_credential: "REDACTED".into(),
+
+            fcm_api_key: "REDACTED".into(),
+            fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
+            fcm_project_id: "mezon-772fa".into(),
+            fcm_storage_bucket: "mezon-772fa.appspot.com".into(),
+            fcm_messaging_sender_id: "285548761692".into(),
+            fcm_app_id: "1:285548761692:web:3ca531af1deecee74e0c99".into(),
+            fcm_measurement_id: "G-0WNQTXVMT3".into(),
+            fcm_vapid_key:
+                "REDACTED"
+                    .into(),
+
+            api_client_key_custom: "mezon.ai".into(),
+            sentry_dsn: "REDACTED".into(),
+            anonymous_user_id: "1767478432163172999".into(),
+            max_length_name_allowed: 64,
+            update_url: "https://cdn.mezon.ai/release/".into()
+        }
+    }
+
+    /// Load configuration from environment variables, falling back to [`prod_defaults`].
     pub fn from_env() -> Self {
-        let defaults = Self::dev_defaults();
+        let defaults = Self::prod_defaults();
         Self {
             api_host: opt_str(option_env!("NX_CHAT_APP_API_HOST"), &defaults.api_host),
             api_port: opt_u16(option_env!("NX_CHAT_APP_API_PORT"), defaults.api_port),

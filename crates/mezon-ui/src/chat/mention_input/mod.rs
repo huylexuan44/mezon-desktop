@@ -1,6 +1,8 @@
 mod attachments;
 mod text_field;
 
+use std::path::PathBuf;
+
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, KeyBinding,
     PathPromptOptions, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
@@ -12,8 +14,11 @@ use mezon_store::{
     OutgoingMention, Settings, StickerEvent, StickerStore,
 };
 
-use attachments::{PendingAttachment, acceptable, build_pending};
+use attachments::{
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, validate_batch,
+};
 
+use crate::app::shell::Shell;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::{
@@ -326,6 +331,9 @@ impl MentionInput {
                 path: p.path,
                 filename: p.filename,
                 filetype: p.filetype,
+                width: i32::try_from(p.width).unwrap_or(0),
+                height: i32::try_from(p.height).unwrap_or(0),
+                poster_jpeg: p.poster_jpeg,
             })
             .collect();
         self.committed.clear();
@@ -338,14 +346,14 @@ impl MentionInput {
         Some((text, content, attachments))
     }
 
-    fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+    fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: None,
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
@@ -357,23 +365,68 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update(cx, |this, cx| this.add_pending(pending, cx))
+            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
                 .ok();
         })
         .detach();
     }
 
-    fn add_pending(&mut self, candidates: Vec<PendingAttachment>, cx: &mut Context<Self>) {
-        let mut changed = false;
-        for candidate in candidates {
-            if acceptable(self.pending_attachments.len(), &candidate) {
-                self.pending_attachments.push(candidate);
-                changed = true;
+    pub fn add_dropped_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .filter_map(build_pending)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn add_pending(
+        &mut self,
+        candidates: Vec<PendingAttachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if candidates.is_empty() {
+            return;
+        }
+        match validate_batch(self.pending_attachments.len(), &candidates) {
+            Ok(()) => {
+                self.pending_attachments.extend(candidates);
+                cx.notify();
             }
+            Err(limit) => Self::show_upload_limit(limit, window, cx),
         }
-        if changed {
-            cx.notify();
-        }
+    }
+
+    fn show_upload_limit(limit: AttachmentLimit, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, content) = match limit {
+            AttachmentLimit::Count => (
+                "Upload limit exceeded!".to_string(),
+                format!("You can only upload up to {MAX_FILE_ATTACHMENTS} files at a time."),
+            ),
+            AttachmentLimit::Size(bytes) => (
+                "Upload size limit exceeded!".to_string(),
+                format!("Maximum allowed size is {}MB", bytes / (1024 * 1024)),
+            ),
+        };
+        Shell::global(cx).update(cx, |shell, cx| {
+            shell.show_upload_limit(title, content, window, cx)
+        });
     }
 
     fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -398,11 +451,23 @@ impl MentionInput {
             .pt(px(8.));
         for (index, att) in self.pending_attachments.iter().enumerate() {
             let preview = if att.is_image {
-                img(att.path.clone())
+                div()
                     .size(px(64.))
                     .rounded(px(6.))
+                    .bg(chip_bg)
+                    .overflow_hidden()
+                    .child(
+                        img(att.path.clone())
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover),
+                    )
                     .into_any_element()
             } else {
+                let icon = if att.is_video {
+                    IconName::PlayButton
+                } else {
+                    IconName::FileIcon
+                };
                 div()
                     .size(px(64.))
                     .rounded(px(6.))
@@ -410,7 +475,7 @@ impl MentionInput {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::FileIcon).size_5().text_color(muted))
+                    .child(Icon::new(icon).size_5().text_color(muted))
                     .into_any_element()
             };
             row = row.child(
@@ -835,7 +900,11 @@ impl MentionInput {
     fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_open() {
             self.hide(cx);
-        } else if self.compact {
+        } else if self.picker_open || self.sticker_picker_open {
+            self.picker_open = false;
+            self.sticker_picker_open = false;
+            cx.notify();
+        } else {
             cx.emit(MentionInputEvent::Cancel);
         }
     }
@@ -1374,11 +1443,9 @@ impl Render for MentionInput {
         let input_area = div()
             .relative()
             .w_full()
-            .when(open, |this| {
-                this.key_context(KEY_CONTEXT)
-                    .on_action(cx.listener(Self::on_accept))
-                    .on_action(cx.listener(Self::on_dismiss))
-            })
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_dismiss))
+            .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(
                 div()
@@ -1397,7 +1464,9 @@ impl Render for MentionInput {
                             .size_5()
                             .text_color(plus_color),
                     )
-                    .on_click(cx.listener(|this, _event, _window, cx| this.open_file_picker(cx))),
+                    .on_click(
+                        cx.listener(|this, _event, window, cx| this.open_file_picker(window, cx)),
+                    ),
             )
             .child(
                 div()

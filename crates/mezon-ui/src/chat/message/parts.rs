@@ -9,7 +9,7 @@ use mezon_store::{
     MessageReference, MessagesStore, PlatformStore, Reaction, ViewerMedia, resolve_avatar_url,
 };
 
-use super::audio_player::{AudioActivation, audio_pill, audio_time_label};
+use super::audio_player::{AudioActivation, audio_pill, audio_sending_pill, audio_time_label};
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
@@ -17,7 +17,7 @@ use super::time::format_message_time;
 use super::video_player::{VideoActivation, VideoFullscreenMode, VideoLayout};
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
-use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
+use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, Spinner};
 use crate::theme::Theme;
 
 const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
@@ -160,16 +160,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
             .into_any_element();
     }
 
-    let preview: SharedString = if reference.content.is_empty() {
-        if reference.has_attachment {
-            mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").into()
-        } else {
-            SharedString::default()
-        }
-    } else {
-        reference.content_preview.clone()
-    };
-
+    let has_attachment_ref = reference.has_attachment || reference.has_embed;
     let is_deleted = reference.content == DELETED_REPLY_PREVIEW;
     let avatar = if reference.sender_avatar.is_empty() {
         Avatar::new()
@@ -214,19 +205,52 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
         ))
         .child(
             div()
+                .id(("reply-name", reference.message_ref_id.0 as usize))
+                .flex_none()
+                .whitespace_nowrap()
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::rgb(REPLY_USERNAME_COLOR))
+                .hover(|s| s.underline())
                 .child(reference.sender_name.clone()),
         )
-        .child(
+        .child(if has_attachment_ref {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_color(theme.tokens.text_theme_primary)
+                .child(
+                    div()
+                        .italic()
+                        .child(mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()),
+                )
+                .child(
+                    Icon::new(IconName::ImageThumbnail)
+                        .size_4()
+                        .text_color(theme.tokens.text_theme_primary),
+                )
+                .into_any_element()
+        } else if reference.is_poll {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_color(theme.tokens.text_theme_message)
+                .child("📊")
+                .child(mezon_i18n::t(ctx.locale, "message.poll.pollLabel").to_string())
+                .into_any_element()
+        } else {
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_color(theme.tokens.text_theme_message)
                 .when(is_deleted, |d| d.italic())
-                .child(preview),
-        )
+                .child(reference.content_preview.clone())
+                .into_any_element()
+        })
         .into_any_element()
 }
 
@@ -301,10 +325,10 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
 
     let mut col = div().flex().flex_col().gap_2().mt_1().w_full();
     for (i, att) in videos.iter().enumerate() {
-        col = col.child(render_video(msg.id, i, att, ctx));
+        col = col.child(render_video(msg.id, i, att, ctx, sending));
     }
     for (i, att) in audios.iter().enumerate() {
-        col = col.child(render_audio(msg.id, i, att, ctx));
+        col = col.child(render_audio(msg.id, i, att, ctx, sending));
     }
     if images.len() >= 2
         && let Some(layout) = msg.album_layout.as_ref()
@@ -362,7 +386,11 @@ fn attachment_sending_overlay(theme: &Theme) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .child(attachment_spinner(px(32.), theme))
+        .child(
+            Spinner::new()
+                .with_size(Size::Large)
+                .color(theme.text_secondary.into()),
+        )
 }
 
 fn render_audio(
@@ -370,11 +398,15 @@ fn render_audio(
     index: usize,
     att: &MessageAttachment,
     ctx: &RowCtx,
+    sending: bool,
 ) -> AnyElement {
+    let duration = att.duration.max(0) as f64;
+    if sending {
+        return audio_sending_pill(duration);
+    }
     if let Some(view) = ctx.active_audios.get(&(msg_id, index)) {
         return div().w_full().child(view.clone()).into_any_element();
     }
-    let duration = att.duration.max(0) as f64;
     let url = SharedString::from(att.url.clone());
     let host = ctx.video_host.clone();
     let download_url = url.clone();
@@ -443,7 +475,9 @@ fn render_album(
             .items_center()
             .justify_center()
             .bg(theme.bg_tertiary);
-        if att.presign_pending {
+        if let Some(path) = att.local_source.clone() {
+            tile_element = tile_element.child(img(path).size_full().object_fit(ObjectFit::Cover));
+        } else if att.presign_pending {
             tile_element = presign_child(tile_element, att, theme);
         } else {
             let src = att.proxied_src.clone();
@@ -506,6 +540,21 @@ fn render_photo(
             .into_any_element();
     }
     let theme = ctx.theme;
+    if let Some(path) = att.local_source.clone() {
+        let mut el = div()
+            .id(("msg-img", index))
+            .relative()
+            .w(px(att.display_width))
+            .h(px(att.display_height))
+            .rounded_md()
+            .overflow_hidden()
+            .bg(theme.bg_tertiary)
+            .child(img(path).size_full().object_fit(ObjectFit::Cover));
+        if sending {
+            el = el.child(attachment_sending_overlay(theme));
+        }
+        return el.into_any_element();
+    }
     if att.presign_pending {
         let mut placeholder = div()
             .id(("msg-img", index))
@@ -582,8 +631,9 @@ fn render_video(
     index: usize,
     att: &MessageAttachment,
     ctx: &RowCtx,
+    sending: bool,
 ) -> AnyElement {
-    if let Some(view) = ctx.active_videos.get(&(msg_id, index)) {
+    if !sending && let Some(view) = ctx.active_videos.get(&(msg_id, index)) {
         return div()
             .w(px(att.display_width))
             .h(px(att.display_height))
@@ -591,7 +641,7 @@ fn render_video(
             .child(view.clone())
             .into_any_element();
     }
-    render_video_poster(msg_id, index, att, ctx)
+    render_video_poster(msg_id, index, att, ctx, sending)
 }
 
 fn render_video_poster(
@@ -599,6 +649,7 @@ fn render_video_poster(
     index: usize,
     att: &MessageAttachment,
     ctx: &RowCtx,
+    sending: bool,
 ) -> AnyElement {
     let theme = ctx.theme;
     let url = SharedString::from(att.url.clone());
@@ -606,6 +657,30 @@ fn render_video_poster(
     let width = att.display_width;
     let height = att.display_height;
     let host = ctx.video_host.clone();
+    let container = div()
+        .id(("msg-video", index))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(att.display_width))
+        .h(px(att.display_height))
+        .max_w_full()
+        .rounded_lg()
+        .overflow_hidden()
+        .bg(theme.bg_tertiary)
+        .when(!thumbnail.is_empty(), |d| {
+            d.child(
+                img(thumbnail.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        });
+    if sending {
+        return container
+            .child(attachment_sending_overlay(theme))
+            .into_any_element();
+    }
     let overlay = div()
         .absolute()
         .inset_0()
@@ -638,26 +713,8 @@ fn render_video_poster(
                         .text_color(gpui::white()),
                 ),
         );
-    div()
-        .id(("msg-video", index))
-        .relative()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(att.display_width))
-        .h(px(att.display_height))
-        .max_w_full()
-        .rounded_lg()
-        .overflow_hidden()
-        .bg(theme.bg_tertiary)
+    container
         .cursor_pointer()
-        .when(!thumbnail.is_empty(), |d| {
-            d.child(
-                img(thumbnail.clone())
-                    .size_full()
-                    .object_fit(ObjectFit::Cover),
-            )
-        })
         .child(overlay)
         .on_click(move |_, window, cx| {
             let activation = VideoActivation {
@@ -763,12 +820,20 @@ fn render_file_box(
                 .justify_center()
                 .w(px(32.))
                 .h(px(40.))
-                .child(
-                    Icon::new(file_icon_for(&att.filetype))
-                        .size(px(30.))
-                        .text_color(theme.tokens.text_theme_primary),
-                )
-                .when(sending, |d| d.child(attachment_sending_overlay(theme))),
+                .when(!sending, |d| {
+                    d.child(
+                        Icon::new(file_icon_for(&att.filetype))
+                            .size(px(30.))
+                            .text_color(theme.tokens.text_theme_primary),
+                    )
+                })
+                .when(sending, |d| {
+                    d.child(
+                        Spinner::new()
+                            .with_size(Size::Medium)
+                            .color(theme.tokens.text_theme_primary.into()),
+                    )
+                }),
         )
         .child(
             div()
@@ -778,14 +843,16 @@ fn render_file_box(
                 ))
                 .flex_1()
                 .min_w_0()
-                .cursor_pointer()
-                .on_click(move |_, _, cx| open_external(&body_url, cx))
+                .when(!sending, |d| {
+                    d.cursor_pointer()
+                        .on_click(move |_, _, cx| open_external(&body_url, cx))
+                })
                 .child(
                     div()
                         .truncate()
                         .text_size(px(16.))
                         .text_color(gpui::rgb(FILE_NAME_COLOR))
-                        .hover(|s| s.underline())
+                        .when(!sending, |d| d.hover(|s| s.underline()))
                         .child(filename),
                 )
                 .child(
@@ -795,51 +862,53 @@ fn render_file_box(
                         .child(size_line),
                 ),
         )
-        .child(
-            div()
-                .absolute()
-                .right(px(16.))
-                .top_0()
-                .bottom_0()
-                .flex()
-                .items_center()
-                .gap_2()
-                .opacity(0.)
-                .group_hover(group_name, |s| s.opacity(1.))
-                .child(file_box_action(
-                    SharedString::from(format!("file-dl-{}-{}", msg.id.0, index)),
-                    IconName::Download,
-                    theme,
-                    move |_, _, cx| {
-                        mezon_store::download_url_with_dialog(
-                            download_url.clone(),
-                            download_name.clone(),
-                            cx,
-                        )
-                    },
-                ))
-                .when(is_owner, |d| {
-                    let remove_msg_id = msg.id;
-                    d.child(file_box_action(
-                        SharedString::from(format!("file-rm-{}-{}", msg.id.0, index)),
-                        IconName::TrashIcon,
+        .when(!sending, |row| {
+            row.child(
+                div()
+                    .absolute()
+                    .right(px(16.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .opacity(0.)
+                    .group_hover(group_name, |s| s.opacity(1.))
+                    .child(file_box_action(
+                        SharedString::from(format!("file-dl-{}-{}", msg.id.0, index)),
+                        IconName::Download,
                         theme,
                         move |_, _, cx| {
-                            mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
-                                store.remove_attachment(remove_msg_id, index, cx);
-                            });
+                            mezon_store::download_url_with_dialog(
+                                download_url.clone(),
+                                download_name.clone(),
+                                cx,
+                            )
                         },
                     ))
-                })
-                .when(is_pdf, |d| {
-                    d.child(file_box_action(
-                        SharedString::from(format!("file-pdf-{}-{}", msg.id.0, index)),
-                        IconName::FileIcon,
-                        theme,
-                        move |_, _, cx| open_external(&pdf_url, cx),
-                    ))
-                }),
-        )
+                    .when(is_owner, |d| {
+                        let remove_msg_id = msg.id;
+                        d.child(file_box_action(
+                            SharedString::from(format!("file-rm-{}-{}", msg.id.0, index)),
+                            IconName::TrashIcon,
+                            theme,
+                            move |_, _, cx| {
+                                mezon_store::MessagesStore::global(cx).update(cx, |store, cx| {
+                                    store.remove_attachment(remove_msg_id, index, cx);
+                                });
+                            },
+                        ))
+                    })
+                    .when(is_pdf, |d| {
+                        d.child(file_box_action(
+                            SharedString::from(format!("file-pdf-{}-{}", msg.id.0, index)),
+                            IconName::FileIcon,
+                            theme,
+                            move |_, _, cx| open_external(&pdf_url, cx),
+                        ))
+                    }),
+            )
+        })
         .into_any_element()
 }
 

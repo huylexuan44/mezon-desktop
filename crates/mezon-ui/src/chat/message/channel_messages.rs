@@ -429,6 +429,7 @@ impl ChannelMessages {
                         });
                     }));
                 }
+                MessagesEvent::ReplyTargetChanged => {}
             }
             if structural {
                 {
