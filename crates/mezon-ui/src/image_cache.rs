@@ -16,15 +16,17 @@ pub const MESSAGE_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 pub const AVATAR_IMAGE_CACHE_CAPACITY: usize = 256;
 pub const AVATAR_IMAGE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
-pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 8;
-pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
-pub const VIEWER_ENTRY_MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub const VIEWER_IMAGE_CACHE_CAPACITY: usize = 24;
+pub const VIEWER_IMAGE_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+pub const VIEWER_IMAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// App-wide fallback cache attached at the root, so any `img`/avatar that does
 /// not declare its own cache uses this bounded LRU instead of GPUI's unbounded
 /// global asset cache (which never evicts and leaks RAM for every URL seen).
 pub const SHARED_IMAGE_CACHE_CAPACITY: usize = 384;
 pub const SHARED_IMAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+pub const GALLERY_IMAGE_CACHE_CAPACITY: usize = 48;
+pub const GALLERY_IMAGE_CACHE_BYTES: u64 = 48 * 1024 * 1024;
 
 /// Per-image decoded-size caps. A compressed file is tiny on the wire but is
 /// stored uncompressed in RAM as `width * height * 4` bytes *per frame*. An
@@ -41,6 +43,10 @@ pub const SHARED_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const GRACE_PERIOD: Duration = Duration::from_secs(2);
 const STATS_LOG_INTERVAL: u64 = 600;
 const MESSAGE_ANIMATION_MAX_PX: u32 = 400;
+/// Longest side (px) that an animated GIF/WebP is downscaled to for the image
+/// viewer. Larger than the message cap since the viewer shows media bigger,
+/// but still bounded so a long animation cannot expand to hundreds of MB.
+const VIEWER_ANIMATION_MAX_PX: u32 = 480;
 
 #[derive(Default)]
 struct CacheMetrics {
@@ -98,6 +104,11 @@ enum LoaderKind {
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
     AvatarThumbnail,
     Message,
+    /// Decodes only the first frame at full resolution. The image viewer paints
+    /// a single static frame (frame 0), so keeping every frame of an animated
+    /// GIF/WebP is wasted RAM: a large animation decodes to `w * h * 4 * frames`
+    /// bytes yet only the first frame is ever shown.
+    ViewerFirstFrame,
 }
 
 pub struct LruImageCache {
@@ -175,6 +186,27 @@ impl LruImageCache {
         )
     }
 
+    /// A cache for the image viewer: decodes only the first frame at full
+    /// resolution. The viewer renders a single static frame, so this avoids
+    /// retaining every frame of an animated GIF/WebP (which the viewer never
+    /// shows) while keeping full-resolution quality for still images.
+    pub fn viewer(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::ViewerFirstFrame,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
     fn with_loader(
         label: &'static str,
         loader: LoaderKind,
@@ -224,6 +256,16 @@ impl LruImageCache {
             entry.abort.abort();
             if let Some(Ok(image)) = entry.item.get() {
                 cx.drop_image(image, Some(window));
+            }
+        }
+        self.total_bytes = 0;
+    }
+
+    pub fn clear_app(&mut self, cx: &mut App) {
+        for (_, mut entry) in std::mem::take(&mut self.cache) {
+            entry.abort.abort();
+            if let Some(Ok(image)) = entry.item.get() {
+                cx.drop_image(image, None);
             }
         }
         self.total_bytes = 0;
@@ -390,6 +432,9 @@ impl LruImageCache {
             }
             LoaderKind::Message => {
                 AssetLogger::<MessageImageLoader>::load(resource.clone(), cx).boxed()
+            }
+            LoaderKind::ViewerFirstFrame => {
+                AssetLogger::<ViewerImageLoader>::load(resource.clone(), cx).boxed()
             }
         };
         let task = cx.background_executor().spawn(loader).shared();
@@ -660,6 +705,69 @@ impl Asset for MessageImageLoader {
 
             if image::guess_format(&bytes).is_ok() {
                 decode_message_image(&bytes, MESSAGE_ANIMATION_MAX_PX)
+            } else {
+                svg_renderer
+                    .render_single_frame(&bytes, 1.0)
+                    .map_err(Into::into)
+            }
+        }
+    }
+}
+
+/// An [`Asset`] loader for the image viewer. Still images keep full resolution
+/// (single frame), while animated GIF/WebP keep every frame but downscaled to
+/// [`VIEWER_ANIMATION_MAX_PX`], so they animate in the viewer (matching the old
+/// Electron/browser behaviour) without a full-resolution animation expanding to
+/// `width * height * 4 * frames` bytes.
+pub enum ViewerImageLoader {}
+
+impl Asset for ViewerImageLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        let client = cx.http_client();
+        let svg_renderer = cx.svg_renderer();
+        let asset_source = cx.asset_source().clone();
+        async move {
+            let bytes = match source.clone() {
+                Resource::Path(uri) => std::fs::read(uri.as_ref())?,
+                Resource::Uri(uri) => {
+                    use anyhow::Context as _;
+
+                    let mut response = client
+                        .get(uri.as_ref(), ().into(), true)
+                        .await
+                        .with_context(|| format!("loading image from {uri:?}"))?;
+                    let mut body = Vec::new();
+                    response.body_mut().read_to_end(&mut body).await?;
+                    if !response.status().is_success() {
+                        let mut body = String::from_utf8_lossy(&body).into_owned();
+                        let first_line = body.lines().next().unwrap_or("").trim_end();
+                        body.truncate(first_line.len());
+                        return Err(ImageCacheError::BadStatus {
+                            uri,
+                            status: response.status(),
+                            body,
+                        });
+                    }
+                    body
+                }
+                Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
+                    Some(data) => data.to_vec(),
+                    None => {
+                        return Err(ImageCacheError::Asset(
+                            format!("Embedded resource not found: {path}").into(),
+                        ));
+                    }
+                },
+            };
+
+            if image::guess_format(&bytes).is_ok() {
+                decode_message_image(&bytes, VIEWER_ANIMATION_MAX_PX)
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)

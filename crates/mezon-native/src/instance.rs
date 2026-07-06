@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::path::PathBuf;
 
 /// Ensures only one instance of the app runs at a time.
@@ -216,7 +217,7 @@ impl SingleInstance {
         }
 
         // Extract raw pointer value; HANDLE is Copy so just store the value
-        let raw = unsafe { handle.0 as usize };
+        let raw = handle.0 as usize;
 
         let (tx, rx) = std::sync::mpsc::channel::<String>();
 

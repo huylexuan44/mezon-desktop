@@ -5,8 +5,8 @@ use gpui::{
     SharedString, Transformation, Window, div, img, prelude::*, px, radians, rems,
 };
 use mezon_store::{
-    AlbumLayout, ChannelType, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
-    MessagesStore, PlatformStore, Reaction, ViewerMedia, resolve_avatar_url,
+    AlbumLayout, AppConfig, ChannelType, Message, MessageAttachment, MessageCode, MessageId,
+    MessageReference, MessagesStore, PlatformStore, Reaction, ViewerMedia, resolve_avatar_url,
 };
 
 use super::audio_player::{AudioActivation, audio_pill, audio_time_label};
@@ -14,7 +14,7 @@ use super::context::{REPLY_USERNAME_COLOR, RowCtx};
 use super::gif_video::GifVideoView;
 use super::reaction_detail::{UserReactionPanel, emoji_error_fallback};
 use super::time::format_message_time;
-use super::video_player::VideoActivation;
+use super::video_player::{VideoActivation, VideoFullscreenMode, VideoLayout};
 use crate::app::shell::Shell;
 use crate::chat::user_profile_popover::{ClickableContainer, profile_popover_menu};
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
@@ -24,11 +24,20 @@ const DELETED_REPLY_PREVIEW: &str = "Original message was deleted";
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
+    let is_anonymous = AppConfig::try_global(cx)
+        .map(|config| {
+            !config.anonymous_user_id.is_empty() && msg.sender_id == config.anonymous_user_id
+        })
+        .unwrap_or(false);
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let mut avatar = Avatar::new()
         .name(msg.sender_name.clone())
         .with_size(Size::Small)
+        .anonymous(is_anonymous)
         .image_cache(ctx.avatar_cache.clone());
+    if is_anonymous {
+        return avatar.into_any_element();
+    }
     if let Some(proxied) = proxied {
         avatar = avatar.src(proxied);
         if !raw_url.is_empty() {
@@ -306,6 +315,8 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
             &msg.viewer_media,
             theme,
             &uploader,
+            msg,
+            ctx,
             sending,
         ));
     } else if let Some(&(att_index, att)) = images.first() {
@@ -316,7 +327,8 @@ pub fn render_attachments(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         col = col.child(render_photo(
             0,
             att,
-            theme,
+            msg,
+            ctx,
             &msg.viewer_media,
             &uploader,
             gif_player,
@@ -403,6 +415,8 @@ fn render_album(
     _gallery: &Arc<[ViewerMedia]>,
     theme: &Theme,
     _uploader: &Uploader,
+    msg: &Message,
+    ctx: &RowCtx,
     sending: bool,
 ) -> AnyElement {
     let mut container = div()
@@ -415,6 +429,9 @@ fn render_album(
         .bg(theme.bg_tertiary);
     for (index, (tile, image)) in layout.tiles.iter().zip(images.iter()).enumerate() {
         let att = image.1;
+        let settings = ctx.settings.clone();
+        let raw_url = SharedString::from(att.url.clone());
+        let anchor = (msg.create_time + 86_400).max(0) as u32;
         let mut tile_element = div()
             .id(("msg-album", index))
             .absolute()
@@ -430,9 +447,14 @@ fn render_album(
             tile_element = presign_child(tile_element, att, theme);
         } else {
             let src = att.proxied_src.clone();
-            tile_element = tile_element.when(!src.is_empty(), |d| {
-                d.child(img(src).size_full().object_fit(ObjectFit::Cover))
-            });
+            tile_element = tile_element
+                .cursor_pointer()
+                .when(!src.is_empty(), |d| {
+                    d.child(img(src).size_full().object_fit(ObjectFit::Cover))
+                })
+                .on_click(move |_, _window, cx| {
+                    open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+                });
         }
         if sending {
             tile_element = tile_element.child(attachment_sending_overlay(theme));
@@ -467,7 +489,8 @@ fn open_external(url: &str, cx: &mut App) {
 fn render_photo(
     index: usize,
     att: &MessageAttachment,
-    theme: &Theme,
+    msg: &Message,
+    ctx: &RowCtx,
     _gallery: &Arc<[ViewerMedia]>,
     _uploader: &Uploader,
     gif_player: Option<Entity<GifVideoView>>,
@@ -482,6 +505,7 @@ fn render_photo(
             .child(player)
             .into_any_element();
     }
+    let theme = ctx.theme;
     if att.presign_pending {
         let mut placeholder = div()
             .id(("msg-img", index))
@@ -511,6 +535,10 @@ fn render_photo(
     };
     let fallback_bg = theme.bg_tertiary;
     let fallback_fg = theme.text_muted;
+    let is_sticker = att.filetype == "sticker";
+    let settings = ctx.settings.clone();
+    let raw_url = SharedString::from(att.url.clone());
+    let anchor = (msg.create_time + 86_400).max(0) as u32;
     let mut el = div()
         .id(("msg-img", index))
         .relative()
@@ -519,6 +547,11 @@ fn render_photo(
         .rounded_md()
         .overflow_hidden()
         .bg(theme.bg_tertiary);
+    el = el.when(!is_sticker, |d| {
+        d.cursor_pointer().on_click(move |_, _window, cx| {
+            open_viewer_from_message(&settings, raw_url.clone(), anchor, cx);
+        })
+    });
     el = el.child(
         img(src)
             .size_full()
@@ -632,6 +665,9 @@ fn render_video_poster(
                 poster: thumbnail.clone(),
                 width,
                 height,
+                fullscreen_mode: VideoFullscreenMode::default(),
+                layout: VideoLayout::default(),
+                decode_max_size: None,
             };
             let _ = host.update(cx, |host, cx| {
                 host.activate_video((msg_id, index), activation, window, cx);
@@ -1117,6 +1153,50 @@ pub fn render_hover_actions(
             }),
         )
         .into_any_element()
+}
+
+fn open_viewer_from_message(
+    settings: &Entity<mezon_store::Settings>,
+    url: SharedString,
+    anchor_before: u32,
+    cx: &mut gpui::App,
+) {
+    use crate::image_viewer::{OpenViewerRequest, open_image_viewer, resolve_channel_label};
+    use crate::router::{Route, Router};
+    use mezon_store::ClanId;
+
+    let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
+        Route::Channel {
+            clan_id,
+            channel_id,
+        }
+        | Route::Thread {
+            clan_id,
+            channel_id,
+            ..
+        }
+        | Route::Canvas {
+            clan_id,
+            channel_id,
+            ..
+        } => (clan_id, channel_id),
+        Route::DirectMessage { direct_id, .. } => (ClanId(0), direct_id),
+        _ => return,
+    };
+
+    open_image_viewer(
+        OpenViewerRequest {
+            clan_id,
+            channel_id,
+            channel_label: resolve_channel_label(clan_id, channel_id, SharedString::default(), cx),
+            settings: settings.clone(),
+            attachments: Vec::new(),
+            selected_index: 0,
+            selected_url: Some(url),
+            anchor_before: Some(anchor_before),
+        },
+        cx,
+    );
 }
 
 pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {

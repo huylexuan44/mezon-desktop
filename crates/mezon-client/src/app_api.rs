@@ -6,9 +6,9 @@ use anyhow::Result;
 use crate::{
     TransportClient,
     transport::{
-        ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiClanDesc,
-        ApiDirectChannel, ApiMessage, ApiPinMessage, ApiThreadDesc, ApiVoiceChannelUser,
-        RealtimeEvent,
+        ApiAccount, ApiAttachment, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
+        ApiChannelDesc, ApiClanDesc, ApiDirectChannel, ApiMessage, ApiPinMessage, ApiThreadDesc,
+        ApiVoiceChannelUser, RealtimeEvent,
     },
 };
 
@@ -284,6 +284,30 @@ impl AppApi {
     ) -> Result<()> {
         self.transport
             .delete_pin_message(id, message_id, channel_id, clan_id)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_channel_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        file_type: &str,
+        state: i32,
+        limit: i32,
+        before: u32,
+        after: u32,
+    ) -> Result<Vec<ApiChannelAttachment>> {
+        self.transport
+            .list_channel_attachment(
+                clan_id,
+                channel_id,
+                file_type.to_string(),
+                state,
+                limit,
+                before,
+                after,
+            )
             .await
     }
 

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, App, ClickEvent, Context, CursorStyle, Entity, Hsla, IntoElement, Render, RenderOnce,
-    SharedString, Subscription, WeakEntity, Window, div, point, prelude::*, px,
+    Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, Div, Entity, Hsla, IntoElement,
+    Render, RenderOnce, SharedString, Stateful, Subscription, WeakEntity, Window, div, point,
+    prelude::*, px,
 };
 use mezon_store::{Settings, ThreadsStore};
 use ui::{ButtonLike, Clickable, PopoverMenu, PopoverMenuHandle, Toggleable};
@@ -18,6 +19,7 @@ use crate::components::primitives::{
 use crate::theme::{ActiveTheme, Theme};
 
 type ToggleHandler = Arc<dyn Fn(&mut Window, &mut App)>;
+type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type ThreadTriggerClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 pub struct ChannelHeader {
@@ -35,6 +37,7 @@ pub struct ChannelHeader {
     thread_handle: Option<PopoverMenuHandle<ThreadsPopoverPanel>>,
     pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
     settings: Option<Entity<Settings>>,
+    gallery_trigger: Option<AnyElement>,
 }
 
 impl ChannelHeader {
@@ -54,6 +57,7 @@ impl ChannelHeader {
             thread_handle: None,
             pin_handle: None,
             settings: None,
+            gallery_trigger: None,
         }
     }
 
@@ -118,16 +122,16 @@ impl ChannelHeader {
         self
     }
 
-    pub fn render(&self, theme: &Theme, cx: &App) -> impl IntoElement {
+    pub fn gallery_trigger(mut self, trigger: AnyElement) -> Self {
+        self.gallery_trigger = Some(trigger);
+        self
+    }
+
+    pub fn render(self, theme: &Theme, cx: &App) -> impl IntoElement {
         let bg_hover = theme.bg_hover;
         let bg_active = theme.bg_tertiary;
         let icon_color = theme.text_muted;
         let icon_active = theme.text_primary;
-        let layout = self.layout.clone();
-        let thread_handle = self.thread_handle.clone();
-        let show_threads = self.show_threads;
-        let pin_handle = self.pin_handle.clone();
-        let settings = self.settings.clone();
         let actions = [
             ("hdr-canvas", IconName::CanvasIcon),
             ("hdr-timeline", IconName::History),
@@ -138,6 +142,11 @@ impl ChannelHeader {
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ];
+        let inbox_el = if self.show_inbox && !self.dm {
+            Some(self.render_inbox_button(theme, cx))
+        } else {
+            None
+        };
 
         div()
             .flex()
@@ -179,107 +188,136 @@ impl ChannelHeader {
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .children(actions.into_iter().filter_map(move |(id, icon)| {
-                        if id == "hdr-members" && !self.members_action {
-                            return None;
-                        }
-                        if id == "hdr-thread" {
-                            if !show_threads {
-                                return None;
-                            }
-                            let (Some(handle), Some(layout)) =
-                                (thread_handle.clone(), layout.clone())
-                            else {
-                                return None;
-                            };
-                            let menu_handle = handle.clone();
-                            return Some(
-                                PopoverMenu::new("hdr-thread-popover")
-                                    .with_handle(handle)
-                                    .anchor(Anchor::TopRight)
-                                    .attach(Anchor::BottomRight)
-                                    .offset(point(px(0.), px(9.)))
-                                    .on_open(thread_popover_on_open(layout.clone()))
-                                    .menu({
-                                        let layout = layout.clone();
-                                        move |window, cx| {
-                                            layout.update(cx, |layout, cx| {
-                                                layout.ensure_thread_search_input(window, cx);
-                                            });
-                                            let search_input =
-                                                layout.read(cx).thread_search_input.clone()?;
-                                            Some(cx.new(|cx| {
-                                                ThreadsPopoverPanel::new(
-                                                    layout.clone(),
-                                                    search_input,
-                                                    menu_handle.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            }))
-                                        }
-                                    })
-                                    .trigger(ThreadPopoverTrigger::new(theme, false))
-                                    .into_any_element(),
-                            );
-                        }
-                        if id == "hdr-pin"
-                            && let (Some(handle), Some(settings)) =
-                                (pin_handle.clone(), settings.clone())
-                        {
-                            let menu_handle = handle.clone();
-                            return Some(
-                                PopoverMenu::new("hdr-pin-popover")
-                                    .with_handle(handle)
-                                    .anchor(Anchor::TopRight)
-                                    .attach(Anchor::BottomRight)
-                                    .offset(point(px(0.), px(9.)))
-                                    .on_open(pin_popover_on_open())
-                                    .menu({
-                                        let settings = settings.clone();
-                                        move |window, cx| {
-                                            Some(cx.new(|cx| {
-                                                PinnedPopoverPanel::new(
-                                                    settings.clone(),
-                                                    menu_handle.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            }))
-                                        }
-                                    })
-                                    .trigger(PinPopoverTrigger::new(theme, false))
-                                    .into_any_element(),
-                            );
-                        }
-
-                        let is_members = id == "hdr-members";
-                        let active = is_members && self.members_active;
-                        let tint = if active { icon_active } else { icon_color };
-                        let mut button = div()
-                            .id(id)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(32.))
-                            .h(px(32.))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(bg_hover))
-                            .occlude()
-                            .child(Icon::new(icon).size(px(20.)).text_color(tint));
-                        if active {
-                            button = button.bg(bg_active);
-                        }
-                        if is_members && let Some(handler) = self.on_toggle_members.clone() {
-                            button = button.on_click(move |_, window, cx| handler(window, cx));
-                        }
-                        Some(button.into_any_element())
-                    }))
-                    .when(self.show_inbox && !self.dm, |row| {
-                        row.child(self.render_inbox_button(theme, cx))
-                    }),
+                    .children(self.action_buttons(
+                        actions,
+                        theme,
+                        icon_color,
+                        icon_active,
+                        bg_hover,
+                        bg_active,
+                    ))
+                    .children(inbox_el),
             )
+    }
+
+    fn action_buttons(
+        self,
+        actions: [(&'static str, IconName); 8],
+        theme: &Theme,
+        icon_color: gpui::Rgba,
+        icon_active: gpui::Rgba,
+        bg_hover: gpui::Rgba,
+        bg_active: gpui::Rgba,
+    ) -> Vec<AnyElement> {
+        let members_action = self.members_action;
+        let members_active = self.members_active;
+        let on_toggle_members = self.on_toggle_members;
+        let show_threads = self.show_threads;
+        let thread_handle = self.thread_handle;
+        let layout = self.layout;
+        let pin_handle = self.pin_handle;
+        let settings = self.settings;
+        let mut gallery_trigger = self.gallery_trigger;
+        let mut buttons: Vec<AnyElement> = Vec::new();
+        for (id, icon) in actions {
+            if id == "hdr-members" && !members_action {
+                continue;
+            }
+            if id == "hdr-thread" {
+                if !show_threads {
+                    continue;
+                }
+                if let (Some(handle), Some(layout)) = (thread_handle.clone(), layout.clone()) {
+                    let menu_handle = handle.clone();
+                    buttons.push(
+                        PopoverMenu::new("hdr-thread-popover")
+                            .with_handle(handle)
+                            .anchor(Anchor::TopRight)
+                            .attach(Anchor::BottomRight)
+                            .offset(point(px(0.), px(9.)))
+                            .on_open(thread_popover_on_open(layout.clone()))
+                            .menu({
+                                let layout = layout.clone();
+                                move |window, cx| {
+                                    layout.update(cx, |layout, cx| {
+                                        layout.ensure_thread_search_input(window, cx);
+                                    });
+                                    let search_input =
+                                        layout.read(cx).thread_search_input.clone()?;
+                                    Some(cx.new(|cx| {
+                                        ThreadsPopoverPanel::new(
+                                            layout.clone(),
+                                            search_input,
+                                            menu_handle.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                }
+                            })
+                            .trigger(ThreadPopoverTrigger::new(theme, false))
+                            .into_any_element(),
+                    );
+                }
+                continue;
+            }
+            if id == "hdr-pin"
+                && let (Some(handle), Some(settings)) = (pin_handle.clone(), settings.clone())
+            {
+                let menu_handle = handle.clone();
+                buttons.push(
+                    PopoverMenu::new("hdr-pin-popover")
+                        .with_handle(handle)
+                        .anchor(Anchor::TopRight)
+                        .attach(Anchor::BottomRight)
+                        .offset(point(px(0.), px(9.)))
+                        .on_open(pin_popover_on_open())
+                        .menu({
+                            let settings = settings.clone();
+                            move |window, cx| {
+                                Some(cx.new(|cx| {
+                                    PinnedPopoverPanel::new(
+                                        settings.clone(),
+                                        menu_handle.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                }))
+                            }
+                        })
+                        .trigger(PinPopoverTrigger::new(theme, false))
+                        .into_any_element(),
+                );
+                continue;
+            }
+            if id == "hdr-gallery" && let Some(trigger) = gallery_trigger.take() {
+                buttons.push(trigger);
+                continue;
+            }
+            let is_members = id == "hdr-members";
+            let active = is_members && members_active;
+            let tint = if active { icon_active } else { icon_color };
+            let mut button = div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(32.))
+                .h(px(32.))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(move |s| s.bg(bg_hover))
+                .occlude()
+                .child(Icon::new(icon).size(px(20.)).text_color(tint));
+            if active {
+                button = button.bg(bg_active);
+            }
+            if is_members && let Some(handler) = on_toggle_members.clone() {
+                button = button.on_click(move |_, window, cx| handler(window, cx));
+            }
+            buttons.push(button.into_any_element());
+        }
+        buttons
     }
 
     fn render_inbox_button(&self, theme: &Theme, cx: &App) -> gpui::AnyElement {
@@ -454,6 +492,18 @@ impl Render for ChatHeader {
         let layout_weak = self.layout.clone();
         let settings = self.settings.clone();
         let show_threads = self.show_threads;
+
+        let gallery_trigger = PopoverMenu::new("hdr-gallery-popover")
+            .anchor(Anchor::TopRight)
+            .attach(Anchor::BottomRight)
+            .offset(point(px(0.), px(4.)))
+            .trigger(GalleryTrigger::new(theme))
+            .menu({
+                let settings = settings.clone();
+                move |window, cx| build_gallery_modal(settings.clone(), window, cx)
+            })
+            .into_any_element();
+
         let members_toggle = Arc::new(move |_window: &mut Window, cx: &mut App| {
             let _ = layout_weak.update(cx, |this, cx| this.toggle_member_list(cx));
         });
@@ -461,6 +511,7 @@ impl Render for ChatHeader {
             .dm(self.dm)
             .members_action(self.members_action)
             .members_active(self.members_active)
+            .gallery_trigger(gallery_trigger)
             .show_inbox(self.show_inbox)
             .on_toggle_members(members_toggle)
             .show_threads(show_threads);
@@ -614,5 +665,125 @@ impl RenderOnce for PinPopoverTrigger {
         } else {
             button
         }
+    }
+}
+
+fn build_gallery_modal(
+    settings: Entity<Settings>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<crate::gallery::GalleryModal>> {
+    use crate::router::{Route, Router};
+    use mezon_store::ClanId;
+
+    let (clan_id, channel_id) = match Router::global(cx).read(cx).route() {
+        Route::Channel {
+            clan_id,
+            channel_id,
+        }
+        | Route::Thread {
+            clan_id,
+            channel_id,
+            ..
+        }
+        | Route::Canvas {
+            clan_id,
+            channel_id,
+            ..
+        } => (clan_id, channel_id),
+        Route::DirectMessage { direct_id, .. } => (ClanId(0), direct_id),
+        _ => return None,
+    };
+    Some(cx.new(|cx| {
+        crate::gallery::GalleryModal::new(
+            clan_id,
+            channel_id,
+            SharedString::default(),
+            settings,
+            window,
+            cx,
+        )
+    }))
+}
+
+struct GalleryTrigger {
+    icon_idle: gpui::Rgba,
+    icon_active: gpui::Rgba,
+    bg_hover: gpui::Rgba,
+    bg_active: gpui::Rgba,
+    selected: bool,
+    on_click: Option<ClickHandler>,
+    cursor: Option<CursorStyle>,
+}
+
+impl GalleryTrigger {
+    fn new(theme: &Theme) -> Self {
+        Self {
+            icon_idle: theme.text_muted,
+            icon_active: theme.text_primary,
+            bg_hover: theme.bg_hover,
+            bg_active: theme.bg_tertiary,
+            selected: false,
+            on_click: None,
+            cursor: None,
+        }
+    }
+}
+
+impl Clickable for GalleryTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.cursor = Some(cursor_style);
+        self
+    }
+}
+
+impl Toggleable for GalleryTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+}
+
+impl IntoElement for GalleryTrigger {
+    type Element = Stateful<Div>;
+
+    fn into_element(self) -> Self::Element {
+        let bg_hover = self.bg_hover;
+        let tint = if self.selected {
+            self.icon_active
+        } else {
+            self.icon_idle
+        };
+        let mut button = div()
+            .id("hdr-gallery")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(32.))
+            .h(px(32.))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(bg_hover))
+            .occlude()
+            .child(
+                Icon::new(IconName::ImageThumbnail)
+                    .size(px(20.))
+                    .text_color(tint),
+            );
+        if self.selected {
+            button = button.bg(self.bg_active);
+        }
+        if let Some(cursor) = self.cursor {
+            button = button.cursor(cursor);
+        }
+        if let Some(handler) = self.on_click {
+            button = button.on_click(handler);
+        }
+        button
     }
 }

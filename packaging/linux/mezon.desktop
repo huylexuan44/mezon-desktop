@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Mezon
+Comment=Mezon desktop client for voice, video and text chat
+Exec=/usr/bin/mezon %u
+Icon=mezon
+Type=Application
+Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/mezonapp;
+StartupNotify=true
+StartupWMClass=mezon
+Terminal=false
