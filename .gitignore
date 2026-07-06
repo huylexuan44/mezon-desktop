@@ -34,3 +34,4 @@ install-team.sh
 profile.json.gz
 scripts/*
 !scripts/linux-deps
+!scripts/build-deb.sh

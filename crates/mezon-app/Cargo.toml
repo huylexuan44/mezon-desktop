@@ -44,12 +44,17 @@ woff2-patched = "0.4.0"
 [package.metadata.deb]
 name = "mezon"
 maintainer = "Mezon Team"
+copyright = "2026, Mezon Team"
 section = "net"
 priority = "optional"
+depends = "$auto"
 extended-description = "Mezon desktop client (Rust/GPUI) for voice, video and text chat."
+maintainer-scripts = "../../packaging/linux/debian"
 assets = [
     ["target/release/mezon", "usr/bin/", "755"],
     ["../../packaging/linux/mezon.desktop", "usr/share/applications/", "644"],
-    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/512x512/apps/mezon.png", "644"],
+    ["../../packaging/linux/mezon.png", "usr/share/pixmaps/mezon.png", "644"],
+    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/48x48/apps/mezon.png", "644"],
+    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/128x128/apps/mezon.png", "644"],
+    ["../../packaging/linux/mezon.png", "usr/share/icons/hicolor/256x256/apps/mezon.png", "644"],
 ]
-
