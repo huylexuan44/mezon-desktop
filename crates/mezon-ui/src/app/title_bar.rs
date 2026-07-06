@@ -5,6 +5,7 @@ use gpui::{
     prelude::*,
 };
 use mezon_store::Settings;
+use ui::{px, utils::ROUNDED_BORDER_WINDOW};
 
 pub struct TitleBar {
     _bounds_observer: Option<Subscription>,
@@ -39,6 +40,8 @@ impl Render for TitleBar {
             .w_full()
             .h_8()
             .bg(theme.title_bar_bg)
+            .rounded_tl(px(ROUNDED_BORDER_WINDOW))
+            .rounded_tr(px(ROUNDED_BORDER_WINDOW))
             .child(
                 div()
                     .flex()
