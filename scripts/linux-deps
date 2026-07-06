@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Install native libraries required to build Mezon Desktop on Linux.
+# Used by CI (.github/workflows/ci.yml) and `just install-linux-deps`.
+
+set -euo pipefail
+
+if [ "$(id -u)" -eq 0 ]; then
+  maysudo=''
+else
+  maysudo="$(command -v sudo || true)"
+fi
+
+install_apt() {
+  local deps=(
+    build-essential
+    pkg-config
+    libgtk-3-dev
+    libatk1.0-dev
+    libpango1.0-dev
+    libcairo2-dev
+    libgdk-pixbuf2.0-dev
+    libasound2-dev
+    libfontconfig-dev
+    libfreetype-dev
+    libwayland-dev
+    libxkbcommon-dev
+    libxkbcommon-x11-dev
+    libxdo-dev
+    libsecret-1-dev
+    libssl-dev
+    libvulkan-dev
+    libva-dev
+    libpipewire-0.3-dev
+    libdbus-1-dev
+    libxcb1-dev
+    libxcb-randr0-dev
+    libxcb-xfixes0-dev
+    libxcb-xkb-dev
+    libxcb-cursor-dev
+    libx11-dev
+    libx11-xcb-dev
+    xdg-desktop-portal
+    libgstreamer1.0-dev
+    libgstreamer-plugins-base1.0-dev
+    gstreamer1.0-plugins-base
+    gstreamer1.0-plugins-good
+    gstreamer1.0-libav
+  )
+
+  $maysudo apt-get update
+  $maysudo apt-get install -y "${deps[@]}"
+}
+
+install_dnf() {
+  local pkg_cmd
+  if command -v dnf >/dev/null; then
+    pkg_cmd=dnf
+  elif command -v yum >/dev/null; then
+    pkg_cmd=yum
+  else
+    echo "No supported package manager found (expected apt, dnf, or yum)." >&2
+    exit 1
+  fi
+
+  local deps=(
+    gcc
+    gcc-c++
+    make
+    pkg-config
+    gtk3-devel
+    atk-devel
+    pango-devel
+    cairo-devel
+    gdk-pixbuf2-devel
+    alsa-lib-devel
+    fontconfig-devel
+    freetype-devel
+    wayland-devel
+    libxkbcommon-devel
+    libxkbcommon-x11-devel
+    libsecret-devel
+    openssl-devel
+    vulkan-loader-devel
+    libva-devel
+    pipewire-devel
+    dbus-devel
+    libxcb-devel
+    libX11-devel
+    libx11-xcb-devel
+    xdg-desktop-portal
+    gstreamer1-devel
+    gstreamer1-plugins-base-devel
+    gstreamer1-plugins-base
+    gstreamer1-plugins-good
+    gstreamer1-plugin-libav
+  )
+
+  $maysudo "$pkg_cmd" install -y "${deps[@]}"
+}
+
+if command -v apt-get >/dev/null; then
+  install_apt
+elif command -v dnf >/dev/null || command -v yum >/dev/null; then
+  install_dnf
+else
+  echo "Unsupported Linux distribution. Install PipeWire and X11 dev packages manually." >&2
+  echo "Debian/Ubuntu: libpipewire-0.3-dev libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev" >&2
+  exit 1
+fi
+
+echo "Linux build dependencies installed."

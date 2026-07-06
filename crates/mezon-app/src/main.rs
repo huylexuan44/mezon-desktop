@@ -5,7 +5,7 @@ use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AppConfig, AuthState, Settings};
-use mezon_ui::app::window_controls::{main_window_decorations, window_title_options};
+use mezon_ui::app::window_controls::{linux_app_id, main_window_decorations, window_title_options};
 use mezon_ui::{RootView, TitleBar, init as init_ui};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -412,6 +412,7 @@ fn open_dev_gallery_window(cx: &mut App) {
             size(px(900.0), px(800.0)),
             cx,
         ))),
+        app_id: linux_app_id(),
         ..Default::default()
     };
 
@@ -452,6 +453,7 @@ fn open_main_window(
         focus: true,
         show: true,
         window_decorations: main_window_decorations(),
+        app_id: linux_app_id(),
         ..Default::default()
     };
 
