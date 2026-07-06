@@ -22,6 +22,7 @@ scap = { workspace = true }
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 
 image = { workspace = true }
+yuv = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 scap = { workspace = true, features = ["wayland", "x11"] }

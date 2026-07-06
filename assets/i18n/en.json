@@ -1058,6 +1058,7 @@
   "channelVoice.permission.microphoneBody": "We do not have access to your microphone. Please enable microphone access in your system settings.",
   "channelVoice.permission.microphoneTitle": "Grant microphone permission",
   "channelVoice.raiseHand": "Raise Hand",
+  "channelVoice.reactions": "Reactions",
   "channelVoice.shareYourScreen": "Share Your Screen",
   "channelVoice.stopScreenShare": "Stop screen share",
   "channelVoice.toast.cameraPermissionRequired": "Camera permission is required",

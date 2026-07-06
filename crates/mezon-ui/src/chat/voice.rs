@@ -1,10 +1,11 @@
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    ObjectFit, SharedString, StyledImage, Window, div, img, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
+    MouseButton, MouseDownEvent, ObjectFit, SharedString, StyledImage, Window, div, img,
+    prelude::*, px, relative,
 };
 use mezon_store::{
-    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, NetworkQuality, Settings, UserId,
-    VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
+    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, DisplayedReaction, NetworkQuality,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
 };
 
 use crate::ChatLayout;
@@ -36,8 +37,9 @@ pub fn render_voice_channel(
     );
 
     if store.is_connected_to(&channel.id.to_string()) || connecting {
+        let chat = cx.entity();
         return render_in_call(
-            theme, locale, channel, voice, settings, store, connecting, cx,
+            theme, locale, channel, voice, settings, store, connecting, &chat, cx,
         );
     }
 
@@ -690,6 +692,87 @@ fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option
     )
 }
 
+fn reaction_opacity(delta: f32) -> f32 {
+    if delta < 0.1 {
+        delta / 0.1
+    } else if delta > 0.75 {
+        ((1.0 - delta) / 0.25).max(0.0)
+    } else {
+        1.0
+    }
+}
+
+fn reaction_float(r: &DisplayedReaction) -> AnyElement {
+    let name = r.display_name.as_str();
+    let left = r.left;
+    let drift = r.drift;
+    let seq = r.seq as usize;
+
+    div()
+        .absolute()
+        .bottom(relative(0.15))
+        .left(relative(left))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .w(px(56.))
+                .h(px(56.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(r.emoji_src.clone())
+                        .size(px(40.))
+                        .object_fit(ObjectFit::Contain)
+                        .with_animation(
+                            ("voice-reaction-scale", seq),
+                            Animation::new(r.duration),
+                            |el, delta| el.size(px(16.0 + delta * 40.0)),
+                        ),
+                ),
+        )
+        .when(!name.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py(px(1.))
+                    .rounded_full()
+                    .bg(gpui::rgba(0x000000b0))
+                    .text_size(px(10.))
+                    .text_color(gpui::rgb(0xffffff))
+                    .child(SharedString::from(name.to_string())),
+            )
+        })
+        .with_animation(
+            ("voice-reaction-float", seq),
+            Animation::new(r.duration),
+            move |el, delta| {
+                el.bottom(relative(0.15 + delta))
+                    .left(relative(left + drift * delta))
+                    .opacity(reaction_opacity(delta))
+            },
+        )
+        .into_any_element()
+}
+
+fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
+    let reactions = store.displayed_reactions();
+    if reactions.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .children(reactions.iter().map(reaction_float))
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
     theme: &Theme,
@@ -699,6 +782,7 @@ fn render_in_call(
     settings: &Entity<Settings>,
     store: &VoiceStore,
     connecting: bool,
+    chat: &Entity<ChatLayout>,
     cx: &App,
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
@@ -794,8 +878,9 @@ fn render_in_call(
         .child(voice_header(theme, &channel.name, true, status_badge))
         .children(body)
         .when(!fullscreen_active, |this| {
-            this.child(control_bar(theme, locale, voice, settings, store))
+            this.child(control_bar(theme, locale, voice, settings, store, chat))
         })
+        .children(reactions_overlay(store))
         .children(raised_hands_overlay(cx, channel.clan_id, store))
         .children(mic_modal)
         .children(participant_menu)
@@ -809,6 +894,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
+    chat: &Entity<ChatLayout>,
 ) -> Option<AnyElement> {
     let key = store.fullscreen_screen()?;
     let exit_voice = voice.clone();
@@ -880,7 +966,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
                     .items_center()
                     .justify_center()
                     .py_4()
-                    .child(control_bar(theme, locale, voice, settings, store)),
+                    .child(control_bar(theme, locale, voice, settings, store, chat)),
             )
             .into_any_element(),
     )
@@ -1581,6 +1667,7 @@ fn control_bar(
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
+    chat: &Entity<ChatLayout>,
 ) -> AnyElement {
     let mic_enabled = store.mic_enabled();
     let camera_enabled = store.camera_enabled();
@@ -1792,13 +1879,33 @@ fn control_bar(
         right = right.child(pip_button).child(fs_button);
     }
 
+    let emoji_button = {
+        let chat = chat.clone();
+        circle_button(
+            "voice-emoji-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceEmojiControlIcon,
+            theme.text_muted,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.reactions",
+        )))
+        .on_click(move |_, window, cx| {
+            chat.update(cx, |layout, cx| {
+                layout.toggle_voice_emoji_picker(window, cx)
+            });
+        })
+    };
+
     let left = div()
         .flex()
         .flex_row()
         .flex_1()
         .items_center()
         .gap_3()
-        .child(decorative_circle(theme, IconName::VoiceEmojiControlIcon))
+        .child(emoji_button)
         .child(decorative_circle(theme, IconName::VoiceSoundControlIcon));
 
     let center = div()
