@@ -7,11 +7,128 @@ use mezon_video::{VideoFrame, VideoPlayer};
 use crate::theme::ActiveTheme;
 
 const LOOP_EPSILON_SECONDS: f64 = 0.08;
+const THUMB_DECODE_MAX_PX: u32 = 120;
 
 #[derive(Default)]
 struct GifPlayback {
     frame: Option<VideoFrame>,
     failed: bool,
+}
+
+pub struct VideoThumbView {
+    player: Option<Rc<VideoPlayer>>,
+    shared: Rc<RefCell<GifPlayback>>,
+    frozen: bool,
+}
+
+impl VideoThumbView {
+    pub fn new(url: SharedString, cx: &mut Context<Self>) -> Self {
+        let player = VideoPlayer::open(url.as_ref(), Some((THUMB_DECODE_MAX_PX, THUMB_DECODE_MAX_PX)))
+            .ok()
+            .map(Rc::new);
+        if let Some(player) = player.as_ref() {
+            player.set_muted(true);
+            player.play();
+        }
+        let shared = Rc::new(RefCell::new(GifPlayback::default()));
+        Self::register_teardown(cx);
+        Self {
+            player,
+            shared,
+            frozen: false,
+        }
+    }
+
+    pub fn decoding(&self) -> bool {
+        self.player.is_some() && !self.frozen
+    }
+
+    fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(player) = self.player.clone() else {
+            return;
+        };
+        let failed = player.failed();
+        let new_frame = player.copy_frame();
+        let captured = new_frame.is_some();
+        let previous = {
+            let mut shared = self.shared.borrow_mut();
+            shared.failed = failed;
+            new_frame.and_then(|frame| shared.frame.replace(frame))
+        };
+        Self::release_frame(previous, window, cx);
+        if captured && !self.frozen {
+            player.pause();
+            self.frozen = true;
+            self.player = None;
+            cx.notify();
+        } else if failed {
+            self.frozen = true;
+            self.player = None;
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn release_frame(_previous: Option<VideoFrame>, _window: &mut Window, _cx: &mut Context<Self>) {
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn release_frame(previous: Option<VideoFrame>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(previous) = previous {
+            cx.drop_image(previous, Some(window));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn register_teardown(_cx: &mut Context<Self>) {}
+
+    #[cfg(not(target_os = "macos"))]
+    fn register_teardown(cx: &mut Context<Self>) {
+        cx.on_release(|view, cx| {
+            if let Some(frame) = view.shared.borrow_mut().frame.take() {
+                cx.drop_image(frame, None);
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn frame_child(&self) -> Option<AnyElement> {
+        self.shared
+            .borrow()
+            .frame
+            .clone()
+            .map(|frame| gpui::surface(frame).size_full().into_any_element())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn frame_child(&self) -> Option<AnyElement> {
+        self.shared
+            .borrow()
+            .frame
+            .clone()
+            .map(|frame| {
+                gpui::img(frame)
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .into_any_element()
+            })
+    }
+}
+
+impl Render for VideoThumbView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.poll_frame(window, cx);
+        let has_frame = self.shared.borrow().frame.is_some();
+        if !self.frozen && self.player.is_some() && !self.shared.borrow().failed {
+            window.request_animation_frame();
+        }
+        div().size_full().children(if has_frame {
+            self.frame_child()
+        } else {
+            None
+        })
+    }
 }
 
 pub struct GifVideoView {

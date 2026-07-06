@@ -3,6 +3,7 @@
 
 pub mod abridged_tcp_adapter;
 pub mod app_api;
+pub mod attachment_download;
 pub mod auth;
 pub mod image_disk_cache;
 pub mod inbox;
@@ -15,6 +16,10 @@ pub mod transport;
 pub mod transport_adapter;
 pub mod transport_runtime;
 
+pub use attachment_download::{
+    clean_download_url, download_url_to_downloads, resolve_download_filename,
+    sanitize_filename, write_bytes_to_downloads,
+};
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
 pub use app_api::{AppApi, ConnectionStatus, UploadFile, UrlAttachment};
 pub use auth::MezonClient;
@@ -35,7 +40,8 @@ pub use session::Session;
 pub use transport::MezonTransport;
 pub use transport::RealtimeEvent;
 pub use transport::{
-    ApiCategoryDesc, ApiChannelApp, ApiChannelDesc, ApiPinMessage, ApiThreadDesc,
+    ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment, ApiChannelDesc, ApiPinMessage,
+    ApiThreadDesc,
     ApiVoiceChannelUser,
 };
 pub use transport_adapter::TransportAdapter;

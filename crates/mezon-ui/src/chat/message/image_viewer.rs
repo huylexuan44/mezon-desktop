@@ -9,7 +9,8 @@ use mezon_store::{PlatformStore, ViewerMedia};
 use crate::app::shell::Shell;
 use crate::components::primitives::{Avatar, Icon, IconName, h_flex, v_flex};
 use crate::image_cache::{
-    LruImageCache, VIEWER_ENTRY_MAX_BYTES, VIEWER_IMAGE_CACHE_BYTES, VIEWER_IMAGE_CACHE_CAPACITY,
+    LruImageCache, VIEWER_IMAGE_CACHE_BYTES, VIEWER_IMAGE_CACHE_CAPACITY,
+    VIEWER_IMAGE_ENTRY_MAX_BYTES,
 };
 use crate::theme::ActiveTheme;
 
@@ -41,7 +42,7 @@ impl ImageViewer {
                     "image-viewer",
                     VIEWER_IMAGE_CACHE_CAPACITY,
                     VIEWER_IMAGE_CACHE_BYTES,
-                    VIEWER_ENTRY_MAX_BYTES,
+                    VIEWER_IMAGE_ENTRY_MAX_BYTES,
                     cx,
                 )
             });

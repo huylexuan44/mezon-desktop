@@ -1507,6 +1507,30 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_channel_attachment(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        file_type: String,
+        state: i32,
+        limit: i32,
+        before: u32,
+        after: u32,
+    ) -> Result<Vec<crate::transport::ApiChannelAttachment>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_channel_attachment(
+                        clan_id, channel_id, file_type, state, limit, before, after,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn add_channel_favorite(&self, channel_id: i64, clan_id: i64) -> Result<()> {
         let transport = self.inner.clone();
         runtime()

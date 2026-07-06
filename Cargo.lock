@@ -5593,6 +5593,7 @@ dependencies = [
  "icons",
  "image",
  "indexmap",
+ "libc",
  "menu",
  "mezon-audio",
  "mezon-i18n",

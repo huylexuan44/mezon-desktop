@@ -14,7 +14,8 @@ use crate::components::primitives::{Icon, IconName, h_flex};
 use crate::theme::ActiveTheme;
 
 const SEEK_STEP_SECONDS: f64 = 5.0;
-const END_EPSILON_SECONDS: f64 = 0.25;
+const REPLAY_THRESHOLD_SECONDS: f64 = 0.05;
+const STUCK_PLAYING_END_SECONDS: f64 = 0.02;
 const THEATER_FILL: f32 = 0.92;
 const CONTROL_TINT: Rgba = Rgba {
     r: 1.0,
@@ -47,11 +48,28 @@ const PLAY_DISC_BG: Rgba = Rgba {
     a: 0.5,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoFullscreenMode {
+    #[default]
+    ShellModal,
+    InPlaceTheater,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoLayout {
+    #[default]
+    Fixed,
+    FillContainer,
+}
+
 pub struct VideoActivation {
     pub url: SharedString,
     pub poster: SharedString,
     pub width: f32,
     pub height: f32,
+    pub fullscreen_mode: VideoFullscreenMode,
+    pub layout: VideoLayout,
+    pub decode_max_size: Option<(u32, u32)>,
 }
 
 #[derive(Default)]
@@ -77,6 +95,8 @@ impl Render for SeekDrag {
 
 pub struct VideoPlayerView {
     theater: bool,
+    fullscreen_mode: VideoFullscreenMode,
+    layout: VideoLayout,
     focus_handle: FocusHandle,
     url: SharedString,
     poster: SharedString,
@@ -96,8 +116,13 @@ impl VideoPlayerView {
             poster,
             width,
             height,
+            fullscreen_mode,
+            layout,
+            decode_max_size,
         } = activation;
-        let player = VideoPlayer::open(url.as_ref(), None).ok().map(Rc::new);
+        let player = VideoPlayer::open(url.as_ref(), decode_max_size)
+            .ok()
+            .map(Rc::new);
         if let Some(player) = player.as_ref() {
             player.play();
         }
@@ -108,6 +133,8 @@ impl VideoPlayerView {
         Self::register_teardown(cx);
         Self {
             theater: false,
+            fullscreen_mode,
+            layout,
             focus_handle: cx.focus_handle(),
             url,
             poster,
@@ -130,6 +157,8 @@ impl VideoPlayerView {
     ) {
         let view = cx.new(|cx| Self {
             theater: true,
+            fullscreen_mode: VideoFullscreenMode::ShellModal,
+            layout: VideoLayout::Fixed,
             focus_handle: cx.focus_handle(),
             url: SharedString::default(),
             poster,
@@ -150,12 +179,24 @@ impl VideoPlayerView {
         let Some(player) = self.player.clone() else {
             return;
         };
-        let playing = player.is_playing();
-        let new_frame = if playing { player.copy_frame() } else { None };
+        let was_playing = self.shared.borrow().playing;
+        let mut playing = player.is_playing();
         let current_time = player.current_time();
         let duration = player.duration();
         let muted = player.is_muted();
         let failed = player.failed();
+        if playing
+            && duration > 0.0
+            && current_time >= duration - STUCK_PLAYING_END_SECONDS
+        {
+            player.pause();
+            playing = false;
+        }
+        let new_frame = if playing {
+            player.copy_frame()
+        } else {
+            None
+        };
         let previous = {
             let mut shared = self.shared.borrow_mut();
             shared.failed = failed;
@@ -165,19 +206,84 @@ impl VideoPlayerView {
             shared.muted = muted;
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
-        Self::release_frame(previous, window, cx);
-        self.refresh_time_label(current_time, duration);
+        Self::release_frame(previous, Some(window), cx);
+        self.refresh_time_label(playing, current_time, duration);
+        if was_playing && !playing {
+            cx.notify();
+        }
     }
 
-    fn refresh_time_label(&mut self, current_time: f64, duration: f64) {
-        let seconds = (whole_seconds(current_time), whole_seconds(duration));
+    fn refresh_time_label(&mut self, playing: bool, current_time: f64, duration: f64) {
+        let display_time = display_playhead(playing, current_time, duration);
+        let seconds = (whole_seconds(display_time), whole_seconds(duration));
         if seconds != self.last_label_seconds {
             self.last_label_seconds = seconds;
             self.time_label = SharedString::from(format!(
                 "{} / {}",
-                format_seconds(current_time),
+                format_seconds(display_time),
                 format_seconds(duration)
             ));
+        }
+    }
+
+    pub fn reopen(
+        &mut self,
+        activation: VideoActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.url.as_ref() == activation.url.as_ref() {
+            return;
+        }
+        self.shutdown(Some(window), cx);
+        let VideoActivation {
+            url,
+            poster,
+            width,
+            height,
+            fullscreen_mode,
+            layout,
+            decode_max_size,
+        } = activation;
+        self.url = url;
+        self.poster = poster;
+        self.width = width;
+        self.height = height;
+        self.fullscreen_mode = fullscreen_mode;
+        self.layout = layout;
+        self.theater = false;
+        self.track_bounds = Bounds::default();
+        self.time_label = SharedString::new_static("00:00 / 00:00");
+        self.last_label_seconds = (0, 0);
+        self.player = VideoPlayer::open(self.url.as_ref(), decode_max_size)
+            .ok()
+            .map(Rc::new);
+        if let Some(player) = self.player.as_ref() {
+            player.play();
+        }
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.playing = self.player.is_some();
+            shared.failed = false;
+            shared.current_time = 0.0;
+            shared.duration = 0.0;
+        }
+        cx.notify();
+    }
+
+    pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        if let Some(player) = self.player.take() {
+            player.pause();
+            drop(player);
+        }
+        let frame = self.shared.borrow_mut().frame.take();
+        Self::release_frame(frame, window, cx);
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.playing = false;
+            shared.failed = false;
+            shared.current_time = 0.0;
+            shared.duration = 0.0;
         }
     }
 
@@ -202,9 +308,7 @@ impl VideoPlayerView {
                 player.pause();
                 shared.playing = false;
             } else {
-                if shared.duration > 0.0
-                    && shared.current_time >= shared.duration - END_EPSILON_SECONDS
-                {
+                if should_replay_from_start(shared.playing, shared.current_time, shared.duration) {
                     player.seek(0.0);
                     shared.current_time = 0.0;
                 }
@@ -261,13 +365,35 @@ impl VideoPlayerView {
     }
 
     fn open_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(player) = self.player.clone() {
-            Self::open_theater(player, self.shared.clone(), self.poster.clone(), window, cx);
+        match self.fullscreen_mode {
+            VideoFullscreenMode::ShellModal => {
+                if let Some(player) = self.player.clone() {
+                    Self::open_theater(
+                        player,
+                        self.shared.clone(),
+                        self.poster.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            VideoFullscreenMode::InPlaceTheater => {
+                self.theater = true;
+                cx.notify();
+            }
         }
     }
 
-    fn close_theater(cx: &mut Context<Self>) {
-        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+    fn exit_theater(&mut self, cx: &mut Context<Self>) {
+        match self.fullscreen_mode {
+            VideoFullscreenMode::ShellModal => {
+                Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+            }
+            VideoFullscreenMode::InPlaceTheater => {
+                self.theater = false;
+                cx.notify();
+            }
+        }
     }
 
     fn open_external(&self, cx: &mut App) {
@@ -282,19 +408,27 @@ impl VideoPlayerView {
             "left" => self.seek_relative(-SEEK_STEP_SECONDS, cx),
             "right" => self.seek_relative(SEEK_STEP_SECONDS, cx),
             "f" if !self.theater => self.open_fullscreen(window, cx),
-            "escape" if self.theater => Self::close_theater(cx),
+            "escape" if self.theater => self.exit_theater(cx),
             _ => {}
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn release_frame(_previous: Option<VideoFrame>, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn release_frame(
+        _previous: Option<VideoFrame>,
+        _window: Option<&mut Window>,
+        _cx: &mut Context<Self>,
+    ) {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn release_frame(previous: Option<VideoFrame>, window: &mut Window, cx: &mut Context<Self>) {
+    fn release_frame(
+        previous: Option<VideoFrame>,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(previous) = previous {
-            cx.drop_image(previous, Some(window));
+            cx.drop_image(previous, window);
         }
     }
 
@@ -327,7 +461,12 @@ impl VideoPlayerView {
             .borrow()
             .frame
             .clone()
-            .map(|frame| gpui::surface(frame).size_full().into_any_element())
+            .map(|frame| {
+                gpui::surface(frame)
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -336,7 +475,12 @@ impl VideoPlayerView {
             .borrow()
             .frame
             .clone()
-            .map(|frame| gpui::img(frame).size_full().into_any_element())
+            .map(|frame| {
+                gpui::img(frame)
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element()
+            })
     }
 
     fn has_frame(&self) -> bool {
@@ -348,7 +492,9 @@ impl VideoPlayerView {
         let fraction = {
             let shared = self.shared.borrow();
             if shared.duration > 0.0 {
-                (shared.current_time / shared.duration).clamp(0.0, 1.0) as f32
+                let display_time =
+                    display_playhead(shared.playing, shared.current_time, shared.duration);
+                (display_time / shared.duration).clamp(0.0, 1.0) as f32
             } else {
                 0.0
             }
@@ -467,7 +613,7 @@ impl VideoPlayerView {
                         last_icon,
                         cx.listener(move |view, _, window, cx| {
                             if theater {
-                                Self::close_theater(cx);
+                                view.exit_theater(cx);
                             } else {
                                 view.open_fullscreen(window, cx);
                             }
@@ -496,7 +642,11 @@ impl Render for VideoPlayerView {
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 view.on_key(event, window, cx);
             }));
-        root = if self.theater {
+        root = if self.layout == VideoLayout::FillContainer
+            || (self.theater && self.fullscreen_mode == VideoFullscreenMode::InPlaceTheater)
+        {
+            root.w_full().h_full()
+        } else if self.theater {
             let viewport = window.viewport_size();
             root.w(viewport.width * THEATER_FILL)
                 .h(viewport.height * THEATER_FILL)
@@ -508,13 +658,18 @@ impl Render for VideoPlayerView {
         };
 
         if self.player.is_none() || failed {
+            let poster_fit = if self.layout == VideoLayout::FillContainer {
+                ObjectFit::Contain
+            } else {
+                ObjectFit::Cover
+            };
             return root
                 .cursor_pointer()
                 .when(!self.poster.is_empty(), |d| {
                     d.child(
                         img(self.poster.clone())
                             .size_full()
-                            .object_fit(ObjectFit::Cover),
+                            .object_fit(poster_fit),
                     )
                 })
                 .child(play_circle())
@@ -528,10 +683,15 @@ impl Render for VideoPlayerView {
 
         root.children(self.frame_child())
             .when(!has_frame && !self.poster.is_empty(), |d| {
+                let poster_fit = if self.layout == VideoLayout::FillContainer {
+                    ObjectFit::Contain
+                } else {
+                    ObjectFit::Cover
+                };
                 d.child(
                     img(self.poster.clone())
                         .size_full()
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(poster_fit),
                 )
             })
             .child(self.render_controls(cx))
@@ -579,6 +739,21 @@ fn play_circle() -> impl IntoElement {
                         .text_color(gpui::white()),
                 ),
         )
+}
+
+fn should_replay_from_start(playing: bool, current_time: f64, duration: f64) -> bool {
+    !playing
+        && duration > 0.0
+        && (current_time >= duration - REPLAY_THRESHOLD_SECONDS
+            || current_time / duration >= 0.98)
+}
+
+fn display_playhead(playing: bool, current_time: f64, duration: f64) -> f64 {
+    if should_replay_from_start(playing, current_time, duration) {
+        duration
+    } else {
+        current_time
+    }
 }
 
 fn fraction_from_position(bounds: Bounds<Pixels>, x: Pixels) -> f32 {
