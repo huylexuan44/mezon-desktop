@@ -12,9 +12,11 @@ use scap::frame::{Frame, FrameType};
 use crate::screen_picker::{PickedScreen, scap_target_for_pick};
 use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
-const CAPTURE_FPS: u32 = 15;
+const CAPTURE_FPS: u32 = 30;
 const PREVIEW_MAX_WIDTH: u32 = 640;
 const PREVIEW_MAX_HEIGHT: u32 = 400;
+const FOCUS_MAX_WIDTH: u32 = 1280;
+const FOCUS_MAX_HEIGHT: u32 = 800;
 
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
@@ -168,9 +170,9 @@ pub fn start_screen(
                 }
 
                 let (pw, ph) = if full_res.load(Ordering::Relaxed) {
-                    (src_w, src_h)
+                    scaled_dims(src_w, src_h, FOCUS_MAX_WIDTH, FOCUS_MAX_HEIGHT)
                 } else {
-                    preview_dims(src_w, src_h)
+                    scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
                 };
                 display_buf.resize((pw * ph * 4) as usize, 0);
                 downscale_bgra_into(
@@ -199,9 +201,9 @@ pub fn start_screen(
     (ScreenStopper { stop }, track_rx)
 }
 
-fn preview_dims(width: u32, height: u32) -> (u32, u32) {
-    let scale = (PREVIEW_MAX_WIDTH as f32 / width.max(1) as f32)
-        .min(PREVIEW_MAX_HEIGHT as f32 / height.max(1) as f32)
+fn scaled_dims(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    let scale = (max_width as f32 / width.max(1) as f32)
+        .min(max_height as f32 / height.max(1) as f32)
         .min(1.0);
     let pw = ((width as f32 * scale) as u32).max(1);
     let ph = ((height as f32 * scale) as u32).max(1);
@@ -218,10 +220,21 @@ fn downscale_bgra_into(
     dst_width: usize,
     dst_height: usize,
 ) {
+    let dst_row_bytes = dst_width * 4;
+    if dst_width == src_width && dst_height == src_height {
+        for y in 0..dst_height {
+            let s = y * row_stride;
+            let d = y * dst_row_bytes;
+            if s + dst_row_bytes <= src.len() && d + dst_row_bytes <= dst.len() {
+                dst[d..d + dst_row_bytes].copy_from_slice(&src[s..s + dst_row_bytes]);
+            }
+        }
+        return;
+    }
     for y in 0..dst_height {
         let sy = y * src_height / dst_height;
         let s_row = sy * row_stride;
-        let d_row = y * dst_width * 4;
+        let d_row = y * dst_row_bytes;
         for x in 0..dst_width {
             let sx = x * src_width / dst_width;
             let s = s_row + sx * 4;

@@ -1,8 +1,12 @@
-use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{
+    AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Window,
+    deferred, div, prelude::*, px,
+};
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceStore, VoiceModerationError
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore,
+    PinnedMessagesStore, Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError,
+    VoiceStore,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -10,6 +14,7 @@ use ui::utils::ROUNDED_BORDER_WINDOW;
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::components::compositions::user_info_bar::UserInfoBar;
@@ -44,6 +49,9 @@ pub struct ChatLayout {
     displayed_threads_panel: ThreadsPanelSlice,
     displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
+    voice_emoji_picker: Option<Entity<ReactionPicker>>,
+    _voice_emoji_picker_sub: Option<Subscription>,
+    _voice_emoji_picker_dismiss_sub: Option<Subscription>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -243,6 +251,9 @@ impl ChatLayout {
             displayed_threads_panel: ThreadsPanelSlice::default(),
             displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
+            voice_emoji_picker: None,
+            _voice_emoji_picker_sub: None,
+            _voice_emoji_picker_dismiss_sub: None,
         };
         this.sync_active_from_route(cx);
         this.sync_inbox_context(cx);
@@ -648,12 +659,14 @@ impl Render for ChatLayout {
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
         let fullscreen = if self.connected_call_is_active(cx) {
+            let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
                 cx.theme(),
                 &locale,
                 &self.voice_store,
                 &self.settings,
                 self.voice_store.read(cx),
+                &chat,
             )
         } else {
             None
@@ -1008,6 +1021,41 @@ impl ChatLayout {
             .into_any_element()
     }
 
+    pub(crate) fn toggle_voice_emoji_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.voice_emoji_picker.is_some() {
+            self.close_voice_emoji_picker(cx);
+            return;
+        }
+        let picker = cx.new(|cx| ReactionPicker::new(window, cx));
+        let focus_handle = picker.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        self._voice_emoji_picker_sub = Some(cx.subscribe(&picker, |_this, _picker, event, cx| {
+            let ReactionPickerEvent::Picked { emoji_id, .. } = event;
+            let emoji_id = emoji_id.clone();
+            VoiceStore::global(cx).update(cx, |store, cx| {
+                store.send_emoji_reaction(emoji_id, cx);
+            });
+        }));
+        self._voice_emoji_picker_dismiss_sub = Some(
+            cx.subscribe(&picker, |this, _picker, _: &DismissEvent, cx| {
+                this.close_voice_emoji_picker(cx)
+            }),
+        );
+        self.voice_emoji_picker = Some(picker);
+        cx.notify();
+    }
+
+    fn close_voice_emoji_picker(&mut self, cx: &mut Context<Self>) {
+        self.voice_emoji_picker = None;
+        self._voice_emoji_picker_sub = None;
+        self._voice_emoji_picker_dismiss_sub = None;
+        cx.notify();
+    }
+
     fn render_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
@@ -1080,7 +1128,7 @@ impl ChatLayout {
                         settings.output_device_id.clone(),
                     )
                 };
-                return crate::chat::voice::render_voice_channel(
+                let voice_view = crate::chat::voice::render_voice_channel(
                     theme,
                     &locale,
                     &channel,
@@ -1090,6 +1138,27 @@ impl ChatLayout {
                     output_device_id,
                     cx,
                 );
+                return div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(voice_view)
+                    .when_some(self.voice_emoji_picker.clone(), |el, picker| {
+                        el.child(deferred(
+                            div()
+                                .absolute()
+                                .bottom(px(76.))
+                                .left(px(16.))
+                                .occlude()
+                                .on_mouse_down_out(
+                                    cx.listener(|this, _, _, cx| this.close_voice_emoji_picker(cx)),
+                                )
+                                .child(picker),
+                        ))
+                    })
+                    .into_any_element();
             }
 
             let channel_name = ch.name.clone();

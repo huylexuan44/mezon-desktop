@@ -1,10 +1,11 @@
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent,
-    ObjectFit, SharedString, StyledImage, Window, div, img, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
+    MouseButton, MouseDownEvent, ObjectFit, SharedString, StyledImage, Window, div, img,
+    prelude::*, px, relative,
 };
 use mezon_store::{
-    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, NetworkQuality, Settings, UserId,
-    VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
+    AppConfig, Channel, ChannelId, ClanId, ClanMembersStore, DisplayedReaction, NetworkQuality,
+    Settings, UserId, VoiceCallStatus, VoiceConnection, VoiceMember, VoiceParticipant, VoiceStore,
 };
 
 use crate::ChatLayout;
@@ -15,6 +16,8 @@ use ui::Tooltip;
 /// Shared brand accent (Discord-style blurple) used across the voice UI and
 /// the screen-share modal. Single source of truth — do not duplicate.
 pub(crate) const ACCENT_BLUE: u32 = 0x5865f2;
+
+const RAISE_HAND_GOLD: u32 = 0xefbc39;
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
@@ -34,8 +37,9 @@ pub fn render_voice_channel(
     );
 
     if store.is_connected_to(&channel.id.to_string()) || connecting {
+        let chat = cx.entity();
         return render_in_call(
-            theme, locale, channel, voice, settings, store, connecting, cx,
+            theme, locale, channel, voice, settings, store, connecting, &chat, cx,
         );
     }
 
@@ -636,6 +640,139 @@ fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, 
     (m.display_name.clone(), m.avatar_url.clone())
 }
 
+fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
+    let hands = store.raised_hands();
+    if hands.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top(px(68.))
+            .right(px(8.))
+            .w(px(320.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .items_end()
+            .children(hands.iter().map(|user_id| {
+                let (name, avatar_url) = resolve_voice_identity(cx, clan_id, user_id, "");
+                let name = SharedString::from(name);
+                let mut avatar = Avatar::new().name(name.clone()).size_px(px(32.));
+                if !avatar_url.is_empty() {
+                    avatar = avatar.src(avatar_url);
+                }
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .p_1()
+                    .w(px(160.))
+                    .h(px(36.))
+                    .rounded_full()
+                    .bg(gpui::rgb(0xffffff))
+                    .child(avatar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(gpui::rgb(0x000000))
+                            .truncate()
+                            .child(name),
+                    )
+                    .child(
+                        Icon::new(IconName::VoiceRaiseHandIcon)
+                            .size(px(32.))
+                            .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                    )
+            }))
+            .into_any_element(),
+    )
+}
+
+fn reaction_opacity(delta: f32) -> f32 {
+    if delta < 0.1 {
+        delta / 0.1
+    } else if delta > 0.75 {
+        ((1.0 - delta) / 0.25).max(0.0)
+    } else {
+        1.0
+    }
+}
+
+fn reaction_float(r: &DisplayedReaction) -> AnyElement {
+    let name = r.display_name.as_str();
+    let left = r.left;
+    let drift = r.drift;
+    let seq = r.seq as usize;
+
+    div()
+        .absolute()
+        .bottom(relative(0.15))
+        .left(relative(left))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .w(px(56.))
+                .h(px(56.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(r.emoji_src.clone())
+                        .size(px(40.))
+                        .object_fit(ObjectFit::Contain)
+                        .with_animation(
+                            ("voice-reaction-scale", seq),
+                            Animation::new(r.duration),
+                            |el, delta| el.size(px(16.0 + delta * 40.0)),
+                        ),
+                ),
+        )
+        .when(!name.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py(px(1.))
+                    .rounded_full()
+                    .bg(gpui::rgba(0x000000b0))
+                    .text_size(px(10.))
+                    .text_color(gpui::rgb(0xffffff))
+                    .child(SharedString::from(name.to_string())),
+            )
+        })
+        .with_animation(
+            ("voice-reaction-float", seq),
+            Animation::new(r.duration),
+            move |el, delta| {
+                el.bottom(relative(0.15 + delta))
+                    .left(relative(left + drift * delta))
+                    .opacity(reaction_opacity(delta))
+            },
+        )
+        .into_any_element()
+}
+
+fn reactions_overlay(store: &VoiceStore) -> Option<AnyElement> {
+    let reactions = store.displayed_reactions();
+    if reactions.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .children(reactions.iter().map(reaction_float))
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
     theme: &Theme,
@@ -645,6 +782,7 @@ fn render_in_call(
     settings: &Entity<Settings>,
     store: &VoiceStore,
     connecting: bool,
+    chat: &Entity<ChatLayout>,
     cx: &App,
 ) -> AnyElement {
     let fullscreen_active = store.fullscreen_screen().is_some();
@@ -740,8 +878,10 @@ fn render_in_call(
         .child(voice_header(theme, &channel.name, true, status_badge))
         .children(body)
         .when(!fullscreen_active, |this| {
-            this.child(control_bar(theme, locale, voice, settings, store))
+            this.child(control_bar(theme, locale, voice, settings, store, chat))
         })
+        .children(reactions_overlay(store))
+        .children(raised_hands_overlay(cx, channel.clan_id, store))
         .children(mic_modal)
         .children(participant_menu)
         .children(kick_modal)
@@ -754,6 +894,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
+    chat: &Entity<ChatLayout>,
 ) -> Option<AnyElement> {
     let key = store.fullscreen_screen()?;
     let exit_voice = voice.clone();
@@ -825,7 +966,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
                     .items_center()
                     .justify_center()
                     .py_4()
-                    .child(control_bar(theme, locale, voice, settings, store)),
+                    .child(control_bar(theme, locale, voice, settings, store, chat)),
             )
             .into_any_element(),
     )
@@ -1293,6 +1434,7 @@ fn focus_main_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
@@ -1339,6 +1481,7 @@ fn strip_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
@@ -1384,6 +1527,7 @@ fn video_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
@@ -1490,12 +1634,40 @@ fn tile_quality(cell: &VideoCell) -> AnyElement {
         .into_any_element()
 }
 
+fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement> {
+    if !store.is_sound_active(&cell.identity) {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(6.))
+            .rounded_full()
+            .bg(gpui::rgb(ACCENT_BLUE))
+            .border_1()
+            .border_color(gpui::rgba(0xffffff33))
+            .shadow_lg()
+            .child(
+                Icon::new(IconName::VoiceSoundControlIcon)
+                    .size(px(16.))
+                    .text_color(gpui::rgb(0xffffff)),
+            )
+            .into_any_element(),
+    )
+}
+
 fn control_bar(
     theme: &Theme,
     locale: &str,
     voice: &Entity<VoiceStore>,
     settings: &Entity<Settings>,
     store: &VoiceStore,
+    chat: &Entity<ChatLayout>,
 ) -> AnyElement {
     let mic_enabled = store.mic_enabled();
     let camera_enabled = store.camera_enabled();
@@ -1623,6 +1795,33 @@ fn control_bar(
         .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
     };
 
+    let raise_active = store.is_local_hand_raised();
+    let raise_tooltip = mezon_i18n::t(
+        locale,
+        if raise_active {
+            "channelVoice.lowerHand"
+        } else {
+            "channelVoice.raiseHand"
+        },
+    );
+    let raise_color: Hsla = if raise_active {
+        gpui::rgb(RAISE_HAND_GOLD).into()
+    } else {
+        theme.text_primary.into()
+    };
+    let raise_hand_button = {
+        let voice = voice.clone();
+        circle_button(
+            "voice-raise-hand-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceRaiseHandIcon,
+            raise_color,
+        )
+        .tooltip(Tooltip::text(raise_tooltip))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
+    };
+
     let mut right = div()
         .flex()
         .flex_row()
@@ -1680,13 +1879,33 @@ fn control_bar(
         right = right.child(pip_button).child(fs_button);
     }
 
+    let emoji_button = {
+        let chat = chat.clone();
+        circle_button(
+            "voice-emoji-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceEmojiControlIcon,
+            theme.text_muted,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.reactions",
+        )))
+        .on_click(move |_, window, cx| {
+            chat.update(cx, |layout, cx| {
+                layout.toggle_voice_emoji_picker(window, cx)
+            });
+        })
+    };
+
     let left = div()
         .flex()
         .flex_row()
         .flex_1()
         .items_center()
         .gap_3()
-        .child(decorative_circle(theme, IconName::VoiceEmojiControlIcon))
+        .child(emoji_button)
         .child(decorative_circle(theme, IconName::VoiceSoundControlIcon));
 
     let center = div()
@@ -1699,6 +1918,7 @@ fn control_bar(
         .child(camera_button)
         .child(screen_button)
         .child(decorative_circle(theme, IconName::ShadowBotIcon))
+        .child(raise_hand_button)
         .child(leave_button);
 
     div()

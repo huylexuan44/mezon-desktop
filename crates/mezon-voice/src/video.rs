@@ -164,21 +164,23 @@ pub fn bgra_to_i420(
     stride_u: usize,
     stride_v: usize,
 ) {
-    pack_to_i420(
+    let mut planar = yuv::YuvPlanarImageMut {
+        y_plane: yuv::BufferStoreMut::Borrowed(y_plane),
+        y_stride: stride_y as u32,
+        u_plane: yuv::BufferStoreMut::Borrowed(u_plane),
+        u_stride: stride_u as u32,
+        v_plane: yuv::BufferStoreMut::Borrowed(v_plane),
+        v_stride: stride_v as u32,
+        width: width as u32,
+        height: height as u32,
+    };
+    let _ = yuv::bgra_to_yuv420(
+        &mut planar,
         bgra,
-        width,
-        height,
-        4,
-        src_row_stride,
-        2,
-        1,
-        0,
-        y_plane,
-        u_plane,
-        v_plane,
-        stride_y,
-        stride_u,
-        stride_v,
+        src_row_stride as u32,
+        yuv::YuvRange::Limited,
+        yuv::YuvStandardMatrix::Bt601,
+        yuv::YuvConversionMode::Balanced,
     );
 }
 

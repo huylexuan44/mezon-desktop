@@ -29,6 +29,7 @@ mod video_player;
 
 pub use channel_messages::ChannelMessages;
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
+pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
 pub use gif_video::VideoThumbView;
 pub use video_player::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 
