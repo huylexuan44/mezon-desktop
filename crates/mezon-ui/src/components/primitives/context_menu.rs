@@ -142,6 +142,7 @@ impl RenderOnce for ContextMenu {
                 } => {
                     let dismiss = dismiss.clone();
                     let label_color = if is_danger { danger } else { text };
+                    let icon_color = if is_danger { danger } else { muted };
                     panel = panel.child(
                         h_flex()
                             .id(("context-menu-item", index))
@@ -156,7 +157,7 @@ impl RenderOnce for ContextMenu {
                             .cursor_pointer()
                             .hover(|s| s.bg(hover))
                             .when_some(icon, |row, icon| {
-                                row.child(Icon::new(icon).size_4().text_color(muted))
+                                row.child(Icon::new(icon).size_4().text_color(icon_color))
                             })
                             .child(label)
                             .on_click(move |_: &ClickEvent, window, cx| {

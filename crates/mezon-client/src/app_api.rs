@@ -1051,6 +1051,30 @@ impl AppApi {
             .await
     }
 
+    pub async fn remove_participant_mezon_meet(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        room_name: &str,
+        username: &str,
+    ) -> Result<()> {
+        self.transport
+            .remove_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .await
+    }
+
+    pub async fn mute_participant_mezon_meet(
+        &self,
+        channel_id: &str,
+        clan_id: &str,
+        room_name: &str,
+        username: &str,
+    ) -> Result<()> {
+        self.transport
+            .mute_participant_mezon_meet(channel_id, clan_id, room_name, username)
+            .await
+    }
+
     pub async fn list_channel_apps(&self, clan_id: i64) -> Result<Vec<ApiChannelApp>> {
         self.transport.list_channel_apps(clan_id).await
     }

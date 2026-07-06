@@ -5970,15 +5970,16 @@ impl MezonTransport {
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: i64,
+        clan_id: i64,
         room_name: &str,
         username: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             channel_id,
+            clan_id,
             room_name: room_name.to_string(),
             username: username.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, _) = self
@@ -5994,15 +5995,16 @@ impl MezonTransport {
     pub async fn mute_participant_mezon_meet(
         &self,
         channel_id: i64,
+        clan_id: i64,
         room_name: &str,
         username: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             channel_id,
+            clan_id,
             room_name: room_name.to_string(),
             username: username.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, _) = self
