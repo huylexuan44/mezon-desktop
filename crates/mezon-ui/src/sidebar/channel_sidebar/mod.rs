@@ -69,7 +69,6 @@ pub struct ChannelSidebar {
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
-    _hover_release_task: Option<Task<()>>,
     _clan_observe: Subscription,
     _channel_observe: Subscription,
     _settings_observe: Subscription,
@@ -94,25 +93,6 @@ impl ChannelSidebar {
                 if !this.suppress_hover {
                     this.suppress_hover = true;
                     cx.notify();
-                    this._hover_release_task = Some(cx.spawn(async move |this, cx| {
-                        let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
-                        loop {
-                            cx.background_executor().timer(idle).await;
-                            let still_scrolling = this
-                                .update(cx, |this, _| {
-                                    this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
-                                })
-                                .unwrap_or(false);
-                            if still_scrolling {
-                                continue;
-                            }
-                            let _ = this.update(cx, |this, cx| {
-                                this.suppress_hover = false;
-                                cx.notify();
-                            });
-                            break;
-                        }
-                    }));
                 }
             })
             .ok();
@@ -162,7 +142,6 @@ impl ChannelSidebar {
             _skeleton_timer: None,
             suppress_hover: false,
             last_scroll_at: None,
-            _hover_release_task: None,
             _clan_observe: clan_observe,
             _channel_observe: channel_observe,
             _settings_observe: settings_observe,
@@ -182,6 +161,7 @@ impl ChannelSidebar {
         let clan_changed = self.active_clan_id != new_clan_id;
         if clan_changed {
             self.clan_menu_open = false;
+            self.suppress_hover = false;
         }
 
         let new_clan_name = clans
@@ -563,6 +543,16 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .on_mouse_move(cx.listener(|this, _event, _window, cx| {
+                        if this.suppress_hover
+                            && this.last_scroll_at.is_none_or(|t| {
+                                t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
+                            })
+                        {
+                            this.suppress_hover = false;
+                            cx.notify();
+                        }
+                    }))
                     .child(list_element)
                     .children(skeleton_overlay),
             )

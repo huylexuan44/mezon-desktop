@@ -2,8 +2,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Context, Entity, FontWeight, SharedString, Task, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    App, Context, Entity, FontWeight, SharedString, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use mezon_store::{ChannelId, DirectKind, DirectMessageStore, Settings};
 
@@ -33,7 +32,6 @@ pub struct DirectSidebar {
     pending_rebuild: bool,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
-    _hover_release_task: Option<Task<()>>,
 }
 
 fn is_dm_route(cx: &App) -> bool {
@@ -98,7 +96,6 @@ impl DirectSidebar {
             pending_rebuild: false,
             suppress_hover: false,
             last_scroll_at: None,
-            _hover_release_task: None,
         }
     }
 
@@ -109,25 +106,17 @@ impl DirectSidebar {
         }
         self.suppress_hover = true;
         cx.notify();
-        self._hover_release_task = Some(cx.spawn(async move |this, cx| {
-            let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
-            loop {
-                cx.background_executor().timer(idle).await;
-                let still_scrolling = this
-                    .update(cx, |this, _| {
-                        this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
-                    })
-                    .unwrap_or(false);
-                if still_scrolling {
-                    continue;
-                }
-                let _ = this.update(cx, |this, cx| {
-                    this.suppress_hover = false;
-                    cx.notify();
-                });
-                break;
-            }
-        }));
+    }
+
+    fn on_mouse_move_release(&mut self, cx: &mut Context<Self>) {
+        if self.suppress_hover
+            && self
+                .last_scroll_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS))
+        {
+            self.suppress_hover = false;
+            cx.notify();
+        }
     }
 
     fn render_search(&self, theme: &Theme, locale: &str) -> impl IntoElement {
@@ -261,6 +250,7 @@ impl Render for DirectSidebar {
         })
         .track_scroll(&self.list_scroll)
         .on_scroll_wheel(cx.listener(|this, _event, _window, cx| this.on_scroll(cx)))
+        .on_mouse_move(cx.listener(|this, _event, _window, cx| this.on_mouse_move_release(cx)))
         .flex_1()
         .min_h_0()
         .px_2();

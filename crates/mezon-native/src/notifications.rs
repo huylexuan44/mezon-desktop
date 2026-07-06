@@ -139,10 +139,6 @@ unsafe fn objc_block_noop() -> *mut objc::runtime::Object {
 
 #[cfg(target_os = "windows")]
 fn show_windows(n: &Notification) {
-    use windows::Data::Xml::Dom::XmlDocument;
-    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
-    use windows::core::HSTRING;
-
     let title = n.title.clone();
     let body = n.body.clone();
 

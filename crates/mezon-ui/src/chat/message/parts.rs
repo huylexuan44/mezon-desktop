@@ -5,8 +5,8 @@ use gpui::{
     prelude::*, px, radians, rems,
 };
 use mezon_store::{
-    AlbumLayout, ChannelType, Message, MessageAttachment, MessageCode, MessageId, MessageReference,
-    MessagesStore, Reaction, ViewerMedia, resolve_avatar_url,
+    AlbumLayout, AppConfig, ChannelType, Message, MessageAttachment, MessageCode, MessageId,
+    MessageReference, MessagesStore, Reaction, ViewerMedia, resolve_avatar_url,
 };
 
 use super::context::{REPLY_USERNAME_COLOR, RowCtx};
@@ -19,11 +19,20 @@ use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size};
 use crate::theme::Theme;
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
+    let is_anonymous = AppConfig::try_global(cx)
+        .map(|config| {
+            !config.anonymous_user_id.is_empty() && msg.sender_id == config.anonymous_user_id
+        })
+        .unwrap_or(false);
     let (raw_url, proxied) = resolve_message_avatar_urls(msg, ctx, cx);
     let mut avatar = Avatar::new()
         .name(msg.sender_name.clone())
         .with_size(Size::Small)
+        .anonymous(is_anonymous)
         .image_cache(ctx.avatar_cache.clone());
+    if is_anonymous {
+        return avatar.into_any_element();
+    }
     if let Some(proxied) = proxied {
         avatar = avatar.src(proxied);
         if !raw_url.is_empty() {
