@@ -39,6 +39,10 @@ impl VideoThumbView {
         }
     }
 
+    pub fn decoding(&self) -> bool {
+        self.player.is_some() && !self.frozen
+    }
+
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(player) = self.player.clone() else {
             return;
@@ -55,6 +59,12 @@ impl VideoThumbView {
         if captured && !self.frozen {
             player.pause();
             self.frozen = true;
+            self.player = None;
+            cx.notify();
+        } else if failed {
+            self.frozen = true;
+            self.player = None;
+            cx.notify();
         }
     }
 

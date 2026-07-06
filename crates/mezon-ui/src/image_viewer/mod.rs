@@ -88,8 +88,10 @@ pub(crate) fn trim_process_memory() {
 pub(crate) fn trim_process_memory() {}
 
 fn close_image_viewer_window(handle: WindowHandle<ImageViewer>, cx: &mut App) {
+    let _ = handle.update(cx, |viewer, window, cx| viewer.release_resources(window, cx));
     clear_image_viewer_global(cx);
     let _ = handle.update(cx, |_, window, _| window.remove_window());
+    trim_process_memory();
 }
 
 fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
@@ -168,6 +170,7 @@ pub struct ImageViewer {
     active_video_url: Option<String>,
     session: u64,
     video_sync_token: Option<(u64, usize)>,
+    video_sync_scheduled: bool,
     last_trim: Option<Instant>,
     closing: bool,
     _release: Subscription,
@@ -179,7 +182,9 @@ impl ImageViewer {
         window.focus(&focus_handle, cx);
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, app| {
-            let _ = weak.update(app, |viewer, cx| viewer.release_resources(window, cx));
+            let _ = weak.update(app, |viewer, cx| {
+                viewer.release_resources(window, cx);
+            });
             clear_image_viewer_global(app);
             activate_main_window(app);
             true
@@ -240,6 +245,7 @@ impl ImageViewer {
             active_video_url: None,
             session: 0,
             video_sync_token: None,
+            video_sync_scheduled: false,
             last_trim: None,
             closing: false,
             _release: release,
@@ -261,6 +267,7 @@ impl ImageViewer {
         self.rotation_loading = false;
         self.rotation_deg = 0;
         self.video_sync_token = None;
+        self.video_sync_scheduled = false;
         self.attachments.clear();
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
@@ -306,6 +313,9 @@ impl ImageViewer {
     }
 
     fn ensure_video_player(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
         let Some(att) = self.current().filter(|a| a.is_video) else {
             self.drop_video_player(Some(window), cx);
             self.video_sync_token = Some((self.session, self.index));
@@ -319,7 +329,7 @@ impl ImageViewer {
         let (width, height) = video_display_size(att);
         let activation = VideoActivation {
             url: url.clone().into(),
-            poster: att.thumb_src.clone(),
+            poster: SharedString::default(),
             width,
             height,
             fullscreen_mode: VideoFullscreenMode::InPlaceTheater,
@@ -336,12 +346,28 @@ impl ImageViewer {
         self.video_sync_token = Some((self.session, self.index));
     }
 
-    fn maybe_sync_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn schedule_video_player_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing || self.video_sync_scheduled {
+            return;
+        }
         let token = (self.session, self.index);
         if self.video_sync_token == Some(token) {
             return;
         }
-        self.ensure_video_player(window, cx);
+        self.video_sync_scheduled = true;
+        let session = self.session;
+        let index = self.index;
+        cx.defer_in(window, move |this, window, cx| {
+            this.video_sync_scheduled = false;
+            if this.closing || this.session != session || this.index != index {
+                return;
+            }
+            let token = (session, index);
+            if this.video_sync_token == Some(token) {
+                return;
+            }
+            this.ensure_video_player(window, cx);
+        });
     }
 
     fn set_request(
@@ -395,7 +421,7 @@ impl ImageViewer {
                 self.channel_id,
                 cx,
             );
-            self.ensure_video_player(window, cx);
+            self.schedule_video_player_sync(window, cx);
         }
         cx.notify();
     }
@@ -601,10 +627,12 @@ impl ImageViewer {
     }
 
     fn go_to(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.attachments.len() {
+        if index >= self.attachments.len() || index == self.index {
             return;
         }
         self.session = self.session.wrapping_add(1);
+        self.video_sync_token = None;
+        self.video_sync_scheduled = false;
         self.index = index;
         self.zoom = MIN_ZOOM;
         self.pan = point(px(0.), px(0.));
@@ -613,7 +641,7 @@ impl ImageViewer {
         self.rotation_loading = false;
         self.context_menu = None;
         self.refresh_uploader_at(index, cx);
-        self.ensure_video_player(window, cx);
+        self.schedule_video_player_sync(window, cx);
         if self.index + LOAD_MORE_THRESHOLD >= self.attachments.len() {
             self.fetch_older(cx);
         }
@@ -622,7 +650,6 @@ impl ImageViewer {
         }
         self.list_scroll
             .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
-        self.trim_memory_throttled();
         cx.notify();
     }
 
@@ -840,25 +867,6 @@ pub fn resolve_channel_label(
     }
 }
 
-fn format_viewer_timestamp(ts: u32) -> SharedString {
-    use chrono::{Datelike, Timelike};
-    chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map(|dt| dt.with_timezone(&chrono::Local))
-        .map(|local| {
-            format!(
-                "{:02}:{:02}:{:02} {}/{}/{}",
-                local.hour(),
-                local.minute(),
-                local.second(),
-                local.day(),
-                local.month(),
-                local.year()
-            )
-            .into()
-        })
-        .unwrap_or_default()
-}
-
 impl Focusable for ImageViewer {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -870,7 +878,7 @@ impl Render for ImageViewer {
         if !self.closing {
             self.image_cache
                 .update(cx, |cache, cx| cache.sweep(window, cx));
-            self.maybe_sync_video(window, cx);
+            self.schedule_video_player_sync(window, cx);
         }
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
@@ -1155,27 +1163,27 @@ impl ImageViewer {
         let cache = self.image_cache.clone();
         let border = theme.border;
         let brand = theme.brand;
+        let bg_tertiary = theme.bg_tertiary;
 
         let list = uniform_list("viewer-thumbnails", count, move |range, _window, cx| {
             range
                 .map(|ix| {
                     let info = entity.read(cx).attachments.get(ix).map(|att| {
-                        let src = if is_animated_image(att) {
-                            SharedUri::from(&att.url)
-                        } else {
-                            SharedUri::from(&att.thumb_src)
-                        };
-                        (att.is_video, src)
+                        (att.is_video, SharedUri::from(&att.thumb_src))
                     });
                     let Some((is_video, src)) = info else {
                         return div().into_any_element();
                     };
                     let is_active = ix == active;
-                    let media = img(src)
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::Cover)
-                        .id(("viewer-thumb-img", ix))
-                        .into_any_element();
+                    let media = if is_video {
+                        div().size_full().bg(bg_tertiary).into_any_element()
+                    } else {
+                        img(src)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .id(("viewer-thumb-img", ix))
+                            .into_any_element()
+                    };
                     div()
                         .id(("viewer-thumb", ix))
                         .h(px(THUMB_ROW_HEIGHT))
@@ -1264,7 +1272,7 @@ impl ImageViewer {
             avatar
         };
         let timestamp = att
-            .map(|a| format_viewer_timestamp(a.create_time_seconds))
+            .map(|a| a.viewer_timestamp.clone())
             .unwrap_or_default();
         let counter = if self.attachments.is_empty() {
             SharedString::default()

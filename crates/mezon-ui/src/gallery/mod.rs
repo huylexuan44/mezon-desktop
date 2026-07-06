@@ -5,7 +5,7 @@ use gpui::{
     Window, div, img, list, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelAttachment, ChannelId, ClanId, GalleryStore, LoadDirection,
+    AppConfig, ChannelAttachment, ChannelId, ClanId, GalleryEvent, GalleryStore, LoadDirection,
     MediaFilter, Settings, enrich_uploader, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
@@ -26,7 +26,32 @@ const GALLERY_MIN_DATE: NaiveDate = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()
 
 enum GalleryRow {
     Header(SharedString),
-    Images(Vec<ChannelAttachment>),
+    Images(Vec<GalleryTile>),
+}
+
+#[derive(Clone)]
+struct GalleryTile {
+    id: i64,
+    is_video: bool,
+    thumb_src: SharedString,
+}
+
+impl GalleryTile {
+    fn from_attachment(att: &ChannelAttachment) -> Self {
+        Self {
+            id: att.id,
+            is_video: att.is_video,
+            thumb_src: att.thumb_src.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RowsSnapshot {
+    filter: MediaFilter,
+    len: usize,
+    head_id: Option<i64>,
+    tail_id: Option<i64>,
 }
 
 pub struct GalleryModal {
@@ -45,6 +70,7 @@ pub struct GalleryModal {
     rows: Vec<GalleryRow>,
     list_state: ListState,
     image_cache: Entity<LruImageCache>,
+    rows_snapshot: Option<RowsSnapshot>,
     _subscription: Subscription,
     _release: Subscription,
     _from_picker_sub: Subscription,
@@ -71,8 +97,11 @@ impl GalleryModal {
             )
         });
         let gallery = GalleryStore::global(cx);
-        let subscription = cx.observe(&gallery, |this, _, cx| {
-            this.rebuild_rows(cx);
+        let subscription = cx.subscribe(&gallery, |this, _, event, cx| {
+            let GalleryEvent::Changed(changed_channel) = event;
+            if *changed_channel == this.channel_id {
+                this.sync_rows_from_store(cx);
+            }
         });
         let cache_for_release = image_cache.clone();
         let release = cx.on_release(move |_, cx| {
@@ -102,6 +131,7 @@ impl GalleryModal {
             rows: Vec::new(),
             list_state: ListState::new(0, ListAlignment::Top, px(400.)),
             image_cache,
+            rows_snapshot: None,
             _subscription: subscription,
             _release: release,
             _from_picker_sub: Subscription::new(|| ()),
@@ -161,25 +191,45 @@ impl GalleryModal {
             });
     }
 
+    fn rows_snapshot(&self, cx: &App) -> RowsSnapshot {
+        let store = GalleryStore::global(cx);
+        let atts = store.read(cx).attachments(self.channel_id);
+        RowsSnapshot {
+            filter: self.active_filter,
+            len: atts.len(),
+            head_id: atts.first().map(|a| a.id),
+            tail_id: atts.last().map(|a| a.id),
+        }
+    }
+
+    fn sync_rows_from_store(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.rows_snapshot(cx);
+        if self.rows_snapshot == Some(snapshot) {
+            return;
+        }
+        self.rebuild_rows(cx);
+    }
+
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let store = GalleryStore::global(cx);
         let filtered = store.read(cx).filtered(self.channel_id, self.active_filter);
         let mut rows: Vec<GalleryRow> = Vec::new();
         let mut current_day: Option<i64> = None;
-        let mut bucket: Vec<ChannelAttachment> = Vec::new();
+        let mut bucket: Vec<GalleryTile> = Vec::new();
         for att in filtered {
             if current_day != Some(att.day_index) {
                 flush_bucket(&mut rows, &mut bucket);
                 rows.push(GalleryRow::Header(att.day_label.clone()));
                 current_day = Some(att.day_index);
             }
-            bucket.push(att);
+            bucket.push(GalleryTile::from_attachment(&att));
             if bucket.len() == COLUMNS {
                 rows.push(GalleryRow::Images(std::mem::take(&mut bucket)));
             }
         }
         flush_bucket(&mut rows, &mut bucket);
         self.rows = rows;
+        self.rows_snapshot = Some(self.rows_snapshot(cx));
         self.list_state.reset(self.rows.len());
         cx.notify();
     }
@@ -368,9 +418,81 @@ impl GalleryModal {
     fn locale(&self, cx: &App) -> String {
         self.settings.read(cx).language.clone()
     }
+
+    fn render_image_row_at(
+        &mut self,
+        row_ix: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let tiles: Vec<(i64, bool, SharedString)> = match self.rows.get(row_ix) {
+            Some(GalleryRow::Images(atts)) => atts
+                .iter()
+                .map(|att| (att.id, att.is_video, att.thumb_src.clone()))
+                .collect(),
+            _ => return div().into_any_element(),
+        };
+        let entity = cx.entity();
+        let mut row = div().flex().flex_row().gap_3().pb_3();
+        for (id, is_video, thumb_src) in tiles {
+            let entity_click = entity.clone();
+            let media = if is_video {
+                div().size_full().into_any_element()
+            } else {
+                img(thumb_src)
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .into_any_element()
+            };
+            row = row.child(
+                div()
+                    .id(("gallery-tile", id as usize))
+                    .size(px(TILE))
+                    .rounded(px(6.))
+                    .overflow_hidden()
+                    .bg(theme.bg_tertiary)
+                    .cursor_pointer()
+                    .relative()
+                    .child(media)
+                    .when(is_video, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(48.))
+                                        .rounded_full()
+                                        .bg(gpui::hsla(0., 0., 0., 0.6))
+                                        .child(
+                                            Icon::new(IconName::PlayButton)
+                                                .size(px(20.))
+                                                .text_color(gpui::white()),
+                                        ),
+                                ),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        move |_: &MouseDownEvent, window, cx| {
+                            entity_click.update(cx, |this, cx| {
+                                this.open_attachment(id, window, cx);
+                            });
+                        },
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
 }
 
-fn flush_bucket(rows: &mut Vec<GalleryRow>, bucket: &mut Vec<ChannelAttachment>) {
+fn flush_bucket(rows: &mut Vec<GalleryRow>, bucket: &mut Vec<GalleryTile>) {
     if !bucket.is_empty() {
         rows.push(GalleryRow::Images(std::mem::take(bucket)));
     }
@@ -406,7 +528,6 @@ impl Render for GalleryModal {
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
         let t = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-
         let viewport_h = f32::from(window.viewport_size().height);
         let panel_h = px((viewport_h * 0.8).clamp(400.0, (viewport_h - 96.0).max(400.0)));
 
@@ -444,17 +565,11 @@ impl Render for GalleryModal {
                         }) {
                             return render_header(&label, &theme_for_list);
                         }
-                        let atts = entity.read(cx).rows.get(ix).and_then(|row| {
-                            if let GalleryRow::Images(atts) = row {
-                                Some(atts.clone())
-                            } else {
-                                None
-                            }
+                        let entity_row = entity.clone();
+                        let theme_row = theme_for_list.clone();
+                        return entity_row.update(cx, |this, cx| {
+                            this.render_image_row_at(ix, &theme_row, cx)
                         });
-                        if let Some(atts) = atts {
-                            return render_image_row(&atts, &theme_for_list, &entity);
-                        }
-                        div().into_any_element()
                     })
                     .flex_1()
                     .size_full(),
@@ -849,66 +964,6 @@ fn render_header(label: &SharedString, theme: &Theme) -> gpui::AnyElement {
         .text_color(theme.text_muted)
         .child(label.clone())
         .into_any_element()
-}
-
-fn render_image_row(
-    atts: &[ChannelAttachment],
-    theme: &Theme,
-    entity: &Entity<GalleryModal>,
-) -> gpui::AnyElement {
-    let mut row = div().flex().flex_row().gap_3().pb_3();
-    for att in atts {
-        let id = att.id;
-        let entity = entity.clone();
-        let is_video = att.is_video;
-        let thumb_src = att.thumb_src.clone();
-        let media = img(thumb_src)
-            .size_full()
-            .object_fit(gpui::ObjectFit::Cover)
-            .into_any_element();
-        row = row.child(
-            div()
-                .id(("gallery-tile", id as usize))
-                .size(px(TILE))
-                .rounded(px(6.))
-                .overflow_hidden()
-                .bg(theme.bg_tertiary)
-                .cursor_pointer()
-                .relative()
-                .child(media)
-                .when(is_video, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(48.))
-                                    .rounded_full()
-                                    .bg(gpui::hsla(0., 0., 0., 0.6))
-                                    .child(
-                                        Icon::new(IconName::PlayButton)
-                                            .size(px(20.))
-                                            .text_color(gpui::white()),
-                                    ),
-                            ),
-                    )
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    move |_: &MouseDownEvent, window, cx| {
-                        entity.update(cx, |this, cx| this.open_attachment(id, window, cx));
-                    },
-                ),
-        );
-    }
-    row.into_any_element()
 }
 
 fn empty_label(filter: MediaFilter, date_filtered: bool, locale: &str) -> String {

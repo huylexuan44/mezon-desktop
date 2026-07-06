@@ -62,6 +62,8 @@ pub struct ChannelAttachment {
     pub viewer_src: SharedString,
     /// Calendar-day label ("January 01, 2021") for date grouping headers.
     pub day_label: SharedString,
+    /// Preformatted bottom-bar timestamp ("HH:MM:SS D/M/YYYY").
+    pub viewer_timestamp: SharedString,
     /// Days since the unix epoch (local), the date-group key.
     pub day_index: i64,
     /// Resolved uploader display name (filled by [`enrich_uploader`]).
@@ -93,6 +95,7 @@ impl ChannelAttachment {
         };
         let day_label = format_day(api.create_time_seconds as i64).into();
         let day_index = day_index(api.create_time_seconds as i64);
+        let viewer_timestamp = format_viewer_timestamp(api.create_time_seconds).into();
         Self {
             id: api.id,
             channel_id,
@@ -111,6 +114,7 @@ impl ChannelAttachment {
             viewer_src,
             day_label,
             day_index,
+            viewer_timestamp,
             uploader_name: SharedString::default(),
             uploader_avatar: SharedString::default(),
             uploader_avatar_raw: SharedString::default(),
@@ -314,6 +318,24 @@ fn extension(url: &str) -> Option<String> {
 fn format_day(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
         .map(|dt| dt.format("%B %d, %Y").to_string())
+        .unwrap_or_default()
+}
+
+fn format_viewer_timestamp(ts: u32) -> String {
+    use chrono::{Datelike, Timelike};
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local))
+        .map(|local| {
+            format!(
+                "{:02}:{:02}:{:02} {}/{}/{}",
+                local.hour(),
+                local.minute(),
+                local.second(),
+                local.day(),
+                local.month(),
+                local.year()
+            )
+        })
         .unwrap_or_default()
 }
 
@@ -593,7 +615,8 @@ impl GalleryStore {
                             None => Vec::new(),
                         };
                         let fetched = mapped.len();
-                        let added = merge_attachments(&mut entry.attachments, mapped, reset);
+                        let added =
+                            merge_attachments(&mut entry.attachments, mapped, reset, direction);
                         let full_page = fetched as i32 >= GALLERY_PAGE_SIZE;
                         let progressed = added > 0;
                         if reset {
@@ -623,23 +646,72 @@ impl GalleryStore {
     }
 }
 
+fn attachment_desc_cmp(a: &ChannelAttachment, b: &ChannelAttachment) -> std::cmp::Ordering {
+    a.create_time_seconds
+        .cmp(&b.create_time_seconds)
+        .reverse()
+        .then_with(|| a.id.cmp(&b.id).reverse())
+}
+
+fn sort_desc_in_place(items: &mut [ChannelAttachment]) {
+    items.sort_by(attachment_desc_cmp);
+}
+
+fn merge_two_desc_sorted(
+    mut left: Vec<ChannelAttachment>,
+    mut right: Vec<ChannelAttachment>,
+) -> Vec<ChannelAttachment> {
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let (mut left_ix, mut right_ix) = (0usize, 0usize);
+    while left_ix < left.len() && right_ix < right.len() {
+        match attachment_desc_cmp(&left[left_ix], &right[right_ix]) {
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => {
+                merged.push(left[left_ix].clone());
+                left_ix += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(right[right_ix].clone());
+                right_ix += 1;
+            }
+        }
+    }
+    merged.extend(left.into_iter().skip(left_ix));
+    merged.extend(right.into_iter().skip(right_ix));
+    merged
+}
+
 fn merge_attachments(
     existing: &mut Vec<ChannelAttachment>,
     incoming: Vec<ChannelAttachment>,
     reset: bool,
+    direction: LoadDirection,
 ) -> usize {
     if reset {
         existing.clear();
     }
     let mut seen: std::collections::HashSet<i64> = existing.iter().map(|a| a.id).collect();
+    let mut new_items = Vec::new();
     let mut added = 0;
     for att in incoming {
         if seen.insert(att.id) {
-            existing.push(att);
+            new_items.push(att);
             added += 1;
         }
     }
-    existing.sort_by_key(|a| std::cmp::Reverse(a.create_time_seconds));
+    if reset {
+        sort_desc_in_place(&mut new_items);
+        *existing = new_items;
+        return added;
+    }
+    if added == 0 {
+        return 0;
+    }
+    sort_desc_in_place(&mut new_items);
+    let taken = std::mem::take(existing);
+    *existing = match direction {
+        LoadDirection::Before => merge_two_desc_sorted(taken, new_items),
+        LoadDirection::After => merge_two_desc_sorted(new_items, taken),
+    };
     added
 }
 
@@ -666,6 +738,7 @@ mod tests {
             viewer_src: SharedString::default(),
             day_label: SharedString::default(),
             day_index: 0,
+            viewer_timestamp: SharedString::default(),
             uploader_name: SharedString::default(),
             uploader_avatar: SharedString::default(),
             uploader_avatar_raw: SharedString::default(),
@@ -715,6 +788,7 @@ mod tests {
             &mut existing,
             vec![att(2, 300, "image/png"), att(3, 200, "image/png")],
             true,
+            LoadDirection::Before,
         );
         assert_eq!(added, 2);
         assert_eq!(
@@ -730,6 +804,7 @@ mod tests {
             &mut existing,
             vec![att(3, 200, "image/png"), att(4, 100, "image/png")],
             false,
+            LoadDirection::Before,
         );
         assert_eq!(added, 1);
         assert_eq!(
@@ -739,12 +814,29 @@ mod tests {
     }
 
     #[test]
-    fn merge_duplicate_page_returns_zero() {
+    fn merge_prepends_newer_dedup() {
+        let mut existing = vec![att(2, 300, "image/png"), att(3, 200, "image/png")];
+        let added = merge_attachments(
+            &mut existing,
+            vec![att(2, 300, "image/png"), att(5, 400, "image/png")],
+            false,
+            LoadDirection::After,
+        );
+        assert_eq!(added, 1);
+        assert_eq!(
+            existing.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![5, 2, 3]
+        );
+    }
+
+    #[test]
+    fn merge_duplicate_page_returns_zero_before() {
         let mut existing = vec![att(2, 300, "image/png"), att(3, 200, "image/png")];
         let added = merge_attachments(
             &mut existing,
             vec![att(2, 300, "image/png"), att(3, 200, "image/png")],
             false,
+            LoadDirection::Before,
         );
         assert_eq!(added, 0);
     }
