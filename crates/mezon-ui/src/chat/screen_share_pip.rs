@@ -4,6 +4,7 @@ use gpui::{
 };
 use mezon_store::VoiceStore;
 
+use crate::app::window_controls::linux_app_id;
 use crate::components::primitives::{Icon, IconName};
 
 pub struct ScreenSharePipView {
@@ -86,6 +87,7 @@ pub fn open_screen_share_pip(
         window_min_size: Some(size(px(240.), px(150.))),
         focus: false,
         show: true,
+        app_id: linux_app_id(),
         ..Default::default()
     };
 

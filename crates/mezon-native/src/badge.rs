@@ -76,10 +76,8 @@ fn set_badge_windows(count: u32) {
 fn try_set_overlay_icon(count: u32) -> windows::core::Result<()> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyIcon, GetActiveWindow, HICON, ICONINFO,
-    };
-    use windows::core::Interface as _;
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
 
     use windows::Win32::Foundation::HWND;
 

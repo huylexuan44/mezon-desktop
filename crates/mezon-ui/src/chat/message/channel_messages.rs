@@ -175,7 +175,6 @@ pub struct ChannelMessages {
     _clan_list_observe: Subscription,
     _skeleton_timer: Option<Task<()>>,
     suppress_hover: bool,
-    _hover_release_task: Option<Task<()>>,
     hovered_row: Option<MessageId>,
     raw_hover: Option<MessageId>,
     _hover_show_task: Option<Task<()>>,
@@ -262,6 +261,7 @@ impl ChannelMessages {
                     this.mention_popover = None;
                     this._mention_popover_sub = None;
                     this.context_menu_target = None;
+                    this.suppress_hover = false;
                     this.hovered_row = None;
                     this.raw_hover = None;
                     this._hover_show_task = None;
@@ -489,26 +489,11 @@ impl ChannelMessages {
                 this.last_scroll_at = Some(Instant::now());
                 if !this.suppress_hover {
                     this.suppress_hover = true;
+                    this.hovered_row = None;
+                    this.raw_hover = None;
+                    this._hover_show_task = None;
+                    this._hover_hide_task = None;
                     cx.notify();
-                    this._hover_release_task = Some(cx.spawn(async move |this, cx| {
-                        let idle = Duration::from_millis(SCROLL_HOVER_RELEASE_MS);
-                        loop {
-                            cx.background_executor().timer(idle).await;
-                            let still_scrolling = this
-                                .update(cx, |this, _| {
-                                    this.last_scroll_at.is_some_and(|t| t.elapsed() < idle)
-                                })
-                                .unwrap_or(false);
-                            if still_scrolling {
-                                continue;
-                            }
-                            let _ = this.update(cx, |this, cx| {
-                                this.suppress_hover = false;
-                                cx.notify();
-                            });
-                            break;
-                        }
-                    }));
                 }
 
                 if !(near_top || near_bottom) {
@@ -603,7 +588,6 @@ impl ChannelMessages {
             _clan_list_observe: clan_list_observe,
             _skeleton_timer: None,
             suppress_hover: false,
-            _hover_release_task: None,
             hovered_row: None,
             raw_hover: None,
             _hover_show_task: None,
@@ -1594,6 +1578,16 @@ impl Render for ChannelMessages {
             )
             .children(skeleton_overlay)
             .child(scroll_down_fab)
+            .on_mouse_move(cx.listener(|this, _event, _window, cx| {
+                if this.suppress_hover
+                    && this.last_scroll_at.is_none_or(|t| {
+                        t.elapsed() >= Duration::from_millis(SCROLL_HOVER_RELEASE_MS)
+                    })
+                {
+                    this.suppress_hover = false;
+                    cx.notify();
+                }
+            }))
             .when_some(self.mention_popover.clone(), |el, (popover, position)| {
                 el.child(deferred(
                     anchored().position(position).snap_to_window().child(
