@@ -10,8 +10,8 @@ use gpui::{
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
     Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString,
-    Style, StyleRefinement, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, actions, div, fill, point, prelude::*, px, rgb, size,
+    Style, StyleRefinement, Styled, Subscription, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -209,8 +209,10 @@ pub(crate) struct MentionInputState {
     scroll_offset: Point<Pixels>,
     is_selecting: bool,
     masked: bool,
+    compact: bool,
     mention_spans: Vec<MentionSpan>,
     caret_blink: CaretBlink,
+    _window_activation_sub: Subscription,
 }
 
 impl EventEmitter<MentionFieldEvent> for MentionInputState {}
@@ -218,6 +220,10 @@ impl EventEmitter<MentionFieldEvent> for MentionInputState {}
 impl MentionInputState {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let window_activation_sub = cx.observe_window_activation(window, |this, window, cx| {
+            this.caret_blink
+                .sync_window_active(window.is_window_active(), cx);
+        });
         let this = Self {
             focus_handle: focus_handle.clone(),
             content: SharedString::default(),
@@ -231,8 +237,10 @@ impl MentionInputState {
             scroll_offset: Point::default(),
             is_selecting: false,
             masked: false,
+            compact: false,
             mention_spans: Vec::new(),
-            caret_blink: CaretBlink::new(),
+            caret_blink: CaretBlink::new(window.is_window_active()),
+            _window_activation_sub: window_activation_sub,
         };
 
         cx.on_focus(&focus_handle, window, |this, _window, cx| {
@@ -253,8 +261,17 @@ impl MentionInputState {
         self
     }
 
+    pub(crate) fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
     pub fn value(&self) -> &str {
         self.content.as_ref()
+    }
+
+    pub fn value_shared(&self) -> SharedString {
+        self.content.clone()
     }
 
     pub(crate) fn cursor(&self) -> usize {
@@ -771,6 +788,7 @@ impl Render for MentionInputState {
         }
 
         let text_color: Hsla = cx.theme().text_primary.into();
+        let compact = self.compact;
 
         div()
             .key_context(KEY_CONTEXT)
@@ -800,10 +818,10 @@ impl Render for MentionInputState {
             .flex()
             .items_start()
             .w_full()
-            .min_h(px(44.))
-            .pl(px(44.))
-            .pr(px(120.))
-            .py(px(9.))
+            .when(compact, |d| d.min_h(px(40.)).px(px(10.)).py(px(9.)))
+            .when(!compact, |d| {
+                d.min_h(px(44.)).pl(px(44.)).pr(px(120.)).py(px(9.))
+            })
             .text_color(text_color)
             .text_size(px(16.))
             .child(

@@ -4,7 +4,7 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Entity, Rgba, SharedString, Window,
     div, img, prelude::*, px,
 };
-use mezon_store::{ClanId, ClanList};
+use mezon_store::{ChannelList, ClanId, ClanList};
 
 use crate::components::primitives::mention_count_badge;
 use crate::router::{Route, Router};
@@ -90,6 +90,7 @@ pub(super) fn render_clan_row(
     };
 
     let clan_id = clan.id.clone();
+    let prefetch_clan_id = clan.id_num;
     let is_active = clan_list_handle.read(cx).is_active_clan(clan.id_num) && !dm_active;
     let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
@@ -173,6 +174,13 @@ pub(super) fn render_clan_row(
                             .bg(theme.tokens.bg_unread_message),
                     ),
             )
+        })
+        .on_hover(move |hovered, _window, cx| {
+            if *hovered {
+                ChannelList::global(cx).update(cx, |channels, cx| {
+                    channels.load_for_clan(prefetch_clan_id, cx)
+                });
+            }
         })
         .on_click(on_clan_click(clan_list_handle, clan_id))
         .child(avatar_with_badge)

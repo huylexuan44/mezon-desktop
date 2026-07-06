@@ -8,6 +8,7 @@ use ui::PopoverMenuHandle;
 use crate::chat::ReplyTarget;
 use crate::chat::channel_header::ChatHeader;
 use crate::chat::channel_typing::ChannelTyping;
+use crate::chat::inbox::InboxPopoverPanel;
 use crate::chat::input_bar::InputBar;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
@@ -110,6 +111,7 @@ impl ChatArea {
                 |this: &mut crate::ChatLayout, _, event: &MentionInputEvent, window, cx| match event
                 {
                     MentionInputEvent::Submit => this.send_current_message(window, cx),
+                    MentionInputEvent::Cancel => {}
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }
@@ -129,6 +131,9 @@ impl ChatArea {
         channel_id: Option<ChannelId>,
         show_members_button: bool,
         show_member_panel: bool,
+        show_inbox: bool,
+        inbox_handle: Option<PopoverMenuHandle<InboxPopoverPanel>>,
+        clan_id: Option<String>,
         pin_handle: Option<PopoverMenuHandle<PinnedPopoverPanel>>,
         cx: &mut Context<crate::ChatLayout>,
     ) -> gpui::AnyElement {
@@ -150,7 +155,11 @@ impl ChatArea {
                 is_dm,
                 show_members_button,
                 show_member_panel,
+                show_inbox,
+                inbox_handle,
+                clan_id,
                 pin_handle,
+                Some(locale.to_string()),
                 cx,
             );
         });

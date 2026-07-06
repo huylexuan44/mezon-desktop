@@ -144,6 +144,8 @@ pub struct ChannelList {
     app_channels_cache: HashMap<ClanId, Vec<AppChannel>>,
     topic_parent_badges: HashMap<ChannelId, TopicParentBadge>,
     pending_channel_badges: HashMap<ChannelId, u32>,
+    user_channels: HashMap<ChannelId, Channel>,
+    user_channels_loading: bool,
     loading: HashSet<ClanId>,
     active_clan_id: Option<ClanId>,
     pub active_channel_id: Option<ChannelId>,
@@ -152,6 +154,7 @@ pub struct ChannelList {
     collapsed: HashSet<(String, String)>,
     show_empty_categories: HashSet<ClanId>,
     channel_index: RefCell<ChannelLocationCache>,
+    reset_generation: u64,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
 }
@@ -159,15 +162,19 @@ pub struct ChannelList {
 #[derive(Default)]
 struct ChannelLocationCache {
     by_clan: HashMap<ClanId, HashMap<ChannelId, (usize, usize)>>,
+    clan_of: HashMap<ChannelId, ClanId>,
+    clan_of_built: bool,
 }
 
 impl ChannelLocationCache {
     fn invalidate(&mut self, clan_id: ClanId) {
         self.by_clan.remove(&clan_id);
+        self.clan_of_built = false;
     }
 
     fn invalidate_all(&mut self) {
         self.by_clan.clear();
+        self.clan_of_built = false;
     }
 
     fn location(
@@ -181,6 +188,25 @@ impl ChannelLocationCache {
             .or_insert_with(|| build_clan_channel_index(categories))
             .get(&channel_id)
             .copied()
+    }
+
+    fn clan_for(
+        &mut self,
+        cache: &KeyedCache<ClanId, Vec<Category>>,
+        channel_id: ChannelId,
+    ) -> Option<ClanId> {
+        if !self.clan_of_built {
+            self.clan_of.clear();
+            for (clan_id, categories) in cache.iter() {
+                for category in categories {
+                    for channel in &category.channels {
+                        self.clan_of.entry(channel.id).or_insert(*clan_id);
+                    }
+                }
+            }
+            self.clan_of_built = true;
+        }
+        self.clan_of.get(&channel_id).copied()
     }
 }
 
@@ -215,10 +241,13 @@ impl ChannelList {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.cache.clear();
         self.app_channels_cache.clear();
         self.topic_parent_badges.clear();
         self.pending_channel_badges.clear();
+        self.user_channels.clear();
+        self.user_channels_loading = false;
         self.loading.clear();
         self.remembered_channels.clear();
         self.invalidate_channel_index_all();
@@ -273,6 +302,8 @@ impl ChannelList {
             app_channels_cache: HashMap::new(),
             topic_parent_badges: HashMap::new(),
             pending_channel_badges: HashMap::new(),
+            user_channels: HashMap::new(),
+            user_channels_loading: false,
             loading: HashSet::new(),
             active_clan_id: None,
             active_channel_id: None,
@@ -281,6 +312,7 @@ impl ChannelList {
             collapsed: HashSet::new(),
             show_empty_categories: HashSet::new(),
             channel_index: RefCell::new(ChannelLocationCache::default()),
+            reset_generation: 0,
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
         }
@@ -363,11 +395,15 @@ impl ChannelList {
         }
         self.loading.insert(clan_id);
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = Self::fetch_clan_data(&api, clan_id).await;
             match result {
                 Ok((mut categories, app_channels, last_messages)) => {
                     let _ = this.update(cx, |this, cx| {
+                        if this.reset_generation != generation {
+                            return;
+                        }
                         this.loading.remove(&clan_id);
                         this.app_channels_cache.insert(clan_id, app_channels);
                         this.merge_pending_badges(&mut categories);
@@ -392,6 +428,44 @@ impl ChannelList {
             }
         })
         .detach();
+    }
+
+    fn fetch_user_channels(&mut self, cx: &mut Context<Self>) {
+        if self.user_channels_loading {
+            return;
+        }
+        self.user_channels_loading = true;
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let result = api.list_channel_by_user_id().await;
+            let _ = this.update(cx, |this, cx| {
+                this.user_channels_loading = false;
+                if this.reset_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(descs) => {
+                        this.user_channels = descs
+                            .into_iter()
+                            .map(|d| {
+                                let channel = channel_from_desc(d, 0, Vec::new(), false);
+                                (channel.id, channel)
+                            })
+                            .collect();
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        tracing::warn!("list_channel_by_user_id failed: {e}");
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn user_channel(&self, channel_id: ChannelId) -> Option<&Channel> {
+        self.user_channels.get(&channel_id)
     }
 
     async fn fetch_clan_data(
@@ -1023,6 +1097,7 @@ impl ChannelList {
         tracing::info!("ChannelList resync — invalidating channel cache");
         self.cache.mark_all_stale();
         self.invalidate_channel_index_all();
+        self.fetch_user_channels(cx);
         if let Some(clan_id) = self.active_clan_id {
             self.load_for_clan(clan_id, cx);
         }
@@ -1152,16 +1227,9 @@ impl ChannelList {
     }
 
     pub fn clan_id_for_channel(&self, channel_id: ChannelId) -> Option<ClanId> {
-        for (clan_id, cats) in self.cache.iter() {
-            let found = cats
-                .iter()
-                .flat_map(|c| &c.channels)
-                .any(|ch| ch.id == channel_id);
-            if found {
-                return Some(*clan_id);
-            }
-        }
-        None
+        self.channel_index
+            .borrow_mut()
+            .clan_for(&self.cache, channel_id)
     }
 
     pub fn is_category_collapsed(&self, clan_id: ClanId, cat_id: &str) -> bool {

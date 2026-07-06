@@ -165,9 +165,7 @@ impl CreateClanModal {
 
             let path_buf = path.clone();
             let file_size = match cx
-                .background_spawn(async move {
-                    std::fs::metadata(&path_buf).ok().map(|m| m.len())
-                })
+                .background_spawn(async move { std::fs::metadata(&path_buf).ok().map(|m| m.len()) })
                 .await
             {
                 Some(size) => size,

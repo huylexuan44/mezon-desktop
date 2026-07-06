@@ -1,7 +1,9 @@
+use std::time::Duration;
+
 use gpui::{
     Anchor, AnyElement, App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, rgb,
-    uniform_list,
+    Point, SharedString, Task, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    rgb, uniform_list,
 };
 use mezon_store::{
     ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ClanId,
@@ -33,10 +35,14 @@ enum HeaderKind {
     Members,
 }
 
+const MEMBER_SKELETON_DELAY_MS: u64 = 400;
+const MEMBER_SKELETON_ROWS: usize = 10;
+
 #[derive(PartialEq)]
 enum Row {
     Header { kind: HeaderKind, count: usize },
     Member(MemberRow),
+    Skeleton,
 }
 
 #[derive(PartialEq)]
@@ -71,6 +77,9 @@ pub struct MemberListPanel {
     route_key: RouteKey,
     open_menu: Option<(UserId, SharedString, Point<Pixels>)>,
     rebuild_pending: bool,
+    loading_channel: Option<ChannelId>,
+    show_skeleton: bool,
+    _skeleton_timer: Option<Task<()>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -166,6 +175,9 @@ impl MemberListPanel {
             route_key: route_key(source, cx),
             open_menu: None,
             rebuild_pending: false,
+            loading_channel: None,
+            show_skeleton: false,
+            _skeleton_timer: None,
         };
         this.recompute(cx);
         this
@@ -186,6 +198,25 @@ impl MemberListPanel {
     }
 
     fn recompute(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.source, MemberSource::Channel)
+            && let Some(pending_id) = pending_filter_channel(cx)
+        {
+            if self.loading_channel != Some(pending_id) {
+                self.loading_channel = Some(pending_id);
+                self.show_skeleton = false;
+                self.arm_skeleton_timer(pending_id, cx);
+            }
+            if self.show_skeleton {
+                self.rows.set(
+                    (0..MEMBER_SKELETON_ROWS).map(|_| Row::Skeleton).collect(),
+                    cx,
+                );
+            }
+            return;
+        }
+        self.loading_channel = None;
+        self.show_skeleton = false;
+        self._skeleton_timer = None;
         self.active_context = match self.source {
             MemberSource::Channel => {
                 active_channel_context(cx).map(|ctx| ProfileContext::Clan(ctx.clan_id))
@@ -195,6 +226,44 @@ impl MemberListPanel {
         let rows = compute_rows(self.source, cx);
         self.rows.set(rows, cx);
     }
+
+    fn arm_skeleton_timer(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        self._skeleton_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(MEMBER_SKELETON_DELAY_MS))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.loading_channel == Some(channel_id) && !this.show_skeleton {
+                    this.show_skeleton = true;
+                    this.recompute(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+}
+
+fn pending_filter_channel(cx: &App) -> Option<ChannelId> {
+    if matches!(
+        Router::global(cx).read(cx).route(),
+        Route::DirectMessage { .. } | Route::Direct | Route::Friends
+    ) {
+        return None;
+    }
+    let channels = ChannelList::global(cx);
+    let channels = channels.read(cx);
+    let channel = channels.active_channel()?;
+    let is_thread = channel.parent_id.map(|p| !p.is_zero()).unwrap_or(false);
+    if !(channel.private || is_thread) {
+        return None;
+    }
+    let channel_id = channel.id;
+    let store = ChannelMembersStore::global(cx);
+    let store = store.read(cx);
+    if store.has_channel(channel_id) || !store.is_loading(channel_id) {
+        return None;
+    }
+    Some(channel_id)
 }
 
 fn shows_clan(clan_id: ClanId, cx: &App) -> bool {
@@ -534,6 +603,22 @@ fn render_header(theme: &Theme, locale: &str, kind: &HeaderKind, count: usize) -
         .into_any_element()
 }
 
+fn render_member_skeleton(theme: &Theme, ix: usize) -> AnyElement {
+    let fill = theme.bg_hover;
+    let widths = [70., 52., 84., 61., 45., 76., 58., 90., 66., 50.];
+    let name_width = widths[ix % widths.len()];
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(9.))
+        .px_4()
+        .h(px(48.))
+        .child(div().size(px(32.)).rounded_full().bg(fill).flex_shrink_0())
+        .child(div().h(px(14.)).w(px(name_width)).rounded(px(4.)).bg(fill))
+        .into_any_element()
+}
+
 fn render_member(
     theme: &Theme,
     member: &MemberRow,
@@ -704,6 +789,7 @@ impl Render for MemberListPanel {
                         &settings,
                         panel_weak.clone(),
                     ),
+                    Some(Row::Skeleton) => render_member_skeleton(&theme, ix),
                     None => div().into_any_element(),
                 })
                 .collect::<Vec<_>>()

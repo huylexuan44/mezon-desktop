@@ -64,12 +64,14 @@ impl PermissionStore {
     }
 
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
-        cx.try_global::<GlobalPermissionStore>().map(|g| g.0.clone())
+        cx.try_global::<GlobalPermissionStore>()
+            .map(|g| g.0.clone())
     }
 
     fn new(api: Arc<AppApi>, auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
             if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
+                this.load_permission_catalog(cx);
                 this.load_clan_permissions(*clan_id, cx);
             }
         });
@@ -102,9 +104,7 @@ impl PermissionStore {
                     was_connected = true;
                     if this
                         .update(cx, |this, cx| {
-                            this.catalog_loaded = false;
                             this.max_level_by_clan.clear();
-                            this.load_permission_catalog(cx);
                             if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
                                 this.load_clan_permissions(clan_id, cx);
                             }
@@ -158,6 +158,10 @@ impl PermissionStore {
         }
         let max_level = self.max_level_by_clan.get(&clan_id).copied();
         self.has_permission_level(max_level, slug)
+    }
+
+    pub fn has_clan_permissions_loaded(&self, clan_id: ClanId, cx: &App) -> bool {
+        self.is_clan_owner(clan_id, cx) || self.max_level_by_clan.contains_key(&clan_id)
     }
 
     pub fn clan_settings_permissions(&self, clan_id: ClanId, cx: &App) -> ClanSettingsPermissions {

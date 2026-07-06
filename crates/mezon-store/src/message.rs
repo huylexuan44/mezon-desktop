@@ -1,11 +1,15 @@
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::SharedString;
-use mezon_client::transport::{ApiMessageContent, ApiMessageReaction, ContentToken};
+use gpui::{Rgba, SharedString};
+use mezon_client::transport::{
+    ApiMessageContent, ApiMessageReaction, ContentToken, is_here_user_id,
+};
 
 use crate::album_layout::AlbumLayout;
 use crate::config::AppConfig;
-use crate::ids::{MessageId, UserId};
+use crate::ids::{ChannelId, MessageId, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
@@ -17,6 +21,9 @@ pub struct MessageAttachment {
     pub height: u32,
     pub thumbnail: String,
     pub duration: i32,
+    pub size: u64,
+    pub size_label: SharedString,
+    pub presign_pending: bool,
     pub proxied_src: SharedString,
     pub thumbnail_proxied: SharedString,
     pub display_width: f32,
@@ -24,7 +31,21 @@ pub struct MessageAttachment {
     pub tenor_mp4: Option<SharedString>,
 }
 
+pub fn format_file_size(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1} kB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 impl MessageAttachment {
+    pub fn is_audio(&self) -> bool {
+        self.filetype.contains("audio") && !self.is_unsupported_media()
+    }
+
     pub fn is_image(&self) -> bool {
         self.filetype.starts_with("image/")
             || matches!(
@@ -97,6 +118,7 @@ pub enum MessageCode {
     ShareContact,
     Location,
     Poll,
+    DeleteThread,
     Unknown(i32),
 }
 
@@ -122,6 +144,7 @@ impl MessageCode {
             16 => MessageCode::ShareContact,
             17 => MessageCode::Location,
             18 => MessageCode::Poll,
+            19 => MessageCode::DeleteThread,
             other => MessageCode::Unknown(other),
         }
     }
@@ -134,6 +157,7 @@ impl MessageCode {
                 | MessageCode::CreateThread
                 | MessageCode::CreatePin
                 | MessageCode::AuditLog
+                | MessageCode::DeleteThread
         )
     }
 
@@ -150,7 +174,6 @@ impl MessageCode {
     }
 }
 
-/// A reply/reference shown above a message ("replying to …").
 #[derive(Debug, Clone, Default)]
 pub struct MessageReference {
     pub message_ref_id: MessageId,
@@ -158,6 +181,7 @@ pub struct MessageReference {
     pub sender_name: String,
     pub sender_avatar: String,
     pub content: String,
+    pub content_preview: SharedString,
     pub has_attachment: bool,
 }
 
@@ -169,7 +193,6 @@ pub struct ReactionSender {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaction {
-    /// Aggregation key (emoji id when present, else shortname).
     pub key: String,
     pub emoji: SharedString,
     pub emoji_id: SharedString,
@@ -240,7 +263,15 @@ pub struct MentionTarget {
     pub role_id: Option<String>,
 }
 
-/// An inline rich-text span produced from a message's content tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkKind {
+    #[default]
+    Plain,
+    YouTube,
+    Facebook,
+    TikTok,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageSpan {
     Text(SharedString),
@@ -253,6 +284,7 @@ pub enum MessageSpan {
     Link {
         text: SharedString,
         url: String,
+        kind: LinkKind,
     },
     Mention {
         display: SharedString,
@@ -266,6 +298,17 @@ pub enum MessageSpan {
     Emoji {
         name: SharedString,
         emoji_id: String,
+        src: SharedString,
+    },
+    Canvas {
+        title: SharedString,
+        clan_id: String,
+        channel_id: String,
+        canvas_id: String,
+    },
+    Heading {
+        level: u8,
+        text: SharedString,
     },
 }
 
@@ -275,6 +318,142 @@ pub struct OgpPreview {
     pub title: SharedString,
     pub description: SharedString,
     pub image_proxied: SharedString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallLogType {
+    StartCall,
+    TimeoutCall,
+    FinishCall,
+    RejectCall,
+    CancelCall,
+    Unknown(i32),
+}
+
+impl CallLogType {
+    pub fn from_raw(raw: i32) -> Self {
+        match raw {
+            1 => CallLogType::StartCall,
+            2 => CallLogType::TimeoutCall,
+            3 => CallLogType::FinishCall,
+            4 => CallLogType::RejectCall,
+            5 => CallLogType::CancelCall,
+            other => CallLogType::Unknown(other),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            CallLogType::StartCall => 1,
+            CallLogType::TimeoutCall => 2,
+            CallLogType::FinishCall => 3,
+            CallLogType::RejectCall => 4,
+            CallLogType::CancelCall => 5,
+            CallLogType::Unknown(other) => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallLog {
+    pub is_video: bool,
+    pub log_type: CallLogType,
+    pub show_call_back: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedAuthor {
+    pub name: SharedString,
+    pub icon_proxied: SharedString,
+    pub url: Option<SharedString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedImage {
+    pub url_proxied: SharedString,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedFooter {
+    pub text: SharedString,
+    pub icon_proxied: SharedString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedField {
+    pub name: SharedString,
+    pub value: SharedString,
+    pub inline: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Embed {
+    pub accent: Option<Rgba>,
+    pub title: SharedString,
+    pub url: Option<SharedString>,
+    pub author: Option<EmbedAuthor>,
+    pub description_spans: Vec<MessageSpan>,
+    pub thumbnail_proxied: SharedString,
+    pub image: Option<EmbedImage>,
+    pub footer: Option<EmbedFooter>,
+    pub fields: Arc<[EmbedField]>,
+    pub timestamp: SharedString,
+    pub footer_date: SharedString,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageButton {
+    pub label: SharedString,
+    pub style: i32,
+    pub url: Option<SharedString>,
+    pub disable: bool,
+    pub id: Option<SharedString>,
+    pub icon: Option<SharedString>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSelectOption {
+    pub label: SharedString,
+    pub value: SharedString,
+    pub description: Option<SharedString>,
+    pub default: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSelect {
+    pub select_type: i32,
+    pub options: Vec<MessageSelectOption>,
+    pub placeholder: Option<SharedString>,
+    pub min_options: Option<i32>,
+    pub max_options: Option<i32>,
+    pub disabled: bool,
+    pub id: Option<SharedString>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MessageComponent {
+    Button(MessageButton),
+    Select(MessageSelect),
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageComponentRow {
+    pub components: Vec<MessageComponent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InvitePreview {
+    pub title: SharedString,
+    pub image_proxied: SharedString,
+    pub banner_proxied: SharedString,
+    pub member_count: i64,
+    pub is_community: bool,
+    pub clan_id: Option<String>,
+    pub url: String,
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,10 +503,44 @@ pub struct PollDetail {
     pub voters_by_answer: Vec<Vec<PollVoter>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RichRunKind {
+    Bold,
+    Code,
+    Link,
+    Mention,
+    Hashtag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RichClick {
+    Link(SharedString),
+    Mention(UserId),
+    Channel(ChannelId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichRun {
+    pub range: Range<usize>,
+    pub kind: RichRunKind,
+    pub click: Option<RichClick>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichLayout {
+    pub text: SharedString,
+    pub runs: Arc<[RichRun]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenTransaction {
+    pub title: SharedString,
+    pub detail: SharedString,
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
-    /// Stable GPUI row key — kept at the optimistic temp id through ack reconcile.
     pub row_anchor_id: MessageId,
     pub content: String,
     pub sender_id: String,
@@ -347,9 +560,20 @@ pub struct Message {
     pub combined_with_prev: bool,
     pub highlights_viewer_direct: bool,
     pub send_failed: bool,
-    pub ogp: Option<OgpPreview>,
-    pub poll: Option<PollData>,
+    pub ogp: Option<Box<OgpPreview>>,
+    pub poll: Option<Box<PollData>>,
+    pub call_log: Option<CallLog>,
+    pub embeds: Arc<[Embed]>,
+    pub components: Arc<[MessageComponentRow]>,
+    pub is_card: bool,
+    pub topic_id: Option<ChannelId>,
+    pub topic_creator_id: Option<UserId>,
+    pub invite: Option<Box<InvitePreview>>,
+    pub is_only_emoji: bool,
+    pub is_deleted_placeholder: bool,
     pub spans: Vec<MessageSpan>,
+    pub rich_layout: Option<Arc<RichLayout>>,
+    pub token_transaction: Option<Box<TokenTransaction>>,
     pub mention_targets: Vec<MentionTarget>,
     pub references: Vec<MessageReference>,
     pub reactions: Vec<Reaction>,
@@ -599,7 +823,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
         Hashtag,
         Emoji,
         Markdown,
-        Link,
+        Link(LinkKind),
     }
     let mut toks: Vec<(i64, i64, Kind, ContentToken)> = Vec::new();
     let collect =
@@ -616,7 +840,9 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     collect(&content.hg, Kind::Hashtag, &mut toks);
     collect(&content.ej, Kind::Emoji, &mut toks);
     collect(&content.mk, Kind::Markdown, &mut toks);
-    collect(&content.lk, Kind::Link, &mut toks);
+    collect(&content.lk, Kind::Link(LinkKind::Plain), &mut toks);
+    collect(&content.vk, Kind::Link(LinkKind::Plain), &mut toks);
+    collect(&content.lky, Kind::Link(LinkKind::YouTube), &mut toks);
     toks.sort_by_key(|t| t.0);
 
     let mut spans: Vec<MessageSpan> = Vec::new();
@@ -660,13 +886,16 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
             Kind::Emoji => spans.push(MessageSpan::Emoji {
                 name: inner.into(),
                 emoji_id: tok.emojiid.clone().unwrap_or_default(),
+                src: SharedString::default(),
             }),
-            Kind::Link => {
+            Kind::Link(link_kind) => {
                 let url = tok.url.clone().unwrap_or_else(|| inner.clone());
-                spans.push(MessageSpan::Link {
-                    text: inner.into(),
+                spans.push(resolve_link_span(
+                    inner.into(),
                     url,
-                });
+                    link_kind,
+                    &content.cvtt,
+                ));
             }
             Kind::Markdown => {
                 let ty = tok.kind.as_deref().unwrap_or("");
@@ -677,12 +906,14 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                         language: None,
                         text: strip_marker(&inner, "```").into(),
                     }),
-                    "lk" | "lk_yt" | "lk_fb" | "lk_tt" => {
+                    "lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" => {
                         let url = tok.url.clone().unwrap_or_else(|| inner.clone());
-                        spans.push(MessageSpan::Link {
-                            text: inner.into(),
+                        spans.push(resolve_link_span(
+                            inner.into(),
                             url,
-                        });
+                            link_kind_from_marker(ty),
+                            &content.cvtt,
+                        ));
                     }
                     "lk_ogp" => {}
                     _ => spans.push(MessageSpan::Text(inner.into())),
@@ -695,7 +926,150 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
     if last < total {
         spans.push(MessageSpan::Text(slice(last, total).into()));
     }
-    spans
+    apply_headings(spans)
+}
+
+fn link_kind_from_marker(marker: &str) -> LinkKind {
+    match marker {
+        "lk_yt" => LinkKind::YouTube,
+        "lk_fb" => LinkKind::Facebook,
+        "lk_tt" => LinkKind::TikTok,
+        _ => LinkKind::Plain,
+    }
+}
+
+struct ChannelUrlIds {
+    clan_id: String,
+    channel_id: String,
+    canvas_id: Option<String>,
+}
+
+fn extract_channel_url_ids(url: &str) -> Option<ChannelUrlIds> {
+    let marker = "/chat/clans/";
+    let idx = url.find(marker)?;
+    let mut parts = url[idx + marker.len()..].split('/');
+    let clan_id = parts.next()?;
+    if clan_id.is_empty() || !clan_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if parts.next()? != "channels" {
+        return None;
+    }
+    let channel_id = parts.next()?;
+    if channel_id.is_empty() || !channel_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let canvas_id = match parts.next() {
+        Some("canvas") => parts
+            .next()
+            .map(|seg| seg.split(['?', '#']).next().unwrap_or(seg))
+            .filter(|seg| !seg.is_empty())
+            .map(str::to_string),
+        _ => None,
+    };
+    Some(ChannelUrlIds {
+        clan_id: clan_id.to_string(),
+        channel_id: channel_id.to_string(),
+        canvas_id,
+    })
+}
+
+fn resolve_link_span(
+    text: SharedString,
+    url: String,
+    kind: LinkKind,
+    cvtt: &HashMap<String, String>,
+) -> MessageSpan {
+    if let Some(ids) = extract_channel_url_ids(&url) {
+        if let Some(canvas_id) = ids.canvas_id {
+            if let Some(title) = cvtt.get(&canvas_id).filter(|t| !t.is_empty()) {
+                return MessageSpan::Canvas {
+                    title: title.clone().into(),
+                    clan_id: ids.clan_id,
+                    channel_id: ids.channel_id,
+                    canvas_id,
+                };
+            }
+            return MessageSpan::Link { text, url, kind };
+        }
+        return MessageSpan::Hashtag {
+            display: text,
+            channel_id: Some(ids.channel_id),
+        };
+    }
+    MessageSpan::Link { text, url, kind }
+}
+
+fn apply_headings(spans: Vec<MessageSpan>) -> Vec<MessageSpan> {
+    if !spans
+        .iter()
+        .any(|span| matches!(span, MessageSpan::Text(t) if text_has_heading_line(t)))
+    {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        match span {
+            MessageSpan::Text(t) if text_has_heading_line(&t) => {
+                split_text_headings(&t, &mut out);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn text_has_heading_line(text: &str) -> bool {
+    text.split('\n')
+        .any(|line| parse_heading_line(line).is_some())
+}
+
+fn parse_heading_line(line: &str) -> Option<(u8, &str)> {
+    let hashes = line.bytes().take_while(|&b| b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &line[hashes..];
+    let body = rest.trim_start_matches([' ', '\t']);
+    if body.len() == rest.len() || body.is_empty() {
+        return None;
+    }
+    Some((hashes as u8, body))
+}
+
+fn split_text_headings(text: &str, out: &mut Vec<MessageSpan>) {
+    let mut buf = String::new();
+    for line in text.split('\n') {
+        if let Some((level, body)) = parse_heading_line(line) {
+            if !buf.is_empty() {
+                out.push(MessageSpan::Text(std::mem::take(&mut buf).into()));
+            }
+            out.push(MessageSpan::Heading {
+                level,
+                text: body.to_string().into(),
+            });
+        } else {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            buf.push_str(line);
+        }
+    }
+    if !buf.is_empty() {
+        out.push(MessageSpan::Text(buf.into()));
+    }
+}
+
+pub fn spans_only_emoji(spans: &[MessageSpan]) -> bool {
+    let mut has_emoji = false;
+    for span in spans {
+        match span {
+            MessageSpan::Emoji { .. } => has_emoji = true,
+            MessageSpan::Text(t) if t.trim().is_empty() => {}
+            _ => return false,
+        }
+    }
+    has_emoji
 }
 
 fn strip_marker(s: &str, marker: &str) -> String {
@@ -704,6 +1078,142 @@ fn strip_marker(s: &str, marker: &str) -> String {
         .and_then(|r| r.strip_suffix(marker))
         .unwrap_or(s);
     trimmed.to_string()
+}
+
+pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
+    match content.split_once(" | ") {
+        Some((title, detail)) => TokenTransaction {
+            title: title.trim().to_string().into(),
+            detail: detail.trim().to_string().into(),
+        },
+        None => TokenTransaction {
+            title: content.trim().to_string().into(),
+            detail: SharedString::default(),
+        },
+    }
+}
+
+pub(crate) fn reply_preview_line(content: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut first = true;
+    for word in content.split_whitespace() {
+        if !first {
+            out.push(' ');
+            chars += 1;
+        }
+        first = false;
+        for ch in word.chars() {
+            if chars >= MAX_CHARS {
+                return out;
+            }
+            out.push(ch);
+            chars += 1;
+        }
+    }
+    out
+}
+
+fn resolve_link_url(url: &str, text: &str) -> String {
+    if !url.is_empty() {
+        return url.to_string();
+    }
+    text.to_string()
+}
+
+fn rich_channel_id(raw: &str) -> Option<ChannelId> {
+    raw.parse::<i64>()
+        .ok()
+        .map(ChannelId)
+        .filter(|id| !id.is_zero())
+}
+
+pub fn build_rich_layout(spans: &[MessageSpan]) -> Option<Arc<RichLayout>> {
+    if spans.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    let mut runs: Vec<RichRun> = Vec::new();
+    for span in spans {
+        match span {
+            MessageSpan::Text(t) => text.push_str(t),
+            MessageSpan::Emoji { name, .. } => text.push_str(name),
+            MessageSpan::Bold(t) => {
+                let start = text.len();
+                text.push_str(t);
+                runs.push(RichRun {
+                    range: start..text.len(),
+                    kind: RichRunKind::Bold,
+                    click: None,
+                });
+            }
+            MessageSpan::Code(t) => {
+                let start = text.len();
+                text.push_str(t);
+                runs.push(RichRun {
+                    range: start..text.len(),
+                    kind: RichRunKind::Code,
+                    click: None,
+                });
+            }
+            MessageSpan::Link { text: t, url, .. } => {
+                let start = text.len();
+                text.push_str(t);
+                runs.push(RichRun {
+                    range: start..text.len(),
+                    kind: RichRunKind::Link,
+                    click: Some(RichClick::Link(resolve_link_url(url, t).into())),
+                });
+            }
+            MessageSpan::Mention {
+                display,
+                user_id,
+                role_id,
+            } => {
+                let start = text.len();
+                text.push_str(display);
+                let click = if role_id.as_deref().is_none_or(str::is_empty) {
+                    user_id
+                        .as_deref()
+                        .filter(|u| !u.is_empty() && *u != "0" && !is_here_user_id(u))
+                        .and_then(|u| u.parse::<i64>().ok())
+                        .map(UserId)
+                        .map(RichClick::Mention)
+                } else {
+                    None
+                };
+                runs.push(RichRun {
+                    range: start..text.len(),
+                    kind: RichRunKind::Mention,
+                    click,
+                });
+            }
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => {
+                let start = text.len();
+                text.push_str(display);
+                let click = channel_id
+                    .as_deref()
+                    .and_then(rich_channel_id)
+                    .map(RichClick::Channel);
+                runs.push(RichRun {
+                    range: start..text.len(),
+                    kind: RichRunKind::Hashtag,
+                    click,
+                });
+            }
+            MessageSpan::CodeBlock { .. } => {}
+            MessageSpan::Canvas { title, .. } => text.push_str(title),
+            MessageSpan::Heading { text: heading, .. } => text.push_str(heading),
+        }
+    }
+    Some(Arc::new(RichLayout {
+        text: text.into(),
+        runs: runs.into(),
+    }))
 }
 
 pub fn recompute_message_grouping(messages: &mut [Message]) {
@@ -754,6 +1264,7 @@ impl Message {
         };
         let sender_id: String = sender_id.into();
         let sender_user_id = sender_id.parse::<i64>().ok().map(UserId);
+        let rich_layout = build_rich_layout(&spans);
         Self {
             id,
             row_anchor_id: id,
@@ -777,7 +1288,18 @@ impl Message {
             send_failed: false,
             ogp: None,
             poll: None,
+            call_log: None,
+            embeds: Vec::new().into(),
+            components: Vec::new().into(),
+            is_card: false,
+            topic_id: None,
+            topic_creator_id: None,
+            invite: None,
+            is_only_emoji: false,
+            is_deleted_placeholder: false,
             spans,
+            rich_layout,
+            token_transaction: None,
             mention_targets: Vec::new(),
             references: Vec::new(),
             reactions: Vec::new(),
@@ -785,6 +1307,15 @@ impl Message {
             album_layout: None,
             viewer_media: Vec::new().into(),
         }
+    }
+
+    pub fn is_sending(&self) -> bool {
+        self.id.is_optimistic() && !self.send_failed
+    }
+
+    pub fn token_transaction_parts(&self) -> (SharedString, SharedString) {
+        let tx = split_token_transaction(&self.content);
+        (tx.title, tx.detail)
     }
 
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
@@ -808,7 +1339,17 @@ impl Message {
     }
 
     pub fn with_spans(mut self, spans: Vec<MessageSpan>) -> Self {
+        self.rich_layout = build_rich_layout(&spans);
+        self.is_only_emoji = spans_only_emoji(&spans);
         self.spans = spans;
+        self
+    }
+
+    pub fn with_token_transaction(
+        mut self,
+        token_transaction: Option<Box<TokenTransaction>>,
+    ) -> Self {
+        self.token_transaction = token_transaction;
         self
     }
 
@@ -843,13 +1384,58 @@ impl Message {
         self
     }
 
-    pub fn with_ogp(mut self, ogp: Option<OgpPreview>) -> Self {
+    pub fn with_ogp(mut self, ogp: Option<Box<OgpPreview>>) -> Self {
         self.ogp = ogp;
         self
     }
 
-    pub fn with_poll(mut self, poll: Option<PollData>) -> Self {
+    pub fn with_poll(mut self, poll: Option<Box<PollData>>) -> Self {
         self.poll = poll;
+        self
+    }
+
+    pub fn with_call_log(mut self, call_log: Option<CallLog>) -> Self {
+        self.call_log = call_log;
+        self
+    }
+
+    pub fn with_embeds(mut self, embeds: Arc<[Embed]>) -> Self {
+        self.embeds = embeds;
+        self
+    }
+
+    pub fn with_components(mut self, components: Arc<[MessageComponentRow]>) -> Self {
+        self.components = components;
+        self
+    }
+
+    pub fn with_is_card(mut self, is_card: bool) -> Self {
+        self.is_card = is_card;
+        self
+    }
+
+    pub fn with_topic(
+        mut self,
+        topic_id: Option<ChannelId>,
+        topic_creator_id: Option<UserId>,
+    ) -> Self {
+        self.topic_id = topic_id;
+        self.topic_creator_id = topic_creator_id;
+        self
+    }
+
+    pub fn with_invite(mut self, invite: Option<Box<InvitePreview>>) -> Self {
+        self.invite = invite;
+        self
+    }
+
+    pub fn with_only_emoji(mut self, is_only_emoji: bool) -> Self {
+        self.is_only_emoji = is_only_emoji;
+        self
+    }
+
+    pub fn with_deleted_placeholder(mut self, is_deleted_placeholder: bool) -> Self {
+        self.is_deleted_placeholder = is_deleted_placeholder;
         self
     }
 
@@ -1245,6 +1831,97 @@ mod tests {
     }
 
     #[test]
+    fn delete_thread_maps_from_raw_and_classifies_as_system() {
+        assert_eq!(MessageCode::from_raw(19), MessageCode::DeleteThread);
+        assert!(MessageCode::DeleteThread.is_system());
+        assert!(!MessageCode::DeleteThread.is_user_timeline());
+    }
+
+    #[test]
+    fn is_audio_true_for_audio_mime_false_for_unsupported_and_others() {
+        assert!(attachment("audio/mpeg", "https://cdn.mezon.ai/x.mp3").is_audio());
+        assert!(!attachment("audio/wma", "https://cdn.mezon.ai/x.wma").is_audio());
+        assert!(!attachment("image/png", "https://cdn.mezon.ai/x.png").is_audio());
+    }
+
+    #[test]
+    fn format_file_size_matches_react_units() {
+        assert_eq!(format_file_size(500), "500 bytes");
+        assert_eq!(format_file_size(1500), "1.5 kB");
+        assert_eq!(format_file_size(2_500_000), "2.5 MB");
+    }
+
+    fn link_token(url: &str, s: i64, e: i64) -> ContentToken {
+        ContentToken {
+            url: Some(url.into()),
+            ..token(s, e)
+        }
+    }
+
+    #[test]
+    fn parse_spans_vk_token_renders_as_link() {
+        let content = ApiMessageContent {
+            t: "join vc".into(),
+            vk: vec![link_token("https://mezon.ai/vc", 0, 7)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Link { .. }]
+        ));
+    }
+
+    #[test]
+    fn parse_spans_channel_url_becomes_hashtag() {
+        let url = "https://mezon.ai/chat/clans/1234567890123456789/channels/9876543210987654321";
+        let content = ApiMessageContent {
+            t: "here".into(),
+            lk: vec![link_token(url, 0, 4)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Hashtag {
+                channel_id: Some(id),
+                ..
+            }] if id == "9876543210987654321"
+        ));
+    }
+
+    #[test]
+    fn parse_spans_heading_line_becomes_heading() {
+        let content = ApiMessageContent {
+            t: "# Title".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Heading {
+                level: 1,
+                text: "Title".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_spans_canvas_url_with_cvtt_title_becomes_canvas() {
+        let url = "https://mezon.ai/chat/clans/1234567890123456789/channels/9876543210987654321/canvas/abc";
+        let mut cvtt = HashMap::new();
+        cvtt.insert("abc".to_string(), "My Canvas".to_string());
+        let content = ApiMessageContent {
+            t: "doc".into(),
+            lk: vec![link_token(url, 0, 3)],
+            cvtt,
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Canvas { title, canvas_id, .. }]
+                if title == "My Canvas" && canvas_id == "abc"
+        ));
+    }
+
+    #[test]
     fn unsupported_media_takes_precedence_over_video_and_image() {
         let avi = attachment("video/avi", "https://cdn.mezon.ai/x.avi");
         assert!(avi.is_unsupported_media());
@@ -1332,5 +2009,54 @@ mod tests {
             Some(real).filter(|id| !id.is_optimistic()),
             Some(MessageId(123))
         );
+    }
+
+    #[test]
+    fn rich_layout_mention_text_matches_concatenation_and_marks_range() {
+        let spans = vec![
+            MessageSpan::Text("hi ".into()),
+            MessageSpan::Mention {
+                display: "@bob".into(),
+                user_id: Some("42".into()),
+                role_id: None,
+            },
+            MessageSpan::Text(" !".into()),
+        ];
+        let layout = build_rich_layout(&spans).expect("rich layout");
+        assert_eq!(layout.text.as_ref(), "hi @bob !");
+        assert_eq!(layout.runs.len(), 1);
+        let run = &layout.runs[0];
+        assert_eq!(run.kind, RichRunKind::Mention);
+        assert_eq!(run.range, 3..7);
+        assert_eq!(&layout.text[run.range.clone()], "@bob");
+        assert_eq!(run.click, Some(RichClick::Mention(UserId(42))));
+    }
+
+    #[test]
+    fn rich_layout_link_and_code_carry_kind_and_click() {
+        let spans = vec![
+            MessageSpan::Code("x".into()),
+            MessageSpan::Text(" ".into()),
+            MessageSpan::Link {
+                text: "site".into(),
+                url: "https://mezon.ai".into(),
+                kind: LinkKind::Plain,
+            },
+        ];
+        let layout = build_rich_layout(&spans).expect("rich layout");
+        assert_eq!(layout.text.as_ref(), "x site");
+        assert_eq!(layout.runs.len(), 2);
+        assert_eq!(layout.runs[0].kind, RichRunKind::Code);
+        assert!(layout.runs[0].click.is_none());
+        assert_eq!(layout.runs[1].kind, RichRunKind::Link);
+        assert_eq!(
+            layout.runs[1].click,
+            Some(RichClick::Link("https://mezon.ai".into()))
+        );
+    }
+
+    #[test]
+    fn rich_layout_none_for_empty_spans() {
+        assert!(build_rich_layout(&[]).is_none());
     }
 }

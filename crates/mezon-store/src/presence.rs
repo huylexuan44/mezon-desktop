@@ -8,6 +8,7 @@ use gpui::{
 };
 use mezon_client::RealtimeEvent;
 
+use crate::badge::BadgeService;
 use crate::channel::ChannelList;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -70,7 +71,10 @@ impl PresenceStore {
     }
 
     pub fn typing_users(&self, channel_id: ChannelId) -> Vec<SharedString> {
-        let now = Instant::now();
+        self.typing_users_at(channel_id, Instant::now())
+    }
+
+    fn typing_users_at(&self, channel_id: ChannelId, now: Instant) -> Vec<SharedString> {
         self.typing_by_channel
             .get(&channel_id)
             .map(|users| {
@@ -144,13 +148,20 @@ impl PresenceStore {
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::MessageTyping(e) => {
-                let cid = ChannelId(e.channel_id);
-                let channel_id = self.apply_typing(
-                    cid,
-                    &e.sender_display_name,
-                    &e.sender_username,
-                    UserId(e.sender_id),
-                );
+                let sender = UserId(e.sender_id);
+                let is_self = BadgeService::try_global(cx)
+                    .and_then(|svc| svc.read(cx).current_user_id(cx))
+                    .is_some_and(|me| me == sender);
+                if is_self {
+                    return;
+                }
+                let cid = if e.topic_id != 0 {
+                    ChannelId(e.topic_id)
+                } else {
+                    ChannelId(e.channel_id)
+                };
+                let channel_id =
+                    self.apply_typing(cid, &e.sender_display_name, &e.sender_username, sender);
                 self.schedule_typing_sweep(cx);
                 cx.emit(PresenceEvent::TypingChanged { channel_id });
             }
@@ -217,7 +228,10 @@ impl PresenceStore {
     }
 
     fn sweep_expired_typing(&mut self) -> Vec<ChannelId> {
-        let now = Instant::now();
+        self.sweep_expired_typing_at(Instant::now())
+    }
+
+    fn sweep_expired_typing_at(&mut self, now: Instant) -> Vec<ChannelId> {
         let mut expired = Vec::new();
         self.typing_by_channel.retain(|channel_id, users| {
             let before = users.len();
@@ -387,6 +401,7 @@ mod tests {
     #[test]
     fn typing_sweep_removes_expired_entries() {
         let mut store = empty_store();
+        let base = Instant::now();
         store
             .typing_by_channel
             .entry(ChannelId(1))
@@ -395,12 +410,13 @@ mod tests {
                 UserId(1),
                 TypingEntry {
                     name: "Old".to_owned(),
-                    at: Instant::now() - Duration::from_secs(10),
+                    at: base,
                 },
             );
-        let expired = store.sweep_expired_typing();
+        let future = base + TYPING_TTL + Duration::from_secs(1);
+        let expired = store.sweep_expired_typing_at(future);
         assert_eq!(expired, vec![ChannelId(1)]);
-        assert!(store.typing_users(ChannelId(1)).is_empty());
+        assert!(store.typing_users_at(ChannelId(1), future).is_empty());
     }
 
     #[test]

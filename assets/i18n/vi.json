@@ -3348,6 +3348,8 @@
   "notifications.empty.messages.description": "Mở hộp thư bằng cách nhấn CTRL+I và đánh dấu tin nhắn đầu tiên là đã đọc bằng CTRL+Shift+E.",
   "notifications.empty.messages.protip": "Mẹo:",
   "notifications.empty.messages.title": "Bạn đã xem hết rồi!",
+  "notifications.empty.topics.description": "Khi ai đó trả lời một chủ đề mà bạn tham gia, nó sẽ hiển thị ở đây.",
+  "notifications.empty.topics.title": "Chưa có cập nhật chủ đề nào",
   "notifications.inbox": "Hộp thư",
   "notifications.tabs.forYou": "Dành cho bạn",
   "notifications.tabs.mentions": "Nhắc đến",

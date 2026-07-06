@@ -313,8 +313,7 @@ impl VoiceStore {
     }
 
     fn flush_texture_drops(&self, mut window: Option<&mut Window>, cx: &mut App) {
-        let drops: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_drops.lock());
+        let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
@@ -433,7 +432,9 @@ impl VoiceStore {
 
     pub fn set_pip(&mut self, key: u64, handle: gpui::AnyWindowHandle, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
-            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            let _ = prev
+                .handle
+                .update(cx, |_, window, _| window.remove_window());
         }
         self.pip = Some(PipWindow { key, handle });
         self.sync_screen_full_res();
@@ -442,7 +443,9 @@ impl VoiceStore {
 
     pub fn close_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.pip.take() {
-            let _ = prev.handle.update(cx, |_, window, _| window.remove_window());
+            let _ = prev
+                .handle
+                .update(cx, |_, window, _| window.remove_window());
             self.sync_screen_full_res();
             cx.notify();
         }
@@ -810,6 +813,11 @@ impl VoiceStore {
 
     pub fn leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.teardown(Some(window), cx);
+        cx.notify();
+    }
+
+    pub fn logout_teardown(&mut self, cx: &mut Context<Self>) {
+        self.teardown(None, cx);
         cx.notify();
     }
 

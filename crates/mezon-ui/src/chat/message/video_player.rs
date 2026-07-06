@@ -312,6 +312,16 @@ impl VideoPlayerView {
     }
 
     #[cfg(target_os = "macos")]
+    pub fn release_textures(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn release_textures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(frame) = self.shared.borrow_mut().frame.take() {
+            cx.drop_image(frame, Some(window));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn frame_child(&self) -> Option<AnyElement> {
         self.shared
             .borrow()

@@ -92,8 +92,12 @@ fn run_apm(
     let mut apm = AudioProcessingModule::new(true, true, true, true);
     loop {
         let event = flume::Selector::new()
-            .recv(&reverse_rx, |r| r.map(Event::Reverse).unwrap_or(Event::Stop))
-            .recv(&capture_rx, |r| r.map(Event::Capture).unwrap_or(Event::Stop))
+            .recv(&reverse_rx, |r| {
+                r.map(Event::Reverse).unwrap_or(Event::Stop)
+            })
+            .recv(&capture_rx, |r| {
+                r.map(Event::Capture).unwrap_or(Event::Stop)
+            })
             .wait();
         match event {
             Event::Reverse(mut chunk) => {

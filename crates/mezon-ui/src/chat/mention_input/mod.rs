@@ -8,8 +8,8 @@ use gpui::{
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanList, EmojiEvent, EmojiStore, MENTION_HERE_ID,
-    OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag, OutgoingMention, Settings,
-    StickerEvent, StickerStore,
+    MessageSpan, OutgoingAttachment, OutgoingContent, OutgoingEmoji, OutgoingHashtag,
+    OutgoingMention, Settings, StickerEvent, StickerStore,
 };
 
 use attachments::{PendingAttachment, acceptable, build_pending};
@@ -129,6 +129,7 @@ struct StickerCellRaw {
 #[derive(Clone, PartialEq, Eq)]
 pub enum MentionInputEvent {
     Submit,
+    Cancel,
     SendSticker { url: String, filename: String },
 }
 
@@ -154,6 +155,7 @@ pub struct MentionInput {
     avatar_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
+    compact: bool,
     _input_sub: Subscription,
     _emoji_sub: Option<Subscription>,
     _sticker_sub: Option<Subscription>,
@@ -168,8 +170,34 @@ impl MentionInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::build(placeholder, settings, false, window, cx)
+    }
+
+    pub fn new_edit(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        content: &str,
+        spans: &[MessageSpan],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::build(placeholder, settings, true, window, cx);
+        this.seed(content, spans, window, cx);
+        this
+    }
+
+    fn build(
+        placeholder: impl Into<SharedString>,
+        settings: Entity<Settings>,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let placeholder = placeholder.into();
-        let input = cx.new(|cx| MentionInputState::new(window, cx).placeholder(placeholder));
+        let input = cx.new(|cx| {
+            let state = MentionInputState::new(window, cx).placeholder(placeholder);
+            if compact { state.compact() } else { state }
+        });
         let input_sub = cx.subscribe_in(
             &input,
             window,
@@ -227,10 +255,30 @@ impl MentionInput {
             avatar_cache,
             settings,
             pending_attachments: Vec::new(),
+            compact,
             _input_sub: input_sub,
             _emoji_sub: emoji_sub,
             _sticker_sub: sticker_sub,
         }
+    }
+
+    fn seed(
+        &mut self,
+        content: &str,
+        spans: &[MessageSpan],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.committed = committed_from_spans(content, spans);
+        self.input.update(cx, |input, cx| {
+            input.set_value(content, window, cx);
+        });
+        self.sync_ranges(cx);
+    }
+
+    pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
+        let handle = self.input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
     }
 
     pub fn take_payload(
@@ -282,7 +330,6 @@ impl MentionInput {
             .collect();
         self.committed.clear();
         self.reset_popup();
-        self.pooled = None;
         self.picker_open = false;
         self.input.update(cx, |input, cx| {
             input.set_mention_spans(Vec::new(), cx);
@@ -401,6 +448,7 @@ impl MentionInput {
         self.query_len = 0;
         self.suggestions.clear();
         self.selected = 0;
+        self.pooled = None;
     }
 
     fn hide(&mut self, cx: &mut Context<Self>) {
@@ -419,16 +467,30 @@ impl MentionInput {
     }
 
     fn on_change(&mut self, cx: &mut Context<Self>) {
-        let content = self.input.read(cx).value().to_string();
+        let content = self.input.read(cx).value_shared();
         self.revalidate(&content, cx);
         self.check_trigger(&content, cx);
     }
 
     fn revalidate(&mut self, content: &str, cx: &mut Context<Self>) {
         let before = self.committed.len();
-        self.committed
-            .retain(|m| content.get(m.start..m.end) == Some(m.display.as_str()));
-        if self.committed.len() != before {
+        let mut reanchored = false;
+        self.committed.retain_mut(|token| {
+            if content.get(token.start..token.end) == Some(token.display.as_str()) {
+                return true;
+            }
+            let mut matches = content.match_indices(token.display.as_str());
+            match (matches.next(), matches.next()) {
+                (Some((offset, _)), None) => {
+                    token.start = offset;
+                    token.end = offset + token.display.len();
+                    reanchored = true;
+                    true
+                }
+                _ => false,
+            }
+        });
+        if reanchored || self.committed.len() != before {
             self.sync_ranges(cx);
         }
     }
@@ -483,7 +545,11 @@ impl MentionInput {
 
         if self.pooled != Some((at, sigil)) {
             self.refresh_pool(sigil, cx);
-            self.pooled = Some((at, sigil));
+            self.pooled = if self.pool_is_empty(sigil) {
+                None
+            } else {
+                Some((at, sigil))
+            };
         }
         self.active_at = Some(at);
         self.active_sigil = sigil;
@@ -506,6 +572,14 @@ impl MentionInput {
                 }
                 self.session_emojis = emoji_suggest_pool(cx);
             }
+        }
+    }
+
+    fn pool_is_empty(&self, sigil: Sigil) -> bool {
+        match sigil {
+            Sigil::At => self.session_members.is_empty(),
+            Sigil::Hash => self.session_channels.is_empty(),
+            Sigil::Colon => self.session_emojis.is_empty(),
         }
     }
 
@@ -759,7 +833,11 @@ impl MentionInput {
     }
 
     fn on_dismiss(&mut self, _: &MentionDismiss, _window: &mut Window, cx: &mut Context<Self>) {
-        self.hide(cx);
+        if self.popup_open() {
+            self.hide(cx);
+        } else if self.compact {
+            cx.emit(MentionInputEvent::Cancel);
+        }
     }
 
     fn render_suggestion_row(
@@ -902,6 +980,7 @@ impl MentionInput {
         let locale = self.locale(cx);
 
         let panel = div()
+            .image_cache(self.avatar_cache.clone())
             .id("emoji-picker")
             .absolute()
             .bottom_full()
@@ -962,6 +1041,7 @@ impl MentionInput {
         let locale = self.locale(cx);
 
         let panel = div()
+            .image_cache(self.avatar_cache.clone())
             .id("sticker-picker")
             .absolute()
             .bottom_full()
@@ -1014,6 +1094,69 @@ impl MentionInput {
     fn locale(&self, cx: &App) -> String {
         self.settings.read(cx).language.clone()
     }
+
+    fn build_suggestion_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let popup_bg = theme.tokens.bg_ping_member;
+        let border = theme.border;
+        let entity = cx.entity();
+        let count = self.suggestions.len();
+        let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
+        let locale = self.locale(cx);
+        let list = uniform_list(
+            "mention-suggestion-list",
+            count,
+            move |range, _window, cx| {
+                let theme = cx.theme().clone();
+                let this = entity.read(cx);
+                range
+                    .map(|ix| match this.suggestions.get(ix) {
+                        Some(suggestion) => {
+                            this.render_suggestion_row(&theme, &locale, ix, suggestion, &entity)
+                        }
+                        None => div().h(px(MENTION_ROW_PX)).into_any_element(),
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&self.suggestion_scroll)
+        .h(px(list_h))
+        .w_full();
+        deferred(
+            div()
+                .image_cache(self.avatar_cache.clone())
+                .id("mention-popup")
+                .absolute()
+                .bottom_full()
+                .left_0()
+                .right_0()
+                .mb(px(8.))
+                .p(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(border)
+                .bg(popup_bg)
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
+                .child(list),
+        )
+        .into_any_element()
+    }
+
+    fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.popup_open();
+        let popup = open.then(|| self.build_suggestion_popup(cx));
+        div()
+            .relative()
+            .w_full()
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_accept))
+            .on_action(cx.listener(Self::on_dismiss))
+            .child(MentionInputField::new(&self.input))
+            .when_some(popup, |this, popup| this.child(popup))
+            .into_any_element()
+    }
 }
 
 fn channel_suggest_pool(cx: &App) -> Vec<ChannelSuggestRaw> {
@@ -1060,6 +1203,61 @@ fn emoji_suggest_pool(cx: &App) -> Vec<EmojiSuggestRaw> {
             src: emoji.src.clone(),
         })
         .collect()
+}
+
+fn committed_from_spans(content: &str, spans: &[MessageSpan]) -> Vec<CommittedToken> {
+    let mut committed = Vec::new();
+    let mut search_from = 0usize;
+    for span in spans {
+        let (display, kind) = match span {
+            MessageSpan::Mention {
+                display,
+                user_id,
+                role_id,
+            } => (
+                display.to_string(),
+                TokenKind::Mention {
+                    user_id: user_id.clone().unwrap_or_default(),
+                    role_id: role_id.clone().unwrap_or_default(),
+                },
+            ),
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+            } => (
+                display.to_string(),
+                TokenKind::Hashtag {
+                    channel_id: channel_id.clone().unwrap_or_default(),
+                },
+            ),
+            MessageSpan::Emoji { name, emoji_id, .. } => (
+                name.to_string(),
+                TokenKind::Emoji {
+                    emoji_id: emoji_id.clone(),
+                },
+            ),
+            _ => continue,
+        };
+        if display.is_empty() {
+            continue;
+        }
+        let Some(rel) = content
+            .get(search_from..)
+            .and_then(|hay| hay.find(&display))
+        else {
+            continue;
+        };
+        let start = search_from + rel;
+        let end = start + display.len();
+        committed.push(CommittedToken {
+            kind,
+            display,
+            start,
+            end,
+        });
+        search_from = end;
+    }
+    committed
 }
 
 fn render_picker_header(theme: &Theme, label: &SharedString) -> AnyElement {
@@ -1147,10 +1345,11 @@ fn render_sticker_row(
 
 impl Render for MentionInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.compact {
+            return self.render_compact(cx);
+        }
         let open = self.popup_open();
         let theme = cx.theme();
-        let popup_bg = theme.tokens.bg_ping_member;
-        let border = theme.border;
         let toggle_color = if self.picker_open {
             theme.text_primary
         } else {
@@ -1164,49 +1363,7 @@ impl Render for MentionInput {
         let plus_color = theme.text_muted;
         let has_pending = !self.pending_attachments.is_empty();
 
-        let popup = open.then(|| {
-            let entity = cx.entity();
-            let count = self.suggestions.len();
-            let list_h = (count as f32 * MENTION_ROW_PX).min(MENTION_POPUP_MAX_PX);
-            let locale = self.locale(cx);
-            let list = uniform_list(
-                "mention-suggestion-list",
-                count,
-                move |range, _window, cx| {
-                    let theme = cx.theme().clone();
-                    let this = entity.read(cx);
-                    range
-                        .map(|ix| match this.suggestions.get(ix) {
-                            Some(suggestion) => {
-                                this.render_suggestion_row(&theme, &locale, ix, suggestion, &entity)
-                            }
-                            None => div().h(px(MENTION_ROW_PX)).into_any_element(),
-                        })
-                        .collect::<Vec<_>>()
-                },
-            )
-            .track_scroll(&self.suggestion_scroll)
-            .h(px(list_h))
-            .w_full();
-            deferred(
-                div()
-                    .id("mention-popup")
-                    .absolute()
-                    .bottom_full()
-                    .left_0()
-                    .right_0()
-                    .mb(px(8.))
-                    .p(px(4.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(border)
-                    .bg(popup_bg)
-                    .shadow_lg()
-                    .occlude()
-                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.hide(cx)))
-                    .child(list),
-            )
-        });
+        let popup = open.then(|| self.build_suggestion_popup(cx));
 
         let picker = self.picker_open.then(|| deferred(self.render_picker(cx)));
         let sticker_picker = self
@@ -1320,5 +1477,6 @@ impl Render for MentionInput {
             .w_full()
             .when_some(previews, |this, previews| this.child(previews))
             .child(input_area)
+            .into_any_element()
     }
 }
