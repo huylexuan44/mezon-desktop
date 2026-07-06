@@ -1348,6 +1348,7 @@ fn focus_main_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
@@ -1394,6 +1395,7 @@ fn strip_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
@@ -1439,6 +1441,7 @@ fn video_tile(
         .child(inner)
         .child(tile_label(theme, locale, cell))
         .child(tile_quality(cell))
+        .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
             participant_menu_trigger(&voice, cell.identity.clone()),
@@ -1543,6 +1546,33 @@ fn tile_quality(cell: &VideoCell) -> AnyElement {
                 .text_color(gpui::rgb(0xffffff)),
         )
         .into_any_element()
+}
+
+fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement> {
+    if !store.is_sound_active(&cell.identity) {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(6.))
+            .rounded_full()
+            .bg(gpui::rgb(ACCENT_BLUE))
+            .border_1()
+            .border_color(gpui::rgba(0xffffff33))
+            .shadow_lg()
+            .child(
+                Icon::new(IconName::VoiceSoundControlIcon)
+                    .size(px(16.))
+                    .text_color(gpui::rgb(0xffffff)),
+            )
+            .into_any_element(),
+    )
 }
 
 fn control_bar(
