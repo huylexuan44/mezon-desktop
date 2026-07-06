@@ -15,6 +15,7 @@ icons.workspace = true
 menu.workspace = true
 mezon-store.workspace = true
 mezon-video.workspace = true
+mezon-audio.workspace = true
 mezon-i18n.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

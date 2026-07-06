@@ -471,6 +471,7 @@ pub struct ApiAttachment {
     pub height: i32,
     pub thumbnail: String,
     pub duration: i32,
+    pub size: i32,
 }
 
 /// A channel attachment record returned by `ListChannelAttachment` (gallery /
@@ -525,6 +526,7 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
                 height: a.height,
                 thumbnail: a.thumbnail,
                 duration: a.duration,
+                size: a.size,
             })
             .collect(),
         Err(e) => {
@@ -782,6 +784,18 @@ pub struct ContentToken {
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub banner: Option<String>,
+    #[serde(default, deserialize_with = "opt_i64_flex::deserialize")]
+    pub member_count: Option<i64>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub is_community: bool,
+    #[serde(
+        default,
+        rename = "clanId",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub clan_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -825,6 +839,21 @@ mod opt_i32_flex {
             Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|v| v as i32)),
             Some(serde_json::Value::String(s)) if !s.is_empty() => Ok(s.parse::<i32>().ok()),
             _ => Ok(None),
+        }
+    }
+}
+
+mod i32_flex {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|v| v as i32).unwrap_or(0)),
+            Some(serde_json::Value::String(s)) => Ok(s.parse::<i32>().unwrap_or(0)),
+            _ => Ok(0),
         }
     }
 }
@@ -896,6 +925,212 @@ mod poll_answers {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiEmbedAuthor {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiEmbedThumbnail {
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiEmbedImage {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub width: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub height: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiEmbedFooter {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiEmbedField {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub inline: bool,
+    #[serde(default)]
+    pub inputs: Option<serde_json::Value>,
+    #[serde(default)]
+    pub shape: Option<serde_json::Value>,
+    #[serde(default)]
+    pub button: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiEmbed {
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub author: Option<ApiEmbedAuthor>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub thumbnail: Option<ApiEmbedThumbnail>,
+    #[serde(default)]
+    pub fields: Vec<ApiEmbedField>,
+    #[serde(default)]
+    pub image: Option<ApiEmbedImage>,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub footer: Option<ApiEmbedFooter>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiSelectOption {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiButtonComponent {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub disable: bool,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub style: Option<i32>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiSelectComponent {
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_i32_flex::deserialize"
+    )]
+    pub select_type: Option<i32>,
+    #[serde(default)]
+    pub options: Vec<ApiSelectOption>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub min_options: Option<i32>,
+    #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+    pub max_options: Option<i32>,
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
+    pub disabled: bool,
+    #[serde(default, rename = "valueSelected")]
+    pub value_selected: Option<ApiSelectOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub enum ApiComponentPayload {
+    Button(ApiButtonComponent),
+    Select(ApiSelectComponent),
+    Other(serde_json::Value),
+}
+
+impl Default for ApiComponentPayload {
+    fn default() -> Self {
+        ApiComponentPayload::Other(serde_json::Value::Null)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ApiMessageComponent {
+    pub component_type: i32,
+    pub id: Option<String>,
+    pub max_options: Option<i32>,
+    pub component: ApiComponentPayload,
+}
+
+impl<'de> Deserialize<'de> for ApiMessageComponent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, rename = "type", deserialize_with = "i32_flex::deserialize")]
+            component_type: i32,
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
+            max_options: Option<i32>,
+            #[serde(default)]
+            component: serde_json::Value,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let component = match raw.component_type {
+            1 => ApiComponentPayload::Button(
+                serde_json::from_value(raw.component).unwrap_or_default(),
+            ),
+            2 => ApiComponentPayload::Select(
+                serde_json::from_value(raw.component).unwrap_or_default(),
+            ),
+            _ => ApiComponentPayload::Other(raw.component),
+        };
+        Ok(ApiMessageComponent {
+            component_type: raw.component_type,
+            id: raw.id,
+            max_options: raw.max_options,
+            component,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiActionRow {
+    #[serde(default)]
+    pub components: Vec<ApiMessageComponent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiCallLog {
+    #[serde(
+        default,
+        rename = "isVideo",
+        deserialize_with = "bool_flex::deserialize"
+    )]
+    pub is_video: bool,
+    #[serde(
+        default,
+        rename = "callLogType",
+        deserialize_with = "i32_flex::deserialize"
+    )]
+    pub call_log_type: i32,
+    #[serde(
+        default,
+        rename = "showCallBack",
+        deserialize_with = "bool_flex::deserialize"
+    )]
+    pub show_call_back: bool,
+}
+
 /// Parsed `content` JSON of a message (the mezon `IExtendedMessage` shape).
 /// `t` is the plain text; the token arrays carry inline rich-text ranges.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -932,6 +1167,24 @@ pub struct ApiMessageContent {
     pub total_votes: Option<i32>,
     #[serde(default, rename = "type")]
     pub poll_type: Option<i64>,
+    #[serde(default)]
+    pub embed: Vec<ApiEmbed>,
+    #[serde(default)]
+    pub components: Vec<ApiActionRow>,
+    #[serde(default, rename = "callLog")]
+    pub call_log: Option<ApiCallLog>,
+    #[serde(default, alias = "isCard", deserialize_with = "bool_flex::deserialize")]
+    pub is_card: bool,
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
+    pub tp: Option<String>,
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
+    pub cid: Option<String>,
+    #[serde(default)]
+    pub vk: Vec<ContentToken>,
+    #[serde(default)]
+    pub cvtt: HashMap<String, String>,
+    #[serde(default)]
+    pub lky: Vec<ContentToken>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -1565,7 +1818,7 @@ impl MezonTransport {
         }
     }
 
-    pub fn message_from_proto(message: api::ChannelMessage) -> ApiMessage {
+    pub fn message_from_proto(message: &api::ChannelMessage) -> ApiMessage {
         let content_tokens = serde_json::from_str::<ApiMessageContent>(&message.content)
             .unwrap_or_else(|_| ApiMessageContent {
                 t: message.content.clone(),
@@ -2127,7 +2380,7 @@ impl MezonTransport {
             // UpdateEphemeralMsg(14), DeleteEphemeralMsg(15). All other codes
             // (normal chat + system rows like Welcome/CreatePin/CreateThread)
             // are kept and routed by the UI dispatcher.
-            .map(Self::message_from_proto)
+            .map(|m| Self::message_from_proto(&m))
             .collect();
         tracing::debug!(
             "list_channel_messages: channel_id={channel_id} count={} response_bytes={}",
@@ -3218,6 +3471,73 @@ impl MezonTransport {
             .collect())
     }
 
+    pub async fn forward_channel_message(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        content: &str,
+        is_public: bool,
+        mode: i32,
+        attachments: Vec<api::MessageAttachment>,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let mut obj = serde_json::Map::new();
+        obj.insert("t".into(), content.into());
+        obj.insert("fwd".into(), serde_json::Value::Bool(true));
+        let content_json = serde_json::Value::Object(obj).to_string();
+        let body = realtime::ChannelMessageSend {
+            clan_id,
+            channel_id,
+            content: content_json,
+            attachments,
+            mode,
+            is_public,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _response) = self
+            .send_api_request(cid, "SendChannelMessage", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_channel_message_with_attachments(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        attachments: Vec<api::MessageAttachment>,
+        mode: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let markdowns = detect_markdown(content);
+        let content_json = build_message_content_json(content, &[], &[], &[], &markdowns);
+        let body = realtime::ChannelMessageUpdate {
+            clan_id,
+            channel_id,
+            message_id,
+            content: content_json,
+            attachments,
+            mode,
+            is_public,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request(cid, "UpdateChannelMessage", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
     /// List voice channel users.
     pub async fn list_channel_voice_users(
         &self,
@@ -3674,6 +3994,30 @@ impl MezonTransport {
             category_id,
             parent_id,
             channel_private,
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let (code, response) = self
+            .send_api_request(cid, "CreateChannelDesc", body)
+            .await?;
+
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+
+        let channel = api::ChannelDescription::decode(response.as_slice())?;
+        Ok(Self::channel_desc_from_proto(channel))
+    }
+
+    pub async fn create_direct_channel(&self, user_ids: &[i64]) -> Result<ApiChannelDesc> {
+        let cid = self.generate_cid();
+
+        let body = api::CreateChannelDescRequest {
+            clan_id: 0,
+            r#type: 3,
+            channel_private: 1,
+            user_ids: user_ids.to_vec(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -4658,13 +5002,18 @@ impl MezonTransport {
         message_id: i64,
         channel_id: i64,
         button_id: &str,
+        sender_id: i64,
+        user_id: i64,
+        extra_data: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = realtime::MessageButtonClicked {
             message_id,
             channel_id,
             button_id: button_id.to_string(),
-            ..Default::default()
+            sender_id,
+            user_id,
+            extra_data: extra_data.to_string(),
         }
         .encode_to_vec();
         let (code, _) = self
@@ -5673,15 +6022,16 @@ impl MezonTransport {
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: i64,
+        clan_id: i64,
         room_name: &str,
         username: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             channel_id,
+            clan_id,
             room_name: room_name.to_string(),
             username: username.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, _) = self
@@ -5697,15 +6047,16 @@ impl MezonTransport {
     pub async fn mute_participant_mezon_meet(
         &self,
         channel_id: i64,
+        clan_id: i64,
         room_name: &str,
         username: &str,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::MeetParticipantRequest {
             channel_id,
+            clan_id,
             room_name: room_name.to_string(),
             username: username.to_string(),
-            ..Default::default()
         }
         .encode_to_vec();
         let (code, _) = self
@@ -5827,19 +6178,35 @@ impl MezonTransport {
     }
 
     /// Update channel message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_channel_message(
         &self,
         clan_id: i64,
         channel_id: i64,
         message_id: i64,
         content: &str,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        mode: i32,
+        is_public: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
+        let markdowns = detect_markdown(content);
+        let content_json =
+            build_message_content_json(content, &mentions, &hashtags, &emojis, &markdowns);
+        let proto_mentions: Vec<api::MessageMention> = mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
         let body = realtime::ChannelMessageUpdate {
             clan_id,
             channel_id,
             message_id,
-            content: content.to_string(),
+            content: content_json,
+            mentions: proto_mentions,
+            mode,
+            is_public,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6409,7 +6776,7 @@ mod tests {
             content: r#"{"t":"hi"}"#.into(),
             ..Default::default()
         };
-        let parsed = MezonTransport::message_from_proto(msg);
+        let parsed = MezonTransport::message_from_proto(&msg);
         assert_eq!(parsed.avatar, "clan.png");
         assert_eq!(parsed.content, "hi");
     }
@@ -6422,7 +6789,7 @@ mod tests {
             content: r#"{"t":"hi"}"#.into(),
             ..Default::default()
         };
-        let parsed = MezonTransport::message_from_proto(msg);
+        let parsed = MezonTransport::message_from_proto(&msg);
         assert_eq!(parsed.avatar, "user.png");
     }
 
@@ -6825,5 +7192,242 @@ mod tests {
         assert_eq!(t.get_api_index("ListChannelMessages"), Some(30));
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
+    }
+
+    #[test]
+    fn embed_content_deserializes_full_tree() {
+        let json = r##"{
+            "t": "",
+            "embed": [{
+                "color": "#5865F2",
+                "title": "Release notes",
+                "url": "https://mezon.ai/blog",
+                "author": {"name": "Mezon Bot", "icon_url": "https://cdn.mezon.ai/a.png", "url": "https://mezon.ai"},
+                "description": "**Bold** body",
+                "thumbnail": {"url": "https://cdn.mezon.ai/thumb.png"},
+                "fields": [
+                    {"name": "Version", "value": "1.4.69", "inline": true},
+                    {"name": "Notes", "value": "line1\nline2"}
+                ],
+                "image": {"url": "https://cdn.mezon.ai/img.png", "width": 640, "height": 360},
+                "timestamp": "2026-07-04T00:00:00Z",
+                "footer": {"text": "Mezon", "icon_url": "https://cdn.mezon.ai/f.png"}
+            }]
+        }"##;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert_eq!(c.embed.len(), 1);
+        let e = &c.embed[0];
+        assert_eq!(e.color.as_deref(), Some("#5865F2"));
+        assert_eq!(e.title.as_deref(), Some("Release notes"));
+        assert_eq!(e.url.as_deref(), Some("https://mezon.ai/blog"));
+        let author = e.author.as_ref().expect("author");
+        assert_eq!(author.name, "Mezon Bot");
+        assert_eq!(
+            author.icon_url.as_deref(),
+            Some("https://cdn.mezon.ai/a.png")
+        );
+        assert_eq!(e.description.as_deref(), Some("**Bold** body"));
+        assert_eq!(
+            e.thumbnail.as_ref().map(|t| t.url.as_str()),
+            Some("https://cdn.mezon.ai/thumb.png")
+        );
+        assert_eq!(e.fields.len(), 2);
+        assert_eq!(e.fields[0].name, "Version");
+        assert_eq!(e.fields[0].value, "1.4.69");
+        assert!(e.fields[0].inline);
+        assert!(!e.fields[1].inline);
+        let img = e.image.as_ref().expect("image");
+        assert_eq!(img.url, "https://cdn.mezon.ai/img.png");
+        assert_eq!(img.width, Some(640));
+        assert_eq!(img.height, Some(360));
+        assert_eq!(e.timestamp.as_deref(), Some("2026-07-04T00:00:00Z"));
+        let footer = e.footer.as_ref().expect("footer");
+        assert_eq!(footer.text, "Mezon");
+    }
+
+    #[test]
+    fn components_deserialize_button_and_select_rows() {
+        let json = r#"{
+            "t": "",
+            "components": [
+                {"components": [
+                    {"type": 1, "id": "btn1", "component": {"label": "Play", "style": 3, "url": "https://mezon.ai", "icon": "PLAY"}},
+                    {"type": 1, "id": "btn2", "component": {"label": "Cancel", "style": 4, "disable": true}}
+                ]},
+                {"components": [
+                    {"type": 2, "id": "sel1", "max_options": 2, "component": {
+                        "type": 1,
+                        "placeholder": "Pick",
+                        "min_options": 1,
+                        "max_options": 2,
+                        "options": [
+                            {"label": "One", "value": "1", "default": true},
+                            {"label": "Two", "value": "2", "description": "second"}
+                        ]
+                    }}
+                ]}
+            ]
+        }"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert_eq!(c.components.len(), 2);
+
+        let button_row = &c.components[0];
+        assert_eq!(button_row.components.len(), 2);
+        let first = &button_row.components[0];
+        assert_eq!(first.component_type, 1);
+        assert_eq!(first.id.as_deref(), Some("btn1"));
+        match &first.component {
+            ApiComponentPayload::Button(b) => {
+                assert_eq!(b.label, "Play");
+                assert_eq!(b.style, Some(3));
+                assert_eq!(b.url.as_deref(), Some("https://mezon.ai"));
+                assert_eq!(b.icon.as_deref(), Some("PLAY"));
+                assert!(!b.disable);
+            }
+            other => panic!("expected button, got {other:?}"),
+        }
+        match &button_row.components[1].component {
+            ApiComponentPayload::Button(b) => {
+                assert_eq!(b.label, "Cancel");
+                assert!(b.disable);
+                assert_eq!(b.style, Some(4));
+            }
+            other => panic!("expected button, got {other:?}"),
+        }
+
+        let select_row = &c.components[1];
+        assert_eq!(select_row.components.len(), 1);
+        let select = &select_row.components[0];
+        assert_eq!(select.component_type, 2);
+        assert_eq!(select.max_options, Some(2));
+        match &select.component {
+            ApiComponentPayload::Select(s) => {
+                assert_eq!(s.select_type, Some(1));
+                assert_eq!(s.placeholder.as_deref(), Some("Pick"));
+                assert_eq!(s.min_options, Some(1));
+                assert_eq!(s.max_options, Some(2));
+                assert_eq!(s.options.len(), 2);
+                assert_eq!(s.options[0].label, "One");
+                assert_eq!(s.options[0].value, "1");
+                assert!(s.options[0].default);
+                assert_eq!(s.options[1].description.as_deref(), Some("second"));
+                assert!(!s.options[1].default);
+            }
+            other => panic!("expected select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_component_type_is_preserved_not_dropped() {
+        let json = r#"{
+            "t": "",
+            "components": [
+                {"components": [
+                    {"type": 4, "id": "dp", "component": {"value": "2026-07-04"}}
+                ]}
+            ]
+        }"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert_eq!(c.components.len(), 1);
+        assert_eq!(c.components[0].components.len(), 1);
+        let comp = &c.components[0].components[0];
+        assert_eq!(comp.component_type, 4);
+        match &comp.component {
+            ApiComponentPayload::Other(v) => {
+                assert_eq!(v.get("value").and_then(|x| x.as_str()), Some("2026-07-04"));
+            }
+            other => panic!("expected other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_log_content_deserializes_camel_case_keys() {
+        let json =
+            r#"{"t": "", "callLog": {"isVideo": true, "callLogType": 2, "showCallBack": true}}"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        let call_log = c.call_log.expect("call_log");
+        assert!(call_log.is_video);
+        assert_eq!(call_log.call_log_type, 2);
+        assert!(call_log.show_call_back);
+    }
+
+    #[test]
+    fn scalar_content_fields_and_tokens_deserialize() {
+        let json = r#"{
+            "t": "hi",
+            "isCard": true,
+            "tp": "1775731111020111321",
+            "cid": 42,
+            "vk": [{"s": 0, "e": 4, "url": "https://mezon.ai/voice"}],
+            "cvtt": {"1234567890123456789": "My Canvas"},
+            "lky": [{"s": 0, "e": 4, "url": "https://youtu.be/x"}]
+        }"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert!(c.is_card);
+        assert_eq!(c.tp.as_deref(), Some("1775731111020111321"));
+        assert_eq!(c.cid.as_deref(), Some("42"));
+        assert_eq!(c.vk.len(), 1);
+        assert_eq!(c.vk[0].url.as_deref(), Some("https://mezon.ai/voice"));
+        assert_eq!(
+            c.cvtt.get("1234567890123456789").map(String::as_str),
+            Some("My Canvas")
+        );
+        assert_eq!(c.lky.len(), 1);
+        assert_eq!(c.lky[0].url.as_deref(), Some("https://youtu.be/x"));
+    }
+
+    #[test]
+    fn ogp_invite_token_exposes_extended_fields() {
+        let json = r#"{
+            "t": "join",
+            "mk": [{
+                "s": 0,
+                "e": 4,
+                "type": "ogp",
+                "title": "Cool Clan",
+                "description": "come in",
+                "image": "https://cdn.mezon.ai/i.png",
+                "url": "https://mezon.ai/invite/abc",
+                "banner": "https://cdn.mezon.ai/b.png",
+                "member_count": 128,
+                "is_community": true,
+                "clanId": "1775731111020111321"
+            }]
+        }"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert_eq!(c.mk.len(), 1);
+        let tok = &c.mk[0];
+        assert_eq!(tok.banner.as_deref(), Some("https://cdn.mezon.ai/b.png"));
+        assert_eq!(tok.member_count, Some(128));
+        assert!(tok.is_community);
+        assert_eq!(tok.clan_id.as_deref(), Some("1775731111020111321"));
+    }
+
+    #[test]
+    fn attachment_size_round_trips() {
+        let att = ApiAttachment {
+            url: "https://cdn.mezon.ai/f.pdf".into(),
+            filename: "f.pdf".into(),
+            filetype: "application/pdf".into(),
+            width: 0,
+            height: 0,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 204_800,
+        };
+        let json = serde_json::to_string(&att).expect("serialize");
+        let back: ApiAttachment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.size, 204_800);
+    }
+
+    #[test]
+    fn extra_content_keys_are_tolerated() {
+        let json = r#"{"t": "hi", "callLog": {"isVideo": false, "callLogType": 1}, "brand_new_key": {"x": 1}}"#;
+        let c: ApiMessageContent = serde_json::from_str(json).expect("content");
+        assert_eq!(c.t, "hi");
+        let call_log = c.call_log.expect("call_log");
+        assert!(!call_log.is_video);
+        assert_eq!(call_log.call_log_type, 1);
+        assert!(!call_log.show_call_back);
     }
 }

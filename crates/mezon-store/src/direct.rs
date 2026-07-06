@@ -278,6 +278,18 @@ impl DirectMessageStore {
         self.channels.find(id)
     }
 
+    pub fn create_dm_with_user(
+        &self,
+        user_id: UserId,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<(ChannelId, i32)>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            let desc = api.create_direct_channel(&[user_id.0]).await?;
+            Ok((ChannelId(desc.channel_id), desc.channel_type as i32))
+        })
+    }
+
     pub fn set_current(&mut self, id: ChannelId, channel_type: i32) {
         self.current = Some((id, channel_type));
     }

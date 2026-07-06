@@ -454,10 +454,15 @@ impl ChatHeader {
         locale: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let resolving = name.is_none();
         let name = name.unwrap_or_else(|| self.name.clone());
         self.inbox_handle = inbox_handle;
         self.pin_handle = pin_handle;
-        let show_threads = ThreadsStore::global(cx).read(cx).show_threads_popover(cx);
+        let show_threads = if resolving && !dm {
+            self.show_threads
+        } else {
+            ThreadsStore::global(cx).read(cx).show_threads_popover(cx)
+        };
         if self.name == name
             && self.dm == dm
             && self.members_action == members_action

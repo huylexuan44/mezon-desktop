@@ -1,10 +1,36 @@
 use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
-use mezon_store::{Message, MessageCode, MessagesStore, PinnedMessagesStore};
+use mezon_store::{
+    Message, MessageCode, MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
+};
 
 use super::channel_messages::ChannelMessages;
 use super::content::{first_link, open_message_link};
+use super::forward_modal::ForwardMessageModal;
+use super::report_modal::ReportMessageModal;
 use crate::app::shell::Shell;
 use crate::components::primitives::{ContextMenu, IconName};
+
+pub(crate) fn resolve_forward_group(
+    message_id: MessageId,
+    sender_id: &str,
+    cx: &App,
+) -> Vec<MessageId> {
+    let store = MessagesStore::global(cx);
+    let store = store.read(cx);
+    let messages = store.messages();
+    let Some(start) = messages.iter().position(|m| m.id == message_id) else {
+        return vec![message_id];
+    };
+    let mut ids = vec![message_id];
+    for m in &messages[start + 1..] {
+        if m.combined_with_prev && m.sender_id.as_str() == sender_id {
+            ids.push(m.id);
+        } else {
+            break;
+        }
+    }
+    ids
+}
 
 fn coming_soon_click(message: SharedString) -> impl Fn(&mut Window, &mut App) + 'static {
     move |_window: &mut Window, cx: &mut App| {
@@ -13,15 +39,12 @@ fn coming_soon_click(message: SharedString) -> impl Fn(&mut Window, &mut App) + 
     }
 }
 
-/// Builds the "···" / right-click message context menu. Real items reuse existing
-/// store actions; items that depend on not-yet-ported subsystems (forward, create
-/// thread, polls, topic discussion, give-a-coffee, report, quick menus, mark
-/// unread/inbox) are shown for layout parity but only toast "coming soon".
 pub(crate) fn build(
     msg: &Message,
     current_user_id: &str,
     is_clan_owner: bool,
     locale: &str,
+    show_forward_all: bool,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -33,6 +56,7 @@ pub(crate) fn build(
     let is_pinned = PinnedMessagesStore::global(cx)
         .read(cx)
         .is_pinned(&msg.id.to_string());
+    let can_create_thread = !is_poll && ThreadsStore::global(cx).read(cx).can_create_thread(cx);
 
     let dismiss = {
         let host = host.clone();
@@ -123,21 +147,44 @@ pub(crate) fn build(
     }
 
     if !is_poll {
-        menu = menu
-            .item(
-                t("contextMenu.forwardMessage"),
-                coming_soon_click(coming_soon_msg.clone()),
-            )
-            .item_icon(
-                t("contextMenu.forwardAllMessage"),
-                IconName::ForwardAllRightClick,
-                coming_soon_click(coming_soon_msg.clone()),
-            )
-            .item_icon(
-                t("contextMenu.createThread"),
-                IconName::ThreadIcon,
-                coming_soon_click(coming_soon_msg.clone()),
-            );
+        let locale_owned = locale.to_string();
+        let message_id = msg.id;
+        menu = menu.item_icon(
+            t("contextMenu.forwardMessage"),
+            IconName::ForwardRightClick,
+            move |window, cx| {
+                ForwardMessageModal::open(
+                    vec![message_id],
+                    locale_owned.clone().into(),
+                    window,
+                    cx,
+                );
+            },
+        );
+    }
+
+    if show_forward_all {
+        let locale_owned = locale.to_string();
+        let message_id = msg.id;
+        let sender_id = msg.sender_id.clone();
+        menu = menu.item_icon(
+            t("contextMenu.forwardAllMessage"),
+            IconName::ForwardAllRightClick,
+            move |window, cx| {
+                let ids = resolve_forward_group(message_id, &sender_id, cx);
+                ForwardMessageModal::open(ids, locale_owned.clone().into(), window, cx);
+            },
+        );
+    }
+
+    if can_create_thread {
+        menu = menu.item_icon(
+            t("contextMenu.createThread"),
+            IconName::ThreadIcon,
+            move |_window, cx| {
+                ThreadsStore::global(cx).update(cx, |store, cx| store.start_create(cx));
+            },
+        );
     }
 
     if !msg.content.is_empty() && !is_poll {
@@ -177,29 +224,43 @@ pub(crate) fn build(
     }
 
     if !is_poll {
+        let message_id = msg.id;
         menu = menu.item_icon(
             t("contextMenu.topicDiscussion"),
             IconName::TopicIcon,
-            coming_soon_click(coming_soon_msg.clone()),
+            move |_window, cx| {
+                MessagesStore::global(cx)
+                    .update(cx, |store, cx| store.create_topic(message_id, cx));
+            },
         );
     }
 
-    menu = menu
-        .item_icon(
+    {
+        let message_id = msg.id;
+        menu = menu.item_icon(
             t("contextMenu.markUnread"),
             IconName::MarkUnreadIcon,
-            coming_soon_click(coming_soon_msg.clone()),
-        )
-        .item_icon(
+            move |_window, cx| {
+                MessagesStore::global(cx).update(cx, |store, cx| store.mark_unread(message_id, cx));
+            },
+        );
+    }
+    {
+        let message_id = msg.id;
+        menu = menu.item_icon(
             t("contextMenu.addToInbox"),
             IconName::AddToInboxIcon,
-            coming_soon_click(coming_soon_msg.clone()),
-        )
-        .item_icon(
-            t("contextMenu.quickMenus"),
-            IconName::QuickMenusIcon,
-            coming_soon_click(coming_soon_msg.clone()),
+            move |_window, cx| {
+                MessagesStore::global(cx)
+                    .update(cx, |store, cx| store.add_to_inbox(message_id, cx));
+            },
         );
+    }
+    menu = menu.item_icon(
+        t("contextMenu.quickMenus"),
+        IconName::QuickMenusIcon,
+        coming_soon_click(coming_soon_msg.clone()),
+    );
 
     let link = first_link(msg);
     let image_url = msg
@@ -220,10 +281,14 @@ pub(crate) fn build(
         });
     }
     if !is_own_message {
+        let message_id = msg.id;
+        let locale_owned = locale.to_string();
         menu = menu.item_icon(
             t("contextMenu.reportMessage"),
             IconName::ReportMessageRightClick,
-            coming_soon_click(coming_soon_msg.clone()),
+            move |window, cx| {
+                ReportMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
+            },
         );
     }
     if let Some(image_url) = image_url {

@@ -150,8 +150,7 @@ impl Render for PinnedPopoverPanel {
 
         let current = self.list_state.item_count();
         if cards.len() > current {
-            self.list_state
-                .splice(current..current, cards.len() - current);
+            self.list_state.splice(0..0, cards.len() - current);
         } else if cards.len() < current {
             self.list_state.reset(cards.len());
         }

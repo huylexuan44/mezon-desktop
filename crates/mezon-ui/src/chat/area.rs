@@ -111,6 +111,7 @@ impl ChatArea {
                 |this: &mut crate::ChatLayout, _, event: &MentionInputEvent, window, cx| match event
                 {
                     MentionInputEvent::Submit => this.send_current_message(window, cx),
+                    MentionInputEvent::Cancel => {}
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }

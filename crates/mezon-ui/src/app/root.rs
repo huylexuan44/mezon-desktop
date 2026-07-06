@@ -27,7 +27,6 @@ pub struct RootView {
     clan_setting_screen: Entity<ClanSettingScreen>,
     settings: Entity<Settings>,
     applied_theme: String,
-    initial_route_restored: bool,
     image_cache: Entity<LruImageCache>,
 }
 
@@ -59,54 +58,14 @@ impl RootView {
             move |cx| LoginView::new(auth_state, settings, cx)
         });
 
-        cx.observe(&Router::global(cx), |this, router, cx| {
+        cx.observe(&Router::global(cx), |this, _router, cx| {
             this.sync_settings_page(cx);
             this.sync_clan_settings_page(cx);
-            if let Route::Channel {
-                clan_id,
-                channel_id,
-            } = router.read(cx).route()
-            {
-                this.settings.update(cx, |s, cx| {
-                    s.last_clan_id = Some(clan_id);
-                    s.last_channel_id = Some(channel_id);
-                    let snapshot = s.clone();
-                    cx.background_executor()
-                        .spawn(async move {
-                            snapshot.save_sync();
-                        })
-                        .detach();
-                });
-            }
             cx.notify();
         })
         .detach();
 
-        cx.observe(&auth_state, |this, auth, cx| {
-            if this.initial_route_restored {
-                cx.notify();
-                return;
-            }
-            if matches!(auth.read(cx), AuthState::Authenticated(_)) {
-                this.initial_route_restored = true;
-                let last = this
-                    .settings
-                    .read(cx)
-                    .last_clan_id
-                    .zip(this.settings.read(cx).last_channel_id);
-                if let Some((clan_id, channel_id)) = last {
-                    crate::router::navigate(
-                        cx,
-                        Route::Channel {
-                            clan_id,
-                            channel_id,
-                        },
-                    );
-                }
-            }
-            cx.notify();
-        })
-        .detach();
+        cx.observe(&auth_state, |_, _, cx| cx.notify()).detach();
 
         cx.observe(&ConnectionStore::global(cx), |_, _, cx| cx.notify())
             .detach();
@@ -179,7 +138,6 @@ impl RootView {
             clan_setting_screen,
             settings,
             applied_theme,
-            initial_route_restored: false,
             image_cache,
         }
     }

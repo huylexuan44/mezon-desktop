@@ -71,6 +71,7 @@ impl PermissionStore {
     fn new(api: Arc<AppApi>, auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
         let clan_sub = cx.subscribe(&ClanList::global(cx), |this, _clan, event, cx| {
             if let ClanEvent::ActiveClanChanged(Some(clan_id)) = event {
+                this.load_permission_catalog(cx);
                 this.load_clan_permissions(*clan_id, cx);
             }
         });
@@ -103,9 +104,7 @@ impl PermissionStore {
                     was_connected = true;
                     if this
                         .update(cx, |this, cx| {
-                            this.catalog_loaded = false;
                             this.max_level_by_clan.clear();
-                            this.load_permission_catalog(cx);
                             if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
                                 this.load_clan_permissions(clan_id, cx);
                             }

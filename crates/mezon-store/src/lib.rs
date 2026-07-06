@@ -24,6 +24,7 @@ pub mod permissions;
 pub mod pinned;
 pub mod platform;
 pub mod presence;
+pub mod presign;
 pub mod realtime;
 pub mod roles;
 pub mod sticker;
@@ -88,7 +89,9 @@ pub use permissions::{
     PERMISSION_MANAGE_CHANNEL, PERMISSION_MANAGE_CLAN, PermissionEvent, PermissionStore,
 };
 pub use pinned::{PinnedMessage, PinnedMessagesStore};
-pub use platform::{DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore};
+pub use platform::{
+    DesktopNotification, NotifyFn, OpenUrlFn, PlatformStore, download_url_with_dialog,
+};
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
@@ -103,9 +106,9 @@ pub use user_profile::{
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
     NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption, ScreenSharePreview,
-    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceParticipant,
-    VoiceStore, camera_tile_id, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, screen_tile_id,
+    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError,
+    VoiceParticipant, VoiceStore, camera_tile_id, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, screen_tile_id,
 };
 
 pub const CACHE_TTL: Duration = Duration::from_secs(20 * 60);
