@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Task, Window};
-use mezon_client::AppApi;
+use mezon_audio::AudioPlayer;
+use mezon_client::{AppApi, RealtimeEvent};
 use mezon_voice::{IceServerConfig, VoiceEvent, VoiceSession};
 use parking_lot::Mutex;
 
@@ -14,8 +15,22 @@ pub use mezon_voice::{
 };
 
 use crate::AppConfig;
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
+const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
+const REACTION_THROTTLE: Duration = Duration::from_millis(150);
+static RAISE_HAND_SOUND: &[u8] = include_bytes!("../assets/audio/raising-hand.mp3");
+
+fn parse_raise_token(token: &str) -> Option<bool> {
+    if token.starts_with("raising-up:") {
+        Some(true)
+    } else if token.starts_with("raising-down:") {
+        Some(false)
+    } else {
+        None
+    }
+}
 
 struct CachedMeetToken {
     channel_id: String,
@@ -101,6 +116,11 @@ pub struct VoiceStore {
     pending_kick: Option<(String, String)>,
     moderation_error: Option<VoiceModerationError>,
     participants: Vec<VoiceParticipant>,
+    raised_hands: Vec<String>,
+    raised_hand_timers: HashMap<String, Task<()>>,
+    raising_hand_player: Option<AudioPlayer>,
+    raising_hand_sound_loading: bool,
+    last_reaction_send: Option<Instant>,
     session: Option<VoiceSession>,
     frame_store: Option<Arc<VideoFrameStore>>,
     render_cache: Mutex<HashMap<u64, CachedRenderImage>>,
@@ -132,7 +152,7 @@ pub fn camera_tile_id(identity: &str) -> String {
 
 impl VoiceStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
-        let entity = cx.new(|_| Self::new(api));
+        let entity = cx.new(|cx| Self::new(api, cx));
         cx.set_global(GlobalVoiceStore(entity.clone()));
         entity
     }
@@ -145,7 +165,8 @@ impl VoiceStore {
         cx.try_global::<GlobalVoiceStore>().map(|g| g.0.clone())
     }
 
-    fn new(api: Arc<AppApi>) -> Self {
+    fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        Self::register_realtime(cx);
         Self {
             api,
             connection: VoiceConnection::Idle,
@@ -163,6 +184,11 @@ impl VoiceStore {
             pending_kick: None,
             moderation_error: None,
             participants: Vec::new(),
+            raised_hands: Vec::new(),
+            raised_hand_timers: HashMap::new(),
+            raising_hand_player: None,
+            raising_hand_sound_loading: false,
+            last_reaction_send: None,
             session: None,
             frame_store: None,
             render_cache: Mutex::new(HashMap::new()),
@@ -340,6 +366,157 @@ impl VoiceStore {
             })
             .ok();
         }));
+    }
+
+    pub fn raised_hands(&self) -> &[String] {
+        &self.raised_hands
+    }
+
+    fn local_user_id(&self) -> Option<String> {
+        self.participants
+            .iter()
+            .find(|p| p.is_local)
+            .map(|p| p.identity.clone())
+    }
+
+    pub fn is_local_hand_raised(&self) -> bool {
+        self.local_user_id()
+            .is_some_and(|id| self.raised_hands.contains(&id))
+    }
+
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::VoiceReaction, &entity, |this, event, cx| {
+                this.handle_voice_reaction(event, cx)
+            });
+        });
+    }
+
+    fn handle_voice_reaction(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let RealtimeEvent::VoiceReaction(msg) = event else {
+            return;
+        };
+        if self
+            .connection
+            .active_channel_id()
+            .and_then(|c| c.parse::<i64>().ok())
+            != Some(msg.channel_id)
+        {
+            return;
+        }
+        let Some(token) = msg.emojis.first() else {
+            return;
+        };
+        let Some(raise) = parse_raise_token(token) else {
+            return;
+        };
+        let sender_id = msg.sender_id.to_string();
+        if raise {
+            self.add_raised_hand(sender_id, cx);
+            self.play_raise_sound(cx);
+        } else {
+            self.remove_raised_hand(&sender_id, cx);
+        }
+    }
+
+    fn add_raised_hand(&mut self, user_id: String, cx: &mut Context<Self>) {
+        if !self.raised_hands.contains(&user_id) {
+            self.raised_hands.push(user_id.clone());
+        }
+        let key = user_id.clone();
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RAISE_HAND_TTL).await;
+            this.update(cx, |this, cx| this.remove_raised_hand(&key, cx))
+                .ok();
+        });
+        self.raised_hand_timers.insert(user_id, timer);
+        cx.notify();
+    }
+
+    fn remove_raised_hand(&mut self, user_id: &str, cx: &mut Context<Self>) {
+        let before = self.raised_hands.len();
+        self.raised_hands.retain(|h| h != user_id);
+        self.raised_hand_timers.remove(user_id);
+        if self.raised_hands.len() != before {
+            cx.notify();
+        }
+    }
+
+    pub fn send_raising_hand(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self
+            .connection
+            .active_channel_id()
+            .and_then(|c| c.parse::<i64>().ok())
+        else {
+            return;
+        };
+        let Some(user_id) = self.local_user_id() else {
+            return;
+        };
+        if !self.can_send_reaction() {
+            return;
+        }
+        let raise = !self.raised_hands.contains(&user_id);
+        let token = if raise {
+            format!("raising-up:{user_id}")
+        } else {
+            format!("raising-down:{user_id}")
+        };
+        if raise {
+            self.add_raised_hand(user_id, cx);
+        } else {
+            self.remove_raised_hand(&user_id, cx);
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |_this, _cx| {
+            if let Err(e) = api.write_voice_reaction(vec![token], channel_id).await {
+                tracing::warn!("write_voice_reaction failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    fn can_send_reaction(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(last) = self.last_reaction_send
+            && now.duration_since(last) < REACTION_THROTTLE
+        {
+            return false;
+        }
+        self.last_reaction_send = Some(now);
+        true
+    }
+
+    fn play_raise_sound(&mut self, cx: &mut Context<Self>) {
+        if let Some(player) = &self.raising_hand_player {
+            player.play();
+            return;
+        }
+        if self.raising_hand_sound_loading {
+            return;
+        }
+        self.raising_hand_sound_loading = true;
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND) })
+                .await;
+            this.update(cx, |this, _| {
+                this.raising_hand_sound_loading = false;
+                let Ok(pcm) = decoded else {
+                    return;
+                };
+                let Ok(player) = AudioPlayer::new() else {
+                    return;
+                };
+                player.set_data(pcm);
+                player.play();
+                this.raising_hand_player = Some(player);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn desired_screen_full_res(&self) -> bool {
@@ -899,9 +1076,25 @@ impl VoiceStore {
         self.pending_kick = None;
         self.moderation_error = None;
         self.participants.clear();
+        self.raised_hands.clear();
+        self.raised_hand_timers.clear();
         self.meet_token_prefetching = None;
         self.last_repaint_seq = None;
         self.link_copied = false;
         self._link_copied_reset = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_raise_token;
+
+    #[test]
+    fn parse_raise_token_classifies_prefixes() {
+        assert_eq!(parse_raise_token("raising-up:123"), Some(true));
+        assert_eq!(parse_raise_token("raising-down:123"), Some(false));
+        assert_eq!(parse_raise_token("sound:https://x.mp3"), None);
+        assert_eq!(parse_raise_token(":smile:"), None);
+        assert_eq!(parse_raise_token(""), None);
     }
 }

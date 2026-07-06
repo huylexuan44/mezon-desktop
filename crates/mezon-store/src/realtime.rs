@@ -34,6 +34,7 @@ pub enum RealtimeKind {
     SessionRefreshed,
     VoiceJoined,
     VoiceLeaved,
+    VoiceReaction,
     MarkAsRead,
     LastPinMessage,
     UnpinMessage,
@@ -64,6 +65,7 @@ impl RealtimeKind {
             RealtimeEvent::SessionRefreshed(_) => Self::SessionRefreshed,
             RealtimeEvent::VoiceJoined(_) => Self::VoiceJoined,
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
+            RealtimeEvent::VoiceReaction(_) => Self::VoiceReaction,
             RealtimeEvent::MarkAsRead(_) => Self::MarkAsRead,
             RealtimeEvent::LastPinMessage(_) => Self::LastPinMessage,
             RealtimeEvent::UnpinMessage(_) => Self::UnpinMessage,
@@ -224,6 +226,16 @@ mod tests {
                 realtime::UserChannelAdded::default()
             )),
             Some(RealtimeKind::UserChannelAdded)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_voice_reaction() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::VoiceReaction(
+                realtime::VoiceReactionSend::default()
+            )),
+            Some(RealtimeKind::VoiceReaction)
         );
     }
 

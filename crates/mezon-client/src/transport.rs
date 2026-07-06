@@ -58,6 +58,7 @@ pub enum RealtimeEvent {
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
     VoiceLeaved(realtime::VoiceLeavedEvent),
+    VoiceReaction(realtime::VoiceReactionSend),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     AddClanUser(realtime::AddClanUserEvent),
@@ -102,6 +103,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
+            realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -2382,6 +2384,27 @@ impl MezonTransport {
         let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
         if code != 0 {
             anyhow::bail!("join_chat error: code={code}");
+        }
+        Ok(())
+    }
+
+    pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=VoiceReactionSend cid={} channel_id={channel_id}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::VoiceReactionSend(
+                realtime::VoiceReactionSend {
+                    emojis,
+                    channel_id,
+                    sender_id: 0,
+                    media_type: 0,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        if code != 0 {
+            anyhow::bail!("write_voice_reaction error: code={code}");
         }
         Ok(())
     }

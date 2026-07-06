@@ -1051,6 +1051,12 @@ impl AppApi {
             .await
     }
 
+    pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
+        self.transport
+            .write_voice_reaction(emojis, channel_id)
+            .await
+    }
+
     pub async fn remove_participant_mezon_meet(
         &self,
         channel_id: &str,

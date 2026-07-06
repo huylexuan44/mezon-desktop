@@ -16,6 +16,8 @@ use ui::Tooltip;
 /// the screen-share modal. Single source of truth — do not duplicate.
 pub(crate) const ACCENT_BLUE: u32 = 0x5865f2;
 
+const RAISE_HAND_GOLD: u32 = 0xefbc39;
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_voice_channel(
     theme: &Theme,
@@ -636,6 +638,58 @@ fn resolve_voice_member(cx: &App, clan_id: ClanId, m: &VoiceMember) -> (String, 
     (m.display_name.clone(), m.avatar_url.clone())
 }
 
+fn raised_hands_overlay(cx: &App, clan_id: ClanId, store: &VoiceStore) -> Option<AnyElement> {
+    let hands = store.raised_hands();
+    if hands.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .top(px(68.))
+            .right(px(8.))
+            .w(px(320.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .items_end()
+            .children(hands.iter().map(|user_id| {
+                let (name, avatar_url) = resolve_voice_identity(cx, clan_id, user_id, "");
+                let name = SharedString::from(name);
+                let mut avatar = Avatar::new().name(name.clone()).size_px(px(32.));
+                if !avatar_url.is_empty() {
+                    avatar = avatar.src(avatar_url);
+                }
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .p_1()
+                    .w(px(160.))
+                    .h(px(36.))
+                    .rounded_full()
+                    .bg(gpui::rgb(0xffffff))
+                    .child(avatar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(gpui::rgb(0x000000))
+                            .truncate()
+                            .child(name),
+                    )
+                    .child(
+                        Icon::new(IconName::VoiceRaiseHandIcon)
+                            .size(px(32.))
+                            .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                    )
+            }))
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_in_call(
     theme: &Theme,
@@ -742,6 +796,7 @@ fn render_in_call(
         .when(!fullscreen_active, |this| {
             this.child(control_bar(theme, locale, voice, settings, store))
         })
+        .children(raised_hands_overlay(cx, channel.clan_id, store))
         .children(mic_modal)
         .children(participant_menu)
         .children(kick_modal)
@@ -1623,6 +1678,33 @@ fn control_bar(
         .on_click(move |_, window, cx| voice.update(cx, |store, cx| store.leave(window, cx)))
     };
 
+    let raise_active = store.is_local_hand_raised();
+    let raise_tooltip = mezon_i18n::t(
+        locale,
+        if raise_active {
+            "channelVoice.lowerHand"
+        } else {
+            "channelVoice.raiseHand"
+        },
+    );
+    let raise_color: Hsla = if raise_active {
+        gpui::rgb(RAISE_HAND_GOLD).into()
+    } else {
+        theme.text_primary.into()
+    };
+    let raise_hand_button = {
+        let voice = voice.clone();
+        circle_button(
+            "voice-raise-hand-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::VoiceRaiseHandIcon,
+            raise_color,
+        )
+        .tooltip(Tooltip::text(raise_tooltip))
+        .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
+    };
+
     let mut right = div()
         .flex()
         .flex_row()
@@ -1699,6 +1781,7 @@ fn control_bar(
         .child(camera_button)
         .child(screen_button)
         .child(decorative_circle(theme, IconName::ShadowBotIcon))
+        .child(raise_hand_button)
         .child(leave_button);
 
     div()
