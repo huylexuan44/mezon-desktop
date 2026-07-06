@@ -14,7 +14,8 @@ use mezon_client::transport::{
     hashtag_content_tokens, markdown_content_tokens, mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile, UrlAttachment,
+    AppApi, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
+    UrlAttachment,
 };
 
 use crate::AppConfig;
@@ -93,6 +94,9 @@ pub enum MessagesEvent {
         index: usize,
         message_id: MessageId,
     },
+    /// The composer reply target was set or cleared. Lets the composer re-render
+    /// its "replying to" bar without the message list reacting to every change.
+    ReplyTargetChanged,
 }
 
 /// The message currently being replied to (composer state), mirroring React's
@@ -105,6 +109,8 @@ pub struct ReplyDraft {
     pub sender_avatar: String,
     pub content_preview: String,
     pub has_attachment: bool,
+    pub has_embed: bool,
+    pub is_poll: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -180,6 +186,9 @@ pub struct OutgoingAttachment {
     pub path: PathBuf,
     pub filename: String,
     pub filetype: String,
+    pub width: i32,
+    pub height: i32,
+    pub poster_jpeg: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -1458,7 +1467,7 @@ impl MessagesStore {
     /// Set the composer reply target (from a "Reply" action on a message).
     pub fn set_reply(&mut self, draft: ReplyDraft, cx: &mut Context<Self>) {
         self.reply_target = Some(draft);
-        cx.emit(MessagesEvent::Updated { message_id: None });
+        cx.emit(MessagesEvent::ReplyTargetChanged);
         cx.notify();
     }
 
@@ -1477,6 +1486,8 @@ impl MessagesStore {
                 sender_avatar: msg.avatar_url.to_string(),
                 content_preview: msg.content.clone(),
                 has_attachment: !msg.attachments.is_empty(),
+                has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
+                is_poll: msg.poll.is_some(),
             })
         else {
             return;
@@ -1487,7 +1498,7 @@ impl MessagesStore {
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
         if self.reply_target.take().is_some() {
-            cx.emit(MessagesEvent::Updated { message_id: None });
+            cx.emit(MessagesEvent::ReplyTargetChanged);
             cx.notify();
         }
     }
@@ -1965,6 +1976,9 @@ impl MessagesStore {
         let mode = self.mode;
         let has_attachments = !attachments.is_empty();
         let reply = self.reply_target.take();
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
 
         self.clear_last_read_message(channel_id);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
@@ -2026,7 +2040,20 @@ impl MessagesStore {
                 content_preview: crate::message::reply_preview_line(&draft.content_preview).into(),
                 content: draft.content_preview.clone(),
                 has_attachment: draft.has_attachment,
+                has_embed: draft.has_embed,
+                is_poll: draft.is_poll,
             }]);
+        }
+        if has_attachments {
+            let optimistic_attachments: Vec<MessageAttachment> = attachments
+                .iter()
+                .map(MessageAttachment::optimistic_local)
+                .collect();
+            let (album_layout, viewer_media) =
+                build_media_presentation(&optimistic_attachments, AppConfig::try_global(cx));
+            optimistic = optimistic
+                .with_attachments(optimistic_attachments)
+                .with_media_presentation(album_layout, viewer_media);
         }
         let old_len = channel.messages.len();
         channel.messages.push_trim_regroup(optimistic);
@@ -2050,19 +2077,26 @@ impl MessagesStore {
                         attachments
                             .into_iter()
                             .filter_map(|att| {
-                                std::fs::read(&att.path)
+                                let data = std::fs::read(&att.path)
                                     .inspect_err(|e| {
                                         tracing::error!(
                                             "attachment read failed for {:?}: {e}",
                                             att.path
                                         )
                                     })
-                                    .ok()
-                                    .map(|data| UploadFile {
-                                        filename: att.filename,
-                                        filetype: att.filetype,
-                                        data,
-                                    })
+                                    .ok()?;
+                                let thumbnail = att.poster_jpeg.map(|jpeg| UploadThumbnail {
+                                    filename: format!("{}.jpg", att.filename),
+                                    data: jpeg,
+                                });
+                                Some(UploadFile {
+                                    filename: att.filename,
+                                    filetype: att.filetype,
+                                    data,
+                                    width: att.width,
+                                    height: att.height,
+                                    thumbnail,
+                                })
                             })
                             .collect::<Vec<_>>()
                     })
@@ -2597,6 +2631,7 @@ impl MessagesStore {
             .is_some_and(|draft| draft.message_ref_id == message_id)
         {
             self.reply_target = None;
+            cx.emit(MessagesEvent::ReplyTargetChanged);
         }
         self.retreat_last_message(storage_id, message_id);
 
@@ -3418,6 +3453,21 @@ fn outgoing_sender_profile(
 }
 
 /// Preserve optimistic/current-user metadata when send acks omit avatar/sender fields.
+fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
+    if prior.attachments.len() != confirmed.attachments.len() {
+        return;
+    }
+    for (att, prior_att) in confirmed
+        .attachments
+        .iter_mut()
+        .zip(prior.attachments.iter())
+    {
+        if att.local_source.is_none() {
+            att.local_source = prior_att.local_source.clone();
+        }
+    }
+}
+
 fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     if incoming.sender_id.is_empty() || incoming.sender_id == "0" {
         incoming.sender_id = prior.sender_id.clone();
@@ -3435,6 +3485,10 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
         incoming.day_label = prior.day_label.clone();
         incoming.row_anchor_id = prior.row_anchor_id;
     }
+    if incoming.references.is_empty() && !prior.references.is_empty() {
+        incoming.references = prior.references.clone();
+    }
+    carry_local_previews(prior, &mut incoming);
     incoming
 }
 
@@ -4095,10 +4149,19 @@ fn message_reference_from_api(
     } else {
         r.message_sender_username.clone()
     };
-    // The reference content is itself a JSON `IExtendedMessage`; extract its text.
-    let content = serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&r.content)
-        .map(|c| c.t)
-        .unwrap_or_else(|_| r.content.clone());
+    // The reference content is itself a JSON `IExtendedMessage`; extract its text and embed.
+    let parsed =
+        serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&r.content).ok();
+    let content = parsed
+        .as_ref()
+        .map(|c| c.t.clone())
+        .unwrap_or_else(|| r.content.clone());
+    let has_embed = parsed
+        .as_ref()
+        .is_some_and(|c| c.t.is_empty() && !c.embed.is_empty());
+    let is_poll = parsed
+        .as_ref()
+        .is_some_and(|c| c.poll_id.is_some() || (c.question.is_some() && !c.answers.is_empty()));
     let sender_avatar = cfg
         .map(|c| c.avatar_proxy(&r.message_sender_avatar))
         .unwrap_or_else(|| r.message_sender_avatar.clone());
@@ -4111,6 +4174,8 @@ fn message_reference_from_api(
         content,
         content_preview,
         has_attachment: r.has_attachment,
+        has_embed,
+        is_poll,
     }
 }
 
@@ -4159,6 +4224,33 @@ impl MessageAttachment {
             display_width,
             display_height,
             tenor_mp4,
+            local_source: None,
+        }
+    }
+
+    pub(crate) fn optimistic_local(att: &OutgoingAttachment) -> Self {
+        let width = att.width.max(0) as u32;
+        let height = att.height.max(0) as u32;
+        let (display_width, display_height) =
+            crate::config::attachment_display_dimensions(width, height);
+        let is_image = att.filetype.starts_with("image/");
+        Self {
+            url: String::new(),
+            filename: att.filename.clone(),
+            filetype: att.filetype.clone(),
+            width,
+            height,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 0,
+            size_label: SharedString::default(),
+            presign_pending: false,
+            proxied_src: SharedString::default(),
+            thumbnail_proxied: SharedString::default(),
+            display_width,
+            display_height,
+            tenor_mp4: None,
+            local_source: is_image.then(|| att.path.clone()),
         }
     }
 }
@@ -4589,6 +4681,119 @@ mod tests {
     }
 
     #[test]
+    fn merge_sparse_sender_carries_local_preview() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "", "42", "Me", 100)
+            .with_attachments(vec![MessageAttachment {
+                filename: "photo.png".into(),
+                local_source: Some(std::path::PathBuf::from("/tmp/photo.png")),
+                ..Default::default()
+            }]);
+        let confirmed = Message::new(MessageId(99), "", "42", "Me", 500).with_attachments(vec![
+            MessageAttachment {
+                filename: "sanitized_photo.png".into(),
+                url: "https://cdn.mezon.ai/photo.png".into(),
+                ..Default::default()
+            },
+        ]);
+        let merged = merge_sparse_sender(&optimistic, confirmed);
+        assert_eq!(
+            merged.attachments[0].local_source,
+            Some(std::path::PathBuf::from("/tmp/photo.png"))
+        );
+    }
+
+    #[test]
+    fn merge_sparse_sender_carries_reply_reference() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "hi", "42", "Me", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Alice".into(),
+                content: "original".into(),
+                content_preview: "original".into(),
+                ..Default::default()
+            }]);
+        let confirmed = Message::new(MessageId(99), "hi", "42", "Me", 500);
+        assert!(confirmed.references.is_empty());
+        let merged = merge_sparse_sender(&optimistic, confirmed);
+        assert_eq!(merged.references.len(), 1);
+        assert_eq!(merged.references[0].message_ref_id, MessageId(7));
+        assert_eq!(merged.references[0].sender_name, "Alice");
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_confirmed_reference_when_present() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "hi", "42", "Me", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Stale".into(),
+                ..Default::default()
+            }]);
+        let confirmed = Message::new(MessageId(99), "hi", "42", "Me", 500).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Fresh".into(),
+                ..Default::default()
+            },
+        ]);
+        let merged = merge_sparse_sender(&optimistic, confirmed);
+        assert_eq!(merged.references[0].sender_name, "Fresh");
+    }
+
+    #[test]
+    fn carry_local_previews_copies_local_path_by_index() {
+        let prior = Message::new(MessageId::next_optimistic(), "", "42", "Me", 100)
+            .with_attachments(vec![MessageAttachment {
+                filename: "photo.png".into(),
+                local_source: Some(std::path::PathBuf::from("/tmp/photo.png")),
+                ..Default::default()
+            }]);
+        let mut confirmed = Message::new(MessageId(7), "", "42", "Me", 500).with_attachments(vec![
+            MessageAttachment {
+                filename: "1700_0_photo.png".into(),
+                url: "https://cdn.mezon.ai/photo.png".into(),
+                ..Default::default()
+            },
+        ]);
+        carry_local_previews(&prior, &mut confirmed);
+        assert_eq!(
+            confirmed.attachments[0].local_source,
+            Some(std::path::PathBuf::from("/tmp/photo.png"))
+        );
+    }
+
+    #[test]
+    fn optimistic_multi_image_gets_album_layout() {
+        let outgoing = |name: &str| OutgoingAttachment {
+            path: format!("/tmp/{name}").into(),
+            filename: name.to_string(),
+            filetype: "image/png".to_string(),
+            width: 100,
+            height: 100,
+            poster_jpeg: None,
+        };
+        let atts = [outgoing("a.png"), outgoing("b.png")];
+        let optimistic: Vec<MessageAttachment> = atts
+            .iter()
+            .map(MessageAttachment::optimistic_local)
+            .collect();
+        let (album_layout, _) = build_media_presentation(&optimistic, None);
+        assert!(album_layout.is_some());
+        assert!(optimistic.iter().all(|a| a.local_source.is_some()));
+    }
+
+    #[test]
+    fn carry_local_previews_skips_on_count_mismatch() {
+        let prior = Message::new(MessageId::next_optimistic(), "", "42", "Me", 100)
+            .with_attachments(vec![MessageAttachment {
+                local_source: Some(std::path::PathBuf::from("/tmp/a.png")),
+                ..Default::default()
+            }]);
+        let mut confirmed = Message::new(MessageId(7), "", "42", "Me", 500);
+        carry_local_previews(&prior, &mut confirmed);
+        assert!(confirmed.attachments.is_empty());
+    }
+
+    #[test]
     fn optimistic_create_time_increments_within_same_sender_burst() {
         let now = 1_700_000_000i64;
         let mut list =
@@ -5004,6 +5209,8 @@ mod tests {
                     content: "orig".into(),
                     content_preview: "orig".into(),
                     has_attachment: false,
+                    has_embed: false,
+                    is_poll: false,
                 },
             ]),
         ]);

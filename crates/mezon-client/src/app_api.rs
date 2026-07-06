@@ -65,6 +65,15 @@ pub struct UploadFile {
     pub filename: String,
     pub filetype: String,
     pub data: Vec<u8>,
+    pub width: i32,
+    pub height: i32,
+    pub thumbnail: Option<UploadThumbnail>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadThumbnail {
+    pub filename: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -820,6 +829,9 @@ impl AppApi {
             filename,
             filetype,
             data,
+            width,
+            height,
+            thumbnail,
         } = file;
         let filename = sanitize_filename(&filename);
         let size = clamp_i32(data.len());
@@ -832,11 +844,18 @@ impl AppApi {
                 .await
                 .map_err(|e| anyhow::anyhow!("image dimensions task failed: {e}"))?
         } else {
-            (data, 0, 0)
+            (data, width, height)
         };
-        let url = self
-            .upload_bytes(&filename, &filetype, size, width, height, data)
-            .await?;
+        let (thumbnail_url, url) = futures::join!(
+            async {
+                match thumbnail {
+                    Some(thumb) => self.upload_thumbnail(thumb).await,
+                    None => String::new(),
+                }
+            },
+            self.upload_bytes(&filename, &filetype, size, width, height, data),
+        );
+        let url = url?;
         Ok(mezon_proto::api::MessageAttachment {
             filename,
             size,
@@ -844,9 +863,24 @@ impl AppApi {
             filetype,
             width,
             height,
-            thumbnail: String::new(),
+            thumbnail: thumbnail_url,
             duration: 0,
         })
+    }
+
+    async fn upload_thumbnail(&self, thumbnail: UploadThumbnail) -> String {
+        let filename = sanitize_filename(&thumbnail.filename);
+        let size = clamp_i32(thumbnail.data.len());
+        match self
+            .upload_bytes(&filename, "image/jpeg", size, 0, 0, thumbnail.data)
+            .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::error!("attachment poster upload failed: {e}");
+                String::new()
+            }
+        }
     }
 
     async fn upload_bytes(

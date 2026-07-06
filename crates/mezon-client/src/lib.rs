@@ -21,7 +21,7 @@ pub use attachment_download::{
     sanitize_filename, write_bytes_to_downloads,
 };
 pub use abridged_tcp_adapter::AbridgedTcpAdapter;
-pub use app_api::{AppApi, ConnectionStatus, UploadFile, UrlAttachment};
+pub use app_api::{AppApi, ConnectionStatus, UploadFile, UploadThumbnail, UrlAttachment};
 pub use auth::MezonClient;
 pub use auth::QrLoginId;
 pub use auth::{DEFAULT_API_HOST, DEFAULT_API_PORT, DEFAULT_API_SECURE, DEFAULT_SERVER_KEY};
