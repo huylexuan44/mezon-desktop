@@ -191,9 +191,9 @@ pub fn resolve_attachment_uploader(
         return info;
     }
     if clan_id.0 != 0 {
-        if let Some(member) = ClanMembersStore::try_global(cx).and_then(|store| {
-            store.read(cx).member(clan_id, uid)
-        }) {
+        if let Some(member) =
+            ClanMembersStore::try_global(cx).and_then(|store| store.read(cx).member(clan_id, uid))
+        {
             let name = member.name().to_string();
             if !name.is_empty() {
                 let (avatar, avatar_raw) = uploader_urls(member.avatar(), cfg);
@@ -506,14 +506,7 @@ impl GalleryStore {
             (None, None) => None,
             (a, b) => Some((a.unwrap_or(0), b.unwrap_or(0))),
         };
-        self.fetch(
-            clan_id,
-            channel_id,
-            range,
-            LoadDirection::Before,
-            true,
-            cx,
-        );
+        self.fetch(clan_id, channel_id, range, LoadDirection::Before, true, cx);
     }
 
     pub fn clear_date_filter(

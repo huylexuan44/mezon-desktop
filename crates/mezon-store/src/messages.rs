@@ -704,10 +704,7 @@ impl MessagesStore {
         channel_id: ChannelId,
         message_id: MessageId,
     ) -> Option<&Message> {
-        self.cache
-            .get(&channel_id)?
-            .messages
-            .get_by_id(message_id)
+        self.cache.get(&channel_id)?.messages.get_by_id(message_id)
     }
 
     pub fn reaction_view(
