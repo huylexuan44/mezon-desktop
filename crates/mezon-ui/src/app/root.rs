@@ -3,8 +3,8 @@ use gpui::{
     AnyView, App, ClickEvent, Context, Entity, FontWeight, MouseButton, NavigationDirection,
     StyleRefinement, Window, div, img, prelude::*, px,
 };
-use ui::utils::ROUNDED_BORDER_WINDOW;
 use mezon_store::{AuthState, ChannelList, ClanId, ClanList, ConnectionStore, Settings};
+use ui::utils::ROUNDED_BORDER_WINDOW;
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
