@@ -459,13 +459,23 @@ fn open_main_window(
             size: size(px(w as f32), px(h as f32)),
         })
     } else {
-        WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(720.0)), cx))
+        WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(
+                px(mezon_ui::MAIN_WINDOW_DEFAULT_WIDTH),
+                px(mezon_ui::MAIN_WINDOW_DEFAULT_HEIGHT),
+            ),
+            cx,
+        ))
     };
 
     let options = WindowOptions {
         titlebar: Some(window_title_options()),
         window_bounds: Some(window_bounds),
-        window_min_size: Some(size(px(950.0), px(500.0))),
+        window_min_size: Some(size(
+            px(mezon_ui::MAIN_WINDOW_MIN_WIDTH),
+            px(mezon_ui::MAIN_WINDOW_MIN_HEIGHT),
+        )),
         kind: gpui::WindowKind::Normal,
         focus: true,
         show: true,
