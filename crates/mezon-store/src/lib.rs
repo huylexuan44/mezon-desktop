@@ -95,7 +95,7 @@ pub use platform::{
 pub use presence::*;
 pub use realtime::{RealtimeDispatch, RealtimeKind};
 pub use roles::{Role, RolesEvent, RolesStore};
-pub use sticker::{Sticker, StickerEvent, StickerStore};
+pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use threads::{THREAD_STATUS_JOINED, ThreadSummary, ThreadsEvent, ThreadsStore, group_threads};
 pub use topic_badges::{TopicBadgeEvent, TopicBadgeStore};
 pub use topics::{TopicsEvent, TopicsStore};
@@ -105,9 +105,9 @@ pub use user_profile::{
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 pub use voice::{
-    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareOption,
-    ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection,
-    VoiceModerationError, VoiceParticipant, VoiceStore, camera_tile_id,
+    DisplayedReaction, NetworkQuality, PickedScreen, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, VideoFrameData, VideoFrameStore, VoiceCallStatus,
+    VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceStore, camera_tile_id,
     capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
     screen_tile_id,
 };
