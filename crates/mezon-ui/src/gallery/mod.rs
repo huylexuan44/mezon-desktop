@@ -86,7 +86,7 @@ impl GalleryModal {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let image_cache = cx.new(|cx| {
-            LruImageCache::labeled(
+            LruImageCache::gallery_thumbnail(
                 "gallery",
                 GALLERY_IMAGE_CACHE_CAPACITY,
                 GALLERY_IMAGE_CACHE_BYTES,
