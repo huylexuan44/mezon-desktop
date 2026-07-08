@@ -104,7 +104,15 @@ impl ReactionPicker {
                 cx.notify();
             })
         });
-        let image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let image_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "reaction-picker",
+                256,
+                12 * 1024 * 1024,
+                4 * 1024 * 1024,
+                cx,
+            )
+        });
         let mut picker = Self {
             focus_handle,
             search,

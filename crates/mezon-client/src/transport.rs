@@ -1199,6 +1199,8 @@ pub struct ApiMessageContent {
     pub cvtt: HashMap<String, String>,
     #[serde(default)]
     pub lky: Vec<ContentToken>,
+    #[serde(default, skip_serializing)]
+    pub presign_finish: Option<Vec<String>>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -6954,6 +6956,32 @@ mod tests {
         };
         let parsed = MezonTransport::message_from_proto(&msg);
         assert_eq!(parsed.avatar, "user.png");
+    }
+
+    #[test]
+    fn message_from_proto_captures_presign_finish_from_content() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: r#"{"t":"hi","presign_finish":["a/b/photo.png"]}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content, "hi");
+        assert_eq!(
+            parsed.content_tokens.presign_finish,
+            Some(vec!["a/b/photo.png".to_string()])
+        );
+    }
+
+    #[test]
+    fn message_from_proto_presign_finish_absent_is_none() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content_tokens.presign_finish, None);
     }
 
     #[test]

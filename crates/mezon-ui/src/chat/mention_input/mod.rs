@@ -162,6 +162,7 @@ pub struct MentionInput {
     sticker_scroll: UniformListScrollHandle,
     avatar_cache: Entity<LruImageCache>,
     preview_cache: Entity<LruImageCache>,
+    emoji_cache: Entity<LruImageCache>,
     settings: Entity<Settings>,
     pending_attachments: Vec<PendingAttachment>,
     compact: bool,
@@ -307,6 +308,15 @@ impl MentionInput {
                 cx,
             )
         });
+        let emoji_cache = cx.new(|cx| {
+            LruImageCache::avatar_thumbnail(
+                "emoji-sticker-picker",
+                AVATAR_IMAGE_CACHE_CAPACITY,
+                AVATAR_IMAGE_CACHE_BYTES,
+                AVATAR_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         Self {
             input,
             committed: Vec::new(),
@@ -328,6 +338,7 @@ impl MentionInput {
             sticker_scroll: UniformListScrollHandle::new(),
             avatar_cache,
             preview_cache,
+            emoji_cache,
             settings,
             pending_attachments: Vec::new(),
             compact,
@@ -1216,7 +1227,7 @@ impl MentionInput {
         let locale = self.locale(cx);
 
         let panel = div()
-            .image_cache(self.avatar_cache.clone())
+            .image_cache(self.emoji_cache.clone())
             .id("emoji-picker")
             .absolute()
             .bottom_full()
@@ -1277,7 +1288,7 @@ impl MentionInput {
         let locale = self.locale(cx);
 
         let panel = div()
-            .image_cache(self.avatar_cache.clone())
+            .image_cache(self.emoji_cache.clone())
             .id("sticker-picker")
             .absolute()
             .bottom_full()
@@ -1769,7 +1780,7 @@ mod convert_tests {
     fn threshold_boundary_is_strict() {
         let text = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN);
         assert_eq!(content_payload_utf8_len(&text), CONVERT_TO_FILE_THRESHOLD);
-        assert!(!(content_payload_utf8_len(&text) > CONVERT_TO_FILE_THRESHOLD));
+        assert!(content_payload_utf8_len(&text) <= CONVERT_TO_FILE_THRESHOLD);
         let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN + 1);
         assert!(content_payload_utf8_len(&over) > CONVERT_TO_FILE_THRESHOLD);
     }
