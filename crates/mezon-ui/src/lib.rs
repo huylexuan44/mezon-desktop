@@ -4,12 +4,15 @@ pub mod chat;
 pub mod clan;
 pub mod components;
 pub mod dev;
+pub mod gallery;
 pub mod image_cache;
+pub mod image_viewer;
 pub mod router;
 pub mod settings;
 pub mod sidebar;
 pub mod theme;
 pub mod util;
+pub mod window_layout;
 
 pub use app::root::RootView;
 pub use app::shell::Shell;
@@ -17,8 +20,14 @@ pub use app::title_bar::TitleBar;
 pub use auth::login_view::LoginView;
 pub use chat::layout::ChatLayout;
 pub use dev::gallery::DevGallery;
+pub use gallery::GalleryModal;
+pub use image_viewer::{OpenViewerRequest, open_image_viewer};
 pub use router::{Route, Router};
 pub use settings::SettingsScreen;
+pub use window_layout::{
+    MAIN_WINDOW_DEFAULT_HEIGHT, MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_MIN_HEIGHT,
+    MAIN_WINDOW_MIN_WIDTH,
+};
 pub use sidebar::channel_sidebar::ChannelSidebar;
 pub use sidebar::clan_sidebar::ClanSidebar;
 pub use sidebar::direct_sidebar::DirectSidebar;

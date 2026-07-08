@@ -7,7 +7,7 @@ use gpui::{
 use mezon_audio::AudioPlayer;
 use mezon_store::PlatformStore;
 
-use crate::components::primitives::{Icon, IconName};
+use crate::components::primitives::{Icon, IconName, Sizable, Size, Spinner};
 
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -295,6 +295,86 @@ pub(crate) fn audio_pill(
                                 .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
+                ),
+        )
+        .into_any_element()
+}
+
+pub(crate) fn audio_sending_pill(duration: f64) -> gpui::AnyElement {
+    div()
+        .flex()
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .min_w(px(PILL_MIN_WIDTH))
+                .rounded_full()
+                .py(px(6.))
+                .pl(px(6.))
+                .pr(px(14.))
+                .bg(PILL_BG)
+                .text_color(gpui::white())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.))
+                        .rounded_full()
+                        .bg(gpui::white())
+                        .child(Spinner::new().with_size(Size::Small).color(PILL_BG.into())),
+                )
+                .child(
+                    div()
+                        .ml_2()
+                        .text_size(px(14.))
+                        .whitespace_nowrap()
+                        .child(audio_time_label(0.0, duration)),
+                ),
+        )
+        .into_any_element()
+}
+
+pub(crate) fn audio_failed_pill(duration: f64) -> gpui::AnyElement {
+    div()
+        .flex()
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .min_w(px(PILL_MIN_WIDTH))
+                .rounded_full()
+                .py(px(6.))
+                .pl(px(6.))
+                .pr(px(14.))
+                .bg(PILL_BG)
+                .text_color(gpui::white())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.))
+                        .rounded_full()
+                        .bg(gpui::white())
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(16.))
+                                .text_color(PILL_BG),
+                        ),
+                )
+                .child(
+                    div()
+                        .ml_2()
+                        .text_size(px(14.))
+                        .whitespace_nowrap()
+                        .child(audio_time_label(0.0, duration)),
                 ),
         )
         .into_any_element()

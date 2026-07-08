@@ -8,6 +8,7 @@ mod embed_card;
 mod embed_fields;
 mod forward_modal;
 mod gif_video;
+pub mod inline_content;
 mod invite_card;
 mod message_actions_panel;
 mod message_context_menu;
@@ -29,6 +30,9 @@ mod video_player;
 
 pub use channel_messages::ChannelMessages;
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
+pub use gif_video::VideoThumbView;
+pub(crate) use reaction_picker::{ReactionPicker, ReactionPickerEvent};
+pub use video_player::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 
 use gpui::{App, SharedString};
 

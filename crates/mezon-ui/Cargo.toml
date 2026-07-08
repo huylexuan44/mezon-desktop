@@ -35,3 +35,6 @@ smallvec.workspace = true
 block = "0.1"
 objc.workspace = true
 raw-window-handle.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true

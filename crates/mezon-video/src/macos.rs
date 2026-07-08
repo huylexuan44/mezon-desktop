@@ -11,9 +11,56 @@ use objc::rc::StrongPtr;
 use objc::runtime::{BOOL, NO, Object, YES};
 use objc::{class, msg_send, sel, sel_impl};
 
-use crate::PlayerError;
+use crate::{PlayerError, VideoProbe};
 
 pub type VideoFrame = CVPixelBuffer;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CgSize {
+    width: f64,
+    height: f64,
+}
+
+unsafe impl objc::Encode for CgSize {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{CGSize=dd}") }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CgAffineTransform {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    tx: f64,
+    ty: f64,
+}
+
+unsafe impl objc::Encode for CgAffineTransform {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{CGAffineTransform=dddddd}") }
+    }
+}
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageDestinationCreateWithData(
+        data: *mut c_void,
+        uti: *const c_void,
+        count: usize,
+        options: *const c_void,
+    ) -> *mut c_void;
+    fn CGImageDestinationAddImage(dest: *mut c_void, image: *mut c_void, properties: *const c_void);
+    fn CGImageDestinationFinalize(dest: *mut c_void) -> u8;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const c_void);
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -300,6 +347,147 @@ fn pixel_buffer_attributes(max_size: Option<(u32, u32)>) -> Result<StrongPtr, Pl
 
 fn frame_format_is_renderable(format: u32) -> bool {
     format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+}
+
+const POSTER_TIME_SECONDS: f64 = 1.0;
+
+pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
+    let c_path = CString::new(path).ok()?;
+    objc::rc::autoreleasepool(|| unsafe {
+        let ns_string = class!(NSString);
+        let path_string: *mut Object = msg_send![ns_string, stringWithUTF8String: c_path.as_ptr()];
+        if path_string.is_null() {
+            return None;
+        }
+        let ns_url_class = class!(NSURL);
+        let file_url: *mut Object = msg_send![ns_url_class, fileURLWithPath: path_string];
+        if file_url.is_null() {
+            return None;
+        }
+        let asset_class = class!(AVURLAsset);
+        let asset_alloc: *mut Object = msg_send![asset_class, alloc];
+        let asset: *mut Object =
+            msg_send![asset_alloc, initWithURL: file_url options: ptr::null::<Object>()];
+        if asset.is_null() {
+            return None;
+        }
+        let asset = StrongPtr::new(asset);
+
+        let (width, height) = video_natural_size(*asset)?;
+        let poster_jpeg = generate_poster(*asset, max_poster_edge);
+        Some(VideoProbe {
+            width,
+            height,
+            poster_jpeg,
+        })
+    })
+}
+
+fn video_natural_size(asset: *mut Object) -> Option<(u32, u32)> {
+    unsafe {
+        let ns_string = class!(NSString);
+        let media_type: *mut Object = msg_send![ns_string, stringWithUTF8String: c"vide".as_ptr()];
+        if media_type.is_null() {
+            return None;
+        }
+        let tracks: *mut Object = msg_send![asset, tracksWithMediaType: media_type];
+        if tracks.is_null() {
+            return None;
+        }
+        let count: usize = msg_send![tracks, count];
+        if count == 0 {
+            return None;
+        }
+        let track: *mut Object = msg_send![tracks, objectAtIndex: 0usize];
+        if track.is_null() {
+            return None;
+        }
+        let size: CgSize = msg_send![track, naturalSize];
+        let transform: CgAffineTransform = msg_send![track, preferredTransform];
+        let width = ((size.width * transform.a).abs() + (size.height * transform.c).abs()).round();
+        let height = ((size.width * transform.b).abs() + (size.height * transform.d).abs()).round();
+        if !(width.is_finite() && height.is_finite()) || width < 1.0 || height < 1.0 {
+            return None;
+        }
+        Some((width as u32, height as u32))
+    }
+}
+
+fn generate_poster(asset: *mut Object, max_edge: u32) -> Option<Vec<u8>> {
+    unsafe {
+        let generator_class = class!(AVAssetImageGenerator);
+        let generator_alloc: *mut Object = msg_send![generator_class, alloc];
+        let generator: *mut Object = msg_send![generator_alloc, initWithAsset: asset];
+        if generator.is_null() {
+            return None;
+        }
+        let generator = StrongPtr::new(generator);
+        let _: () = msg_send![*generator, setAppliesPreferredTrackTransform: YES];
+        if max_edge > 0 {
+            let size = CgSize {
+                width: max_edge as f64,
+                height: max_edge as f64,
+            };
+            let _: () = msg_send![*generator, setMaximumSize: size];
+        }
+        let time = CmTime {
+            value: (POSTER_TIME_SECONDS * SEEK_TIMESCALE as f64) as i64,
+            timescale: SEEK_TIMESCALE,
+            flags: CM_TIME_FLAG_VALID,
+            epoch: 0,
+        };
+        let cg_image: *mut c_void = msg_send![
+            *generator,
+            copyCGImageAtTime: time
+            actualTime: ptr::null_mut::<CmTime>()
+            error: ptr::null_mut::<*mut Object>()
+        ];
+        if cg_image.is_null() {
+            return None;
+        }
+        let jpeg = encode_cgimage_jpeg(cg_image);
+        CFRelease(cg_image);
+        jpeg
+    }
+}
+
+fn encode_cgimage_jpeg(cg_image: *mut c_void) -> Option<Vec<u8>> {
+    unsafe {
+        let data_class = class!(NSMutableData);
+        let data: *mut Object = msg_send![data_class, data];
+        if data.is_null() {
+            return None;
+        }
+        let ns_string = class!(NSString);
+        let uti: *mut Object = msg_send![ns_string, stringWithUTF8String: c"public.jpeg".as_ptr()];
+        if uti.is_null() {
+            return None;
+        }
+        let dest = CGImageDestinationCreateWithData(
+            data as *mut c_void,
+            uti as *const c_void,
+            1,
+            ptr::null(),
+        );
+        if dest.is_null() {
+            return None;
+        }
+        CGImageDestinationAddImage(dest, cg_image, ptr::null());
+        let finalized = CGImageDestinationFinalize(dest);
+        CFRelease(dest as *const c_void);
+        if finalized == 0 {
+            return None;
+        }
+        let length: usize = msg_send![data, length];
+        if length == 0 {
+            return None;
+        }
+        let bytes: *const u8 = msg_send![data, bytes];
+        if bytes.is_null() {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(bytes, length).to_vec())
+    }
 }
 
 #[cfg(test)]

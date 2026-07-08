@@ -84,6 +84,16 @@ pub fn main_window_decorations() -> Option<WindowDecorations> {
         None
     }
 }
+pub fn linux_app_id() -> Option<String> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        Some("mezon".into())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        None
+    }
+}
 
 pub fn is_edge_resizable() -> bool {
     cfg!(target_os = "linux")

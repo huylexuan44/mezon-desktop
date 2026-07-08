@@ -83,6 +83,10 @@ impl AudioPlayer {
         self.data.borrow().is_some()
     }
 
+    pub fn set_volume(&self, volume: f32) {
+        self.player.set_volume(volume);
+    }
+
     pub fn play(&self) {
         if let Some(data) = self.data.borrow().as_ref() {
             if self.player.empty() {

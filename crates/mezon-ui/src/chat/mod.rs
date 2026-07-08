@@ -8,6 +8,7 @@ pub mod inbox;
 pub mod input_bar;
 pub mod layout;
 pub mod member_list;
+pub mod member_row_element;
 pub mod mention_input;
 pub mod message;
 pub mod pinned_popover;
@@ -16,6 +17,7 @@ pub mod screen_share_pip;
 pub mod threads_popover;
 pub mod user_profile_popover;
 pub mod voice;
+pub mod voice_sound_picker;
 
 pub use area::ChatArea;
 pub use channel_header::ChannelHeader;
@@ -31,5 +33,4 @@ pub use mezon_store::COMBINE_TIME_WINDOW;
 #[derive(Debug, Clone)]
 pub struct ReplyTarget {
     pub sender_name: String,
-    pub content_preview: String,
 }

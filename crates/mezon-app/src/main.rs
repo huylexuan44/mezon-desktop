@@ -5,7 +5,8 @@ use gpui_platform::application;
 use mezon_client::{AppApi, MezonClient, TransportClient};
 use mezon_native::instance::SingleInstance;
 use mezon_store::{AppConfig, AuthState, Settings};
-use mezon_ui::app::window_controls::{main_window_decorations, window_title_options};
+use mezon_ui::app::main_window::{activate_main_window, register_main_window};
+use mezon_ui::app::window_controls::{linux_app_id, main_window_decorations, window_title_options};
 use mezon_ui::{RootView, TitleBar, init as init_ui};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -86,8 +87,13 @@ fn log_dir() -> std::path::PathBuf {
 /// Initialise tracing to stdout **and** a daily-rotated log file. Uses a blocking file writer
 /// (not `non_blocking`) so a panic is flushed to disk before the process aborts.
 fn init_logging() {
+    let default_filter = if cfg!(debug_assertions) {
+        "mezon=debug,info"
+    } else {
+        "mezon=info,warn"
+    };
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("mezon=debug,info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     let dir = log_dir();
     let dir_err = std::fs::create_dir_all(&dir).err();
@@ -166,7 +172,10 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     );
     let client = Arc::new(client);
     let transport = Arc::new(TransportClient::new(String::new()));
-    let api = Arc::new(AppApi::new(transport.clone()));
+    let api = Arc::new(AppApi::new(
+        transport.clone(),
+        app_config.base_img_url.clone(),
+    ));
     let initial_auth_state = mezon_store::resolve_initial_auth_state();
 
     // Subscribe to screen lock/unlock events.
@@ -293,7 +302,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             initial_auth_state,
         );
 
-        cx.set_global(MainWindowGlobal(window_handle));
+        register_main_window(window_handle, cx);
 
         #[cfg(target_os = "windows")]
         {
@@ -428,6 +437,7 @@ fn open_dev_gallery_window(cx: &mut App) {
             size(px(900.0), px(800.0)),
             cx,
         ))),
+        app_id: linux_app_id(),
         ..Default::default()
     };
 
@@ -457,17 +467,28 @@ fn open_main_window(
             size: size(px(w as f32), px(h as f32)),
         })
     } else {
-        WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(720.0)), cx))
+        WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(
+                px(mezon_ui::MAIN_WINDOW_DEFAULT_WIDTH),
+                px(mezon_ui::MAIN_WINDOW_DEFAULT_HEIGHT),
+            ),
+            cx,
+        ))
     };
 
     let options = WindowOptions {
         titlebar: Some(window_title_options()),
         window_bounds: Some(window_bounds),
-        window_min_size: Some(size(px(950.0), px(500.0))),
+        window_min_size: Some(size(
+            px(mezon_ui::MAIN_WINDOW_MIN_WIDTH),
+            px(mezon_ui::MAIN_WINDOW_MIN_HEIGHT),
+        )),
         kind: gpui::WindowKind::Normal,
         focus: true,
         show: true,
         window_decorations: main_window_decorations(),
+        app_id: linux_app_id(),
         ..Default::default()
     };
 
@@ -498,6 +519,7 @@ fn open_main_window(
     mezon_store::GroupMembersStore::init(api.clone(), cx);
     mezon_store::UsersByUserStore::init(api.clone(), cx);
     mezon_store::RolesStore::init(api.clone(), cx);
+    mezon_store::GalleryStore::init(api.clone(), cx);
     mezon_store::PermissionStore::init(api.clone(), auth_state.clone(), cx);
     mezon_store::AccountStore::init(api, cx);
 
@@ -505,6 +527,11 @@ fn open_main_window(
     mezon_store::PlatformStore::set_open_url(
         &platform_store,
         std::sync::Arc::new(|url: &str| mezon_native::open_url(url)),
+        cx,
+    );
+    mezon_store::PlatformStore::set_save_attachment(
+        &platform_store,
+        std::sync::Arc::new(|url: &str, filename: &str| save_attachment(url, filename)),
         cx,
     );
     mezon_store::PlatformStore::set_notifier(
@@ -567,9 +594,6 @@ fn open_main_window(
     (auth_state, window_handle.into())
 }
 
-struct MainWindowGlobal(gpui::AnyWindowHandle);
-impl gpui::Global for MainWindowGlobal {}
-
 struct SingleInstanceGlobal(#[allow(dead_code)] SingleInstance);
 impl gpui::Global for SingleInstanceGlobal {}
 
@@ -618,15 +642,7 @@ fn update_native_badge(cx: &App) {
 }
 
 fn show_main_window(cx: &mut App) {
-    let Some(handle) = cx.try_global::<MainWindowGlobal>().map(|global| global.0) else {
-        return;
-    };
-    if cx
-        .update_window(handle, |_, window, _| window.activate_window())
-        .is_err()
-    {
-        tracing::warn!("Failed to show main window");
-    }
+    activate_main_window(cx);
 }
 
 struct TrayGlobal(#[allow(dead_code)] mezon_native::tray::MezonTray);
@@ -688,4 +704,18 @@ fn setup_tray(
             None
         }
     }
+}
+
+fn save_attachment(url: &str, filename: &str) -> anyhow::Result<()> {
+    mezon_client::clean_download_url(url)
+        .ok_or_else(|| anyhow::anyhow!("save_attachment rejected: invalid url"))?;
+    let url = url.to_string();
+    let filename = filename.to_string();
+    mezon_client::transport_runtime::handle().spawn(async move {
+        match mezon_client::download_url_to_downloads(&url, &filename).await {
+            Ok(path) => tracing::info!("saved attachment to {}", path.display()),
+            Err(e) => tracing::warn!("save attachment failed: {e}"),
+        }
+    });
+    Ok(())
 }

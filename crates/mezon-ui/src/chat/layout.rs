@@ -1,8 +1,11 @@
-use gpui::{AnyView, App, Context, Entity, StyleRefinement, Window, div, prelude::*, px};
+use gpui::{
+    AnyView, App, Context, DismissEvent, Entity, Focusable, StyleRefinement, Subscription, Task,
+    Window, deferred, div, prelude::*, px,
+};
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, PinnedMessagesStore,
-    Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceStore, VoiceModerationError
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings,
+    ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;
@@ -10,10 +13,14 @@ use ui::utils::ROUNDED_BORDER_WINDOW;
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
+use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
+use crate::chat::voice_sound_picker::{VoiceSoundPicker, VoiceSoundPickerEvent};
 use crate::components::compositions::user_info_bar::UserInfoBar;
-use crate::components::primitives::{InputEvent, InputState};
+use crate::components::primitives::{
+    Icon, IconName, InputEvent, InputState, Slider, SliderEvent, SliderState,
+};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 use crate::{ChannelSidebar, ClanSidebar, DirectSidebar};
@@ -44,6 +51,18 @@ pub struct ChatLayout {
     displayed_threads_panel: ThreadsPanelSlice,
     displayed_inbox: InboxDisplaySlice,
     pending_open_threads_popover: bool,
+    voice_emoji_picker: Option<Entity<ReactionPicker>>,
+    _voice_emoji_picker_sub: Option<Subscription>,
+    _voice_emoji_picker_dismiss_sub: Option<Subscription>,
+    voice_sound_picker: Option<Entity<VoiceSoundPicker>>,
+    _voice_sound_picker_sub: Option<Subscription>,
+    _voice_sound_picker_dismiss_sub: Option<Subscription>,
+    ns_slider: Entity<SliderState>,
+    _ns_slider_sub: Subscription,
+    ns_popover_open: bool,
+    ns_hovered: bool,
+    ns_dragging: bool,
+    _ns_popover_close: Option<Task<()>>,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -95,6 +114,8 @@ struct VoiceMiniSlice {
     camera_enabled: bool,
     screen_enabled: bool,
     link_copied: bool,
+    noise_suppression_enabled: bool,
+    noise_suppression_level: u8,
 }
 
 impl ChatLayout {
@@ -217,6 +238,24 @@ impl ChatLayout {
             }
         })
         .detach();
+        let ns_level = voice_store.read(cx).noise_suppression_level();
+        let ns_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(1.)
+                .default_value(ns_level as f32)
+        });
+        let ns_slider_sub = cx.subscribe(
+            &ns_slider,
+            |_this, _slider: Entity<SliderState>, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let level = value.end().round().clamp(0., 100.) as u8;
+                VoiceStore::global(cx).update(cx, |store, cx| {
+                    store.set_noise_suppression_level(level, cx);
+                });
+            },
+        );
         let mut this = Self {
             channel_list,
             clan_sidebar,
@@ -243,6 +282,18 @@ impl ChatLayout {
             displayed_threads_panel: ThreadsPanelSlice::default(),
             displayed_inbox: InboxDisplaySlice::default(),
             pending_open_threads_popover: false,
+            voice_emoji_picker: None,
+            _voice_emoji_picker_sub: None,
+            _voice_emoji_picker_dismiss_sub: None,
+            voice_sound_picker: None,
+            _voice_sound_picker_sub: None,
+            _voice_sound_picker_dismiss_sub: None,
+            ns_slider,
+            _ns_slider_sub: ns_slider_sub,
+            ns_popover_open: false,
+            ns_hovered: false,
+            ns_dragging: false,
+            _ns_popover_close: None,
         };
         this.sync_active_from_route(cx);
         this.sync_inbox_context(cx);
@@ -568,11 +619,15 @@ impl ChatLayout {
             let camera_enabled = store.camera_enabled();
             let screen_enabled = store.screen_share_enabled();
             let link_copied = store.link_copied();
+            let noise_suppression_enabled = store.noise_suppression_enabled();
+            let noise_suppression_level = store.noise_suppression_level();
             let changed = prev.label != label
                 || prev.mic_enabled != mic_enabled
                 || prev.camera_enabled != camera_enabled
                 || prev.screen_enabled != screen_enabled
-                || prev.link_copied != link_copied;
+                || prev.link_copied != link_copied
+                || prev.noise_suppression_enabled != noise_suppression_enabled
+                || prev.noise_suppression_level != noise_suppression_level;
             if changed {
                 if prev.label != label {
                     prev.label = label.to_string();
@@ -581,6 +636,8 @@ impl ChatLayout {
                 prev.camera_enabled = camera_enabled;
                 prev.screen_enabled = screen_enabled;
                 prev.link_copied = link_copied;
+                prev.noise_suppression_enabled = noise_suppression_enabled;
+                prev.noise_suppression_level = noise_suppression_level;
             }
             return changed;
         }
@@ -599,6 +656,8 @@ impl ChatLayout {
             camera_enabled: store.camera_enabled(),
             screen_enabled: store.screen_share_enabled(),
             link_copied: store.link_copied(),
+            noise_suppression_enabled: store.noise_suppression_enabled(),
+            noise_suppression_level: store.noise_suppression_level(),
         });
         true
     }
@@ -648,12 +707,14 @@ impl Render for ChatLayout {
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
         let fullscreen = if self.connected_call_is_active(cx) {
+            let chat = cx.entity();
             crate::chat::voice::render_screen_fullscreen_overlay(
                 cx.theme(),
                 &locale,
                 &self.voice_store,
                 &self.settings,
                 self.voice_store.read(cx),
+                &chat,
             )
         } else {
             None
@@ -980,6 +1041,7 @@ impl ChatLayout {
         let camera_enabled = store.camera_enabled();
         let screen_enabled = store.screen_share_enabled();
         let link_copied = store.link_copied();
+        let noise_control = self.render_noise_control(cx);
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         Some(crate::chat::voice::render_mini_bar(
@@ -995,6 +1057,7 @@ impl ChatLayout {
             camera_enabled,
             screen_enabled,
             link_copied,
+            noise_control,
         ))
     }
 
@@ -1006,6 +1069,228 @@ impl ChatLayout {
         };
         view.cached(StyleRefinement::default().size_full())
             .into_any_element()
+    }
+
+    pub(crate) fn toggle_voice_emoji_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.voice_emoji_picker.is_some() {
+            self.close_voice_emoji_picker(cx);
+            return;
+        }
+        self.close_voice_sound_picker(cx);
+        let picker = cx.new(|cx| ReactionPicker::new(window, cx));
+        let focus_handle = picker.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        self._voice_emoji_picker_sub = Some(cx.subscribe(&picker, |_this, _picker, event, cx| {
+            let ReactionPickerEvent::Picked { emoji_id, .. } = event;
+            let emoji_id = emoji_id.clone();
+            VoiceStore::global(cx).update(cx, |store, cx| {
+                store.send_emoji_reaction(emoji_id, cx);
+            });
+        }));
+        self._voice_emoji_picker_dismiss_sub = Some(
+            cx.subscribe(&picker, |this, _picker, _: &DismissEvent, cx| {
+                this.close_voice_emoji_picker(cx)
+            }),
+        );
+        self.voice_emoji_picker = Some(picker);
+        cx.notify();
+    }
+
+    fn close_voice_emoji_picker(&mut self, cx: &mut Context<Self>) {
+        self.voice_emoji_picker = None;
+        self._voice_emoji_picker_sub = None;
+        self._voice_emoji_picker_dismiss_sub = None;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_voice_sound_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.voice_sound_picker.is_some() {
+            self.close_voice_sound_picker(cx);
+            return;
+        }
+        self.close_voice_emoji_picker(cx);
+        let picker = cx.new(VoiceSoundPicker::new);
+        let focus_handle = picker.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        self._voice_sound_picker_sub = Some(cx.subscribe(&picker, |this, _picker, event, cx| {
+            let VoiceSoundPickerEvent::Picked { url } = event;
+            let url = url.clone();
+            VoiceStore::global(cx).update(cx, |store, cx| {
+                store.send_sound_reaction(url, cx);
+            });
+            this.close_voice_sound_picker(cx);
+        }));
+        self._voice_sound_picker_dismiss_sub = Some(
+            cx.subscribe(&picker, |this, _picker, _: &DismissEvent, cx| {
+                this.close_voice_sound_picker(cx)
+            }),
+        );
+        self.voice_sound_picker = Some(picker);
+        cx.notify();
+    }
+
+    fn close_voice_sound_picker(&mut self, cx: &mut Context<Self>) {
+        if self.voice_sound_picker.take().is_some() {
+            VoiceStore::global(cx).update(cx, |store, cx| store.stop_sound_preview(cx));
+        }
+        self._voice_sound_picker_sub = None;
+        self._voice_sound_picker_dismiss_sub = None;
+        cx.notify();
+    }
+
+    fn set_ns_popover_hover(&mut self, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if hovered {
+            self.ns_hovered = true;
+            self._ns_popover_close = None;
+            if !self.ns_popover_open {
+                let level = self.voice_store.read(cx).noise_suppression_level();
+                self.ns_slider.update(cx, |slider, cx| {
+                    slider.set_value(level as f32, window, cx);
+                });
+                self.ns_popover_open = true;
+                cx.notify();
+            }
+        } else {
+            self.ns_hovered = false;
+            if !self.ns_dragging {
+                self.schedule_ns_close(cx);
+            }
+        }
+    }
+
+    fn schedule_ns_close(&mut self, cx: &mut Context<Self>) {
+        if !self.ns_popover_open || self._ns_popover_close.is_some() {
+            return;
+        }
+        self._ns_popover_close = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            this.update(cx, |this, cx| {
+                this.ns_popover_open = false;
+                this._ns_popover_close = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn ns_drag_started(&mut self) {
+        self.ns_dragging = true;
+        self._ns_popover_close = None;
+    }
+
+    fn ns_drag_ended(&mut self, inside: bool, cx: &mut Context<Self>) {
+        let was_dragging = std::mem::take(&mut self.ns_dragging);
+        if inside {
+            self.ns_hovered = true;
+            self._ns_popover_close = None;
+        } else if was_dragging || !self.ns_hovered {
+            self.ns_hovered = false;
+            self.schedule_ns_close(cx);
+        }
+    }
+
+    fn render_noise_control(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let store = self.voice_store.read(cx);
+        let enabled = store.noise_suppression_enabled();
+        let level = store.noise_suppression_level();
+        let icon = if enabled {
+            Icon::new(IconName::NoiseSupressionIcon)
+                .size(px(20.))
+                .text_color(theme.text_primary)
+        } else {
+            Icon::new(IconName::NoiseSupressionDisabledIcon)
+                .size(px(20.))
+                .text_color(theme.status_dnd)
+        };
+        let button = div()
+            .id("voice-ns-btn")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(24.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .child(icon)
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                this.set_ns_popover_hover(*hovered, window, cx);
+            }))
+            .on_click(cx.listener(|_this, _, _, cx| {
+                VoiceStore::global(cx).update(cx, |store, cx| {
+                    store.toggle_noise_suppression(cx);
+                });
+            }));
+
+        let mut root = div().relative().child(button);
+        if self.ns_popover_open && enabled {
+            root = root.child(deferred(
+                div()
+                    .id("voice-ns-popover")
+                    .absolute()
+                    .bottom(px(28.))
+                    .right(px(-16.))
+                    .w(px(240.))
+                    .p_3()
+                    .rounded_md()
+                    .bg(theme.tokens.bg_theme_contexify)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .occlude()
+                    .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                        this.set_ns_popover_hover(*hovered, window, cx);
+                    }))
+                    .capture_any_mouse_down(
+                        cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.ns_drag_started()),
+                    )
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                            this.ns_drag_ended(true, cx);
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                            this.ns_drag_ended(false, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .mb_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_primary)
+                                    .child("Noise Suppression"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme.text_primary)
+                                    .child(format!("{level}%")),
+                            ),
+                    )
+                    .child(Slider::new(&self.ns_slider).horizontal()),
+            ));
+        }
+        root.into_any_element()
     }
 
     fn render_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1080,7 +1365,7 @@ impl ChatLayout {
                         settings.output_device_id.clone(),
                     )
                 };
-                return crate::chat::voice::render_voice_channel(
+                let voice_view = crate::chat::voice::render_voice_channel(
                     theme,
                     &locale,
                     &channel,
@@ -1090,6 +1375,40 @@ impl ChatLayout {
                     output_device_id,
                     cx,
                 );
+                return div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(voice_view)
+                    .when_some(self.voice_emoji_picker.clone(), |el, picker| {
+                        el.child(deferred(
+                            div()
+                                .absolute()
+                                .bottom(px(76.))
+                                .left(px(16.))
+                                .occlude()
+                                .on_mouse_down_out(
+                                    cx.listener(|this, _, _, cx| this.close_voice_emoji_picker(cx)),
+                                )
+                                .child(picker),
+                        ))
+                    })
+                    .when_some(self.voice_sound_picker.clone(), |el, picker| {
+                        el.child(deferred(
+                            div()
+                                .absolute()
+                                .bottom(px(76.))
+                                .left(px(72.))
+                                .occlude()
+                                .on_mouse_down_out(
+                                    cx.listener(|this, _, _, cx| this.close_voice_sound_picker(cx)),
+                                )
+                                .child(picker),
+                        ))
+                    })
+                    .into_any_element();
             }
 
             let channel_name = ch.name.clone();

@@ -1,5 +1,11 @@
 mod frame_util;
 
+#[cfg(target_os = "macos")]
+mod image_scale;
+#[cfg(target_os = "linux")]
+mod image_scale_linux;
+#[cfg(windows)]
+mod image_scale_windows;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -34,6 +40,70 @@ pub enum PlayerError {
     InvalidUrl,
     #[error("could not open media for playback")]
     Open,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoProbe {
+    pub width: u32,
+    pub height: u32,
+    pub poster_jpeg: Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "macos")]
+pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
+    macos::probe_video(path, max_poster_edge)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn probe_video(_path: &str, _max_poster_edge: u32) -> Option<VideoProbe> {
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct ScaledImage {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+pub fn scaled_image_decode(bytes: &[u8], max_px: u32) -> Option<ScaledImage> {
+    image_scale::scaled_image_decode(bytes, max_px)
+}
+
+#[cfg(windows)]
+pub fn scaled_image_decode(bytes: &[u8], max_px: u32) -> Option<ScaledImage> {
+    image_scale_windows::scaled_image_decode(bytes, max_px)
+}
+
+#[cfg(target_os = "linux")]
+pub fn scaled_image_decode(bytes: &[u8], max_px: u32) -> Option<ScaledImage> {
+    image_scale_linux::scaled_image_decode(bytes, max_px)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+pub fn scaled_image_decode(_bytes: &[u8], _max_px: u32) -> Option<ScaledImage> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub fn scaled_image_decode_path(path: &std::path::Path, max_px: u32) -> Option<ScaledImage> {
+    image_scale::scaled_image_decode_path(path, max_px)
+}
+
+#[cfg(windows)]
+pub fn scaled_image_decode_path(path: &std::path::Path, max_px: u32) -> Option<ScaledImage> {
+    image_scale_windows::scaled_image_decode_path(path, max_px)
+}
+
+#[cfg(target_os = "linux")]
+pub fn scaled_image_decode_path(path: &std::path::Path, max_px: u32) -> Option<ScaledImage> {
+    image_scale_linux::scaled_image_decode_path(path, max_px)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+pub fn scaled_image_decode_path(_path: &std::path::Path, _max_px: u32) -> Option<ScaledImage> {
+    None
 }
 
 pub struct VideoPlayer {

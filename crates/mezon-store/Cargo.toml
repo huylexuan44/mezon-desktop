@@ -10,6 +10,7 @@ workspace = true
 mezon-client.workspace = true
 mezon-proto.workspace = true
 mezon-voice.workspace = true
+mezon-audio.workspace = true
 gpui.workspace = true
 image.workspace = true
 smallvec.workspace = true

@@ -1,20 +1,74 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use livekit::track::LocalVideoTrack;
 use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use parking_lot::{Condvar, Mutex};
 use scap::capturer::{Capturer, Options, Resolution};
-use scap::frame::{Frame, FrameType};
+use scap::frame::{BGRAFrame, Frame, FrameType};
 
 use crate::screen_picker::{PickedScreen, scap_target_for_pick};
 use crate::video::{VideoFrameStore, bgra_to_i420, local_screen_key};
 
-const CAPTURE_FPS: u32 = 15;
-const PREVIEW_MAX_WIDTH: u32 = 640;
-const PREVIEW_MAX_HEIGHT: u32 = 400;
+const CAPTURE_FPS: u32 = 30;
+const PREVIEW_MAX_WIDTH: u32 = 1280;
+const PREVIEW_MAX_HEIGHT: u32 = 800;
+const SLOT_WAIT: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct SlotState {
+    frame: Option<BGRAFrame>,
+    closed: bool,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct LatestFrameSlot {
+    state: Mutex<SlotState>,
+    cond: Condvar,
+}
+
+impl LatestFrameSlot {
+    fn publish(&self, frame: BGRAFrame) {
+        self.state.lock().frame = Some(frame);
+        self.cond.notify_one();
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+        self.cond.notify_one();
+    }
+
+    fn fail(&self, error: String) {
+        let mut state = self.state.lock();
+        state.error = Some(error);
+        state.closed = true;
+        self.cond.notify_one();
+    }
+
+    fn take_error(&self) -> Option<String> {
+        self.state.lock().error.take()
+    }
+
+    fn take_latest(&self, stop: &AtomicBool) -> Option<BGRAFrame> {
+        let mut state = self.state.lock();
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(frame) = state.frame.take() {
+                return Some(frame);
+            }
+            if state.closed {
+                return None;
+            }
+            self.cond.wait_for(&mut state, SLOT_WAIT);
+        }
+    }
+}
 
 pub struct ScreenStopper {
     stop: Arc<AtomicBool>,
@@ -74,18 +128,43 @@ pub fn start_screen(
                 show_highlight: false,
                 excluded_targets: None,
                 output_type: FrameType::BGRAFrame,
-                output_resolution: Resolution::_1080p,
+                output_resolution: Resolution::_1440p,
                 ..Default::default()
             };
 
-            let mut capturer = match Capturer::build(options) {
-                Ok(capturer) => capturer,
-                Err(e) => {
-                    let _ = track_tx.send(Err(format!("screen capture init failed: {e}")));
-                    return;
-                }
-            };
-            capturer.start_capture();
+            let slot = Arc::new(LatestFrameSlot::default());
+            let pump_slot = slot.clone();
+            let pump_stop = thread_stop.clone();
+            let pump = std::thread::Builder::new()
+                .name("mezon-screen-pump".into())
+                .spawn(move || {
+                    let mut capturer = match Capturer::build(options) {
+                        Ok(capturer) => capturer,
+                        Err(e) => {
+                            pump_slot.fail(format!("screen capture init failed: {e}"));
+                            return;
+                        }
+                    };
+                    capturer.start_capture();
+                    while !pump_stop.load(Ordering::Relaxed) {
+                        match capturer.get_next_frame() {
+                            Ok(frame) => {
+                                if let Some(bgra) = frame_to_bgra(frame)
+                                    && !bgra.data.is_empty()
+                                {
+                                    pump_slot.publish(bgra);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    capturer.stop_capture();
+                    pump_slot.close();
+                });
+            if let Err(e) = pump {
+                let _ = track_tx.send(Err(format!("screen capture pump failed: {e}")));
+                return;
+            }
 
             let key = local_screen_key(&identity);
             let started = Instant::now();
@@ -95,14 +174,7 @@ pub fn start_screen(
             let mut sent_track = false;
             let mut display_buf = Vec::new();
 
-            while !thread_stop.load(Ordering::Relaxed) {
-                let frame = match capturer.get_next_frame() {
-                    Ok(frame) => frame,
-                    Err(_) => break,
-                };
-                let Frame::BGRA(bgra) = frame else {
-                    continue;
-                };
+            while let Some(bgra) = slot.take_latest(&thread_stop) {
                 let width = (bgra.width as u32 & !1).max(2);
                 let height = (bgra.height as u32 & !1).max(2);
                 if width == 0 || height == 0 || bgra.data.is_empty() {
@@ -170,7 +242,7 @@ pub fn start_screen(
                 let (pw, ph) = if full_res.load(Ordering::Relaxed) {
                     (src_w, src_h)
                 } else {
-                    preview_dims(src_w, src_h)
+                    scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
                 };
                 display_buf.resize((pw * ph * 4) as usize, 0);
                 downscale_bgra_into(
@@ -185,10 +257,12 @@ pub fn start_screen(
                 frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf));
             }
 
-            capturer.stop_capture();
             frame_store.remove(local_screen_key(&identity));
             if !sent_track {
-                let _ = track_tx.send(Err("screen capture produced no frames".into()));
+                let msg = slot
+                    .take_error()
+                    .unwrap_or_else(|| "screen capture produced no frames".into());
+                let _ = track_tx.send(Err(msg));
             }
             tracing::info!("screen capture stopped");
         });
@@ -199,9 +273,78 @@ pub fn start_screen(
     (ScreenStopper { stop }, track_rx)
 }
 
-fn preview_dims(width: u32, height: u32) -> (u32, u32) {
-    let scale = (PREVIEW_MAX_WIDTH as f32 / width.max(1) as f32)
-        .min(PREVIEW_MAX_HEIGHT as f32 / height.max(1) as f32)
+fn frame_to_bgra(frame: Frame) -> Option<BGRAFrame> {
+    match frame {
+        Frame::BGRA(frame) => Some(frame),
+        Frame::BGRx(mut frame) => {
+            for px in frame.data.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+            Some(BGRAFrame {
+                display_time: frame.display_time,
+                width: frame.width,
+                height: frame.height,
+                data: frame.data,
+            })
+        }
+        Frame::RGBx(mut frame) => {
+            for px in frame.data.chunks_exact_mut(4) {
+                px.swap(0, 2);
+                px[3] = 255;
+            }
+            Some(BGRAFrame {
+                display_time: frame.display_time,
+                width: frame.width,
+                height: frame.height,
+                data: frame.data,
+            })
+        }
+        Frame::XBGR(mut frame) => {
+            for px in frame.data.chunks_exact_mut(4) {
+                let (b, g, r) = (px[1], px[2], px[3]);
+                px[0] = b;
+                px[1] = g;
+                px[2] = r;
+                px[3] = 255;
+            }
+            Some(BGRAFrame {
+                display_time: frame.display_time,
+                width: frame.width,
+                height: frame.height,
+                data: frame.data,
+            })
+        }
+        Frame::RGB(frame) => {
+            let mut data = Vec::with_capacity(frame.data.len() / 3 * 4);
+            for px in frame.data.chunks_exact(3) {
+                data.extend_from_slice(&[px[2], px[1], px[0], 255]);
+            }
+            Some(BGRAFrame {
+                display_time: frame.display_time,
+                width: frame.width,
+                height: frame.height,
+                data,
+            })
+        }
+        Frame::BGR0(frame) => {
+            let mut data = Vec::with_capacity(frame.data.len() / 3 * 4);
+            for px in frame.data.chunks_exact(3) {
+                data.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+            Some(BGRAFrame {
+                display_time: frame.display_time,
+                width: frame.width,
+                height: frame.height,
+                data,
+            })
+        }
+        Frame::YUVFrame(_) => None,
+    }
+}
+
+fn scaled_dims(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    let scale = (max_width as f32 / width.max(1) as f32)
+        .min(max_height as f32 / height.max(1) as f32)
         .min(1.0);
     let pw = ((width as f32 * scale) as u32).max(1);
     let ph = ((height as f32 * scale) as u32).max(1);
@@ -218,10 +361,21 @@ fn downscale_bgra_into(
     dst_width: usize,
     dst_height: usize,
 ) {
+    let dst_row_bytes = dst_width * 4;
+    if dst_width == src_width && dst_height == src_height {
+        for y in 0..dst_height {
+            let s = y * row_stride;
+            let d = y * dst_row_bytes;
+            if s + dst_row_bytes <= src.len() && d + dst_row_bytes <= dst.len() {
+                dst[d..d + dst_row_bytes].copy_from_slice(&src[s..s + dst_row_bytes]);
+            }
+        }
+        return;
+    }
     for y in 0..dst_height {
         let sy = y * src_height / dst_height;
         let s_row = sy * row_stride;
-        let d_row = y * dst_width * 4;
+        let d_row = y * dst_row_bytes;
         for x in 0..dst_width {
             let sx = x * src_width / dst_width;
             let s = s_row + sx * 4;
@@ -230,5 +384,60 @@ fn downscale_bgra_into(
                 dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use scap::frame::{BGRxFrame, Frame, RGBFrame, RGBxFrame, XBGRFrame};
+
+    use super::frame_to_bgra;
+
+    fn frame_data(frame: Frame) -> Vec<u8> {
+        frame_to_bgra(frame).expect("convertible frame").data
+    }
+
+    #[test]
+    fn converts_bgrx_by_setting_alpha() {
+        let data = frame_data(Frame::BGRx(BGRxFrame {
+            display_time: 0,
+            width: 1,
+            height: 1,
+            data: vec![1, 2, 3, 0],
+        }));
+        assert_eq!(data, vec![1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn converts_rgbx_by_swapping_red_blue() {
+        let data = frame_data(Frame::RGBx(RGBxFrame {
+            display_time: 0,
+            width: 1,
+            height: 1,
+            data: vec![10, 20, 30, 0],
+        }));
+        assert_eq!(data, vec![30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn converts_xbgr_by_dropping_leading_pad() {
+        let data = frame_data(Frame::XBGR(XBGRFrame {
+            display_time: 0,
+            width: 1,
+            height: 1,
+            data: vec![9, 1, 2, 3],
+        }));
+        assert_eq!(data, vec![1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn converts_rgb_to_bgra() {
+        let data = frame_data(Frame::RGB(RGBFrame {
+            display_time: 0,
+            width: 2,
+            height: 1,
+            data: vec![10, 20, 30, 40, 50, 60],
+        }));
+        assert_eq!(data, vec![30, 20, 10, 255, 60, 50, 40, 255]);
     }
 }

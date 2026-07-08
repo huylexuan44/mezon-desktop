@@ -148,6 +148,66 @@ pub async fn read_file(path: std::path::PathBuf) -> Result<Vec<u8>> {
         .map_err(Into::into)
 }
 
+pub async fn file_len(path: std::path::PathBuf) -> Result<u64> {
+    runtime()
+        .spawn_blocking(move || std::fs::metadata(&path).map(|m| m.len()))
+        .await
+        .map_err(|e| anyhow::anyhow!("file metadata task failed: {e}"))?
+        .map_err(Into::into)
+}
+
+pub async fn read_file_range(path: std::path::PathBuf, offset: u64, len: usize) -> Result<Vec<u8>> {
+    runtime()
+        .spawn_blocking(move || {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            let mut file = std::fs::File::open(&path)?;
+            file.seek(SeekFrom::Start(offset))?;
+            let mut buf = vec![0u8; len];
+            file.read_exact(&mut buf)?;
+            Ok::<Vec<u8>, std::io::Error>(buf)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("file range read task failed: {e}"))?
+        .map_err(Into::into)
+}
+
+pub async fn put_bytes_return_etag(url: &str, data: Vec<u8>, content_type: &str) -> Result<String> {
+    let url = url.to_string();
+    let content_type = content_type.to_string();
+    runtime()
+        .spawn(async move {
+            let request = http::Request::builder()
+                .method(http::Method::PUT)
+                .uri(&url)
+                .header("Content-Type", content_type)
+                .body(AsyncBody::from(data))?;
+            let response = match tokio::time::timeout(
+                HTTP_TRANSFER_TIMEOUT,
+                http_client().send(request),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => anyhow::bail!(
+                    "HTTP PUT part timed out after {}s",
+                    HTTP_TRANSFER_TIMEOUT.as_secs()
+                ),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                anyhow::bail!("HTTP PUT part failed with status {}", status);
+            }
+            response
+                .headers()
+                .get(http::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("multipart part response missing ETag header"))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("upload part task failed: {e}"))?
+}
+
 pub async fn download_to(url: &str, dest: std::path::PathBuf) -> Result<()> {
     let url = url.to_string();
     runtime()
@@ -444,6 +504,14 @@ impl TransportClient {
                     .await
                     .map(|resp| resp.token)
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.write_voice_reaction(emojis, channel_id).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -1123,6 +1191,7 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -1131,6 +1200,11 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
+        reply: Option<crate::transport::OutgoingReply>,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        emojis: Vec<crate::transport::OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
         let content = content.to_string();
@@ -1145,6 +1219,47 @@ impl TransportClient {
                         is_public,
                         mode,
                         attachments,
+                        reply,
+                        mentions,
+                        hashtags,
+                        emojis,
+                        presign_finish,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn patch_message_presign_finish(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        mentions: Vec<crate::transport::OutgoingMention>,
+        presign_finish: Vec<String>,
+        create_time_seconds: u32,
+        mode: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let transport = self.inner.clone();
+        let content = content.to_string();
+
+        runtime()
+            .spawn(async move {
+                transport
+                    .patch_message_presign_finish(
+                        clan_id,
+                        channel_id,
+                        message_id,
+                        &content,
+                        mentions,
+                        presign_finish,
+                        create_time_seconds,
+                        mode,
+                        is_public,
                     )
                     .await
             })
@@ -1382,6 +1497,30 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn multipart_upload_attachment_file_start(
+        &self,
+        req: mezon_proto::api::UploadAttachmentRequest,
+    ) -> Result<mezon_proto::api::MultipartUploadAttachment> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.multipart_upload_attachment_file_start(req).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn multipart_upload_attachment_file_finish(
+        &self,
+        req: mezon_proto::api::MultipartUploadAttachmentFinishRequest,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.multipart_upload_attachment_file_finish(req).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn get_user_profile_on_clan(
         &self,
         clan_id: i64,
@@ -1503,6 +1642,30 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.list_channel_apps(clan_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_channel_attachment(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        file_type: String,
+        state: i32,
+        limit: i32,
+        before: u32,
+        after: u32,
+    ) -> Result<Vec<crate::transport::ApiChannelAttachment>> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move {
+                transport
+                    .list_channel_attachment(
+                        clan_id, channel_id, file_type, state, limit, before, after,
+                    )
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

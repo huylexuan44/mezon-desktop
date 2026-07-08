@@ -80,7 +80,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self::dev_defaults()
+        Self::prod_defaults()
     }
 }
 
@@ -150,14 +150,74 @@ impl AppConfig {
         }
     }
 
-    // pub fn prod_defaults() -> Self {
-    //     Self {
-    //     }
-    // }
+    pub fn prod_defaults() -> Self {
+        Self {
+            api_host: "api.mezon.ai".into(),
+            api_port: 443,
+            api_secure: true,
+            api_key: "REDACTED".into(),
+            api_gw_host: "gw.mezon.ai".into(),
+            api_gw_port: 443,
 
-    /// Load configuration from environment variables, falling back to [`dev_defaults`].
+            tcp_port: None,
+            stream_ws_url: "wss://stn.mezon.ai".into(),
+            meet_ws_url: "wss://meet.mezon.ai".into(),
+            notification_ws_url: "wss://gotify.mezon.ai".into(),
+
+            oauth2_authorize_url: "https://oauth2.mezon.ai/oauth2/auth".into(),
+            oauth2_client_id: "25f63a1f-16b8-488b-8b14-68520eeab77f".into(),
+            oauth2_redirect_uri: "http://127.0.0.1:4200/login/callback".into(),
+            oauth2_response_type: "code".into(),
+            oauth2_scope: "openid+offline".into(),
+            oauth2_code_challenge_method: "S256".into(),
+            oauth2_log_out: "https://oauth2.mezon.ai/oauth2/sessions/logout".into(),
+            oauth2_log_out_callback: "https://mezon.ai/logout/callback".into(),
+            google_client_id:
+                "391688022389-1k9kb377ea6dccpqii7m5pifjj0agsjc.apps.googleusercontent.com".into(),
+
+            domain_url: "https://mezon.ai".into(),
+            redirect_uri: "https://mezon.ai".into(),
+            logo_mezon: "https://cdn.mezon.ai/images/mezon_logo.png".into(),
+            base_img_url: "https://cdn.mezon.ai".into(),
+            profile_img_url: "https://profile.mezon.ai".into(),
+            imgproxy_base_url: "https://imgproxy.mezon.ai".into(),
+            imgproxy_key: "REDACTED".into(),
+
+            tenor_key: "REDACTED".into(),
+            tenor_url_categories: "https://tenor.googleapis.com/v2/categories?key=".into(),
+            tenor_url_search: "https://tenor.googleapis.com/v2/search?q=".into(),
+            tenor_url_featured: "https://tenor.googleapis.com/v2/featured?key=".into(),
+
+            mezon_treasury_url: "https://withdraw-api.nccsoft.vn".into(),
+            mezon_treasury_key: "REDACTED".into(),
+            contract_address: "0x4F17a94dD6E1B2D6241C4D1956C6c7a07ba2Ec50".into(),
+            mezon_treasury_url_network: "https://sepolia.etherscan.io".into(),
+
+            webrtc_ice_servers_url: "turn:relay.mezon.ai:5349".into(),
+            webrtc_ice_servers_username: "turnmezon".into(),
+            webrtc_ice_servers_credential: "REDACTED".into(),
+
+            fcm_api_key: "REDACTED".into(),
+            fcm_auth_domain: "mezon-772fa.firebaseapp.com".into(),
+            fcm_project_id: "mezon-772fa".into(),
+            fcm_storage_bucket: "mezon-772fa.appspot.com".into(),
+            fcm_messaging_sender_id: "285548761692".into(),
+            fcm_app_id: "1:285548761692:web:3ca531af1deecee74e0c99".into(),
+            fcm_measurement_id: "G-0WNQTXVMT3".into(),
+            fcm_vapid_key:
+                "REDACTED"
+                    .into(),
+
+            api_client_key_custom: "mezon.ai".into(),
+            sentry_dsn: "REDACTED".into(),
+            anonymous_user_id: "1767478432163172999".into(),
+            max_length_name_allowed: 64,
+            update_url: "https://cdn.mezon.ai/release/".into()
+        }
+    }
+
     pub fn from_env() -> Self {
-        let defaults = Self::dev_defaults();
+        let defaults = Self::prod_defaults();
         Self {
             api_host: opt_str(option_env!("NX_CHAT_APP_API_HOST"), &defaults.api_host),
             api_port: opt_u16(option_env!("NX_CHAT_APP_API_PORT"), defaults.api_port),
@@ -425,6 +485,50 @@ impl AppConfig {
             display_h,
         )
     }
+
+    /// Full-size imgproxy URL for the image viewer. Caps the longest side to
+    /// 1600 px preserving aspect ratio (React `MessageAttachment` / `GalleryModal`
+    /// open: width clamped to 1600, height scaled).
+    pub fn viewer_proxy(&self, source: &str, real_width: u32, real_height: u32) -> String {
+        if source.is_empty() {
+            return String::new();
+        }
+        let (w, h) = viewer_dimensions(real_width, real_height);
+        self.imgproxy_url(source, w, h, "fit")
+    }
+
+    /// Square thumbnail URL for the gallery grid (React: 120x120 `fill`).
+    pub fn gallery_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(source, GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE, "fill")
+    }
+
+    /// Thumbnail URL for the image viewer's sidebar strip.
+    pub fn viewer_thumb_proxy(&self, source: &str) -> String {
+        self.imgproxy_url(source, VIEWER_THUMB_SIZE, VIEWER_THUMB_SIZE, "fill")
+    }
+}
+
+pub const VIEWER_MAX_DIMENSION: u32 = 1600;
+pub const GALLERY_THUMB_SIZE: u32 = 120;
+pub const VIEWER_THUMB_SIZE: u32 = 80;
+
+/// Viewer imgproxy target dimensions: clamp the longest side to
+/// [`VIEWER_MAX_DIMENSION`], preserving aspect ratio. `0` means "let imgproxy
+/// decide" (unknown source size).
+fn viewer_dimensions(real_width: u32, real_height: u32) -> (u32, u32) {
+    if real_width == 0 || real_height == 0 {
+        return (VIEWER_MAX_DIMENSION, 0);
+    }
+    if real_width <= VIEWER_MAX_DIMENSION && real_height <= VIEWER_MAX_DIMENSION {
+        return (real_width, real_height);
+    }
+    if real_width >= real_height {
+        let h = (VIEWER_MAX_DIMENSION as u64 * real_height as u64 / real_width as u64) as u32;
+        (VIEWER_MAX_DIMENSION, h.max(1))
+    } else {
+        let w = (VIEWER_MAX_DIMENSION as u64 * real_width as u64 / real_height as u64) as u32;
+        (w.max(1), VIEWER_MAX_DIMENSION)
+    }
 }
 
 pub const REM: f32 = 16.0;
@@ -552,5 +656,163 @@ fn opt_bool(value: Option<&'static str>, default: bool) -> bool {
     match normalize(value) {
         Some(v) => matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
         None => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dims(w: u32, h: u32) -> (f32, f32, bool) {
+        let d = calculate_media_dimensions(w, h, false, 0);
+        (d.width, d.height, d.is_small)
+    }
+
+    #[test]
+    fn media_dimensions_landscape_caps_to_available_width() {
+        assert_eq!(dims(800, 600), (464.0, 348.0, false));
+    }
+
+    #[test]
+    fn media_dimensions_own_message_uses_wider_box() {
+        let d = calculate_media_dimensions(800, 600, true, 0);
+        assert_eq!((d.width, d.height), (480.0, 360.0));
+    }
+
+    #[test]
+    fn media_dimensions_tall_image_is_small() {
+        assert_eq!(dims(100, 400), (100.0, 400.0, true));
+    }
+
+    #[test]
+    fn media_dimensions_panorama_caps_height_band() {
+        assert_eq!(dims(2000, 100), (464.0, 23.0, true));
+    }
+
+    #[test]
+    fn media_dimensions_small_image_min_stretch() {
+        assert_eq!(dims(185, 75), (197.0, 80.0, false));
+    }
+
+    #[test]
+    fn media_dimensions_unknown_defaults_to_hundred_square() {
+        assert_eq!(dims(0, 0), (100.0, 100.0, true));
+    }
+
+    #[test]
+    fn dev_defaults_match_legacy_constants() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.api_host, "api.mezon.ai");
+        assert_eq!(cfg.api_port, 443);
+        assert!(cfg.api_secure);
+        assert_eq!(cfg.tcp_port, None);
+        assert_eq!(cfg.client_host(), "gw.mezon.ai");
+        assert_eq!(cfg.client_port(), 443);
+    }
+
+    #[test]
+    fn dev_defaults_use_dev_tcp_port() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.tcp_port, Some(7349));
+        assert_eq!(cfg.client_host(), "dev-mezon.nccsoft.vn");
+    }
+
+    #[test]
+    fn opt_helpers_fall_back_when_unset_or_blank() {
+        assert_eq!(opt_str(None, "def"), "def");
+        assert_eq!(opt_str(Some("  "), "def"), "def");
+        assert_eq!(opt_str(Some(" val "), "def"), "val");
+        assert_eq!(opt_u16(None, 8088), 8088);
+        assert_eq!(opt_u16(Some("443"), 8088), 443);
+        assert_eq!(opt_u16(Some("nope"), 8088), 8088);
+        assert_eq!(opt_u32(Some("128"), 64), 128);
+        assert_eq!(opt_opt_u16(None), None);
+        assert_eq!(opt_opt_u16(Some("7349")), Some(7349));
+        assert!(opt_bool(Some("true"), false));
+        assert!(opt_bool(Some("1"), false));
+        assert!(!opt_bool(None, false));
+    }
+
+    #[test]
+    fn imgproxy_url_rewrites_cdn_urls() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = "https://cdn.mezon.ai/images/avatar.png";
+        let out = cfg.imgproxy_url(src, 100, 100, "fit");
+        assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
+        assert!(out.ends_with("@webp"));
+        assert!(out.contains(src));
+    }
+
+    #[test]
+    fn imgproxy_url_skips_external_urls() {
+        let cfg = AppConfig::dev_defaults();
+        let src = "https://example.com/avatar.png";
+        assert_eq!(cfg.imgproxy_url(src, 100, 100, "fit"), src);
+    }
+
+    #[test]
+    fn imgproxy_url_proxies_cdn_on_dev_base() {
+        let cfg = AppConfig::dev_defaults();
+        let src = "https://cdn.mezon.ai/images/avatar.png";
+        let out = cfg.imgproxy_url(src, 100, 100, "fit");
+        assert!(out.starts_with("https://dev-imgproxy.nccsoft.vn/"));
+        assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
+        assert!(out.contains(src));
+        assert!(out.ends_with("@webp"));
+    }
+
+    #[test]
+    fn imgproxy_url_empty_returns_empty() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.imgproxy_url("", 100, 100, "fit"), "");
+    }
+
+    #[test]
+    fn avatar_proxy_matches_react_fit_100() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let out = cfg.avatar_proxy("https://cdn.mezon.ai/a.png");
+        assert!(
+            out.contains("rs:fit:100:100:1/mb:2097152/plain/"),
+            "avatar must be 100x100 fit like React MessageAvatar: {out}"
+        );
+    }
+
+    #[test]
+    fn attachment_proxy_uses_one_x_display_dims_like_react() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let src = "https://cdn.mezon.ai/images/photo.png";
+        let (url, display_w, display_h) = cfg.attachment_proxy(src, 1200, 800);
+        let pw = display_w.ceil() as u32;
+        let ph = display_h.ceil() as u32;
+        assert!(
+            url.contains(&format!("rs:fill:{pw}:{ph}:1/mb:2097152/plain/")),
+            "attachment proxy must be 1x display dims like React Photo.tsx: {url}"
+        );
+    }
+
+    #[test]
+    fn viewer_dimensions_clamp_longest_side() {
+        assert_eq!(viewer_dimensions(800, 600), (800, 600));
+        assert_eq!(viewer_dimensions(3200, 1600), (1600, 800));
+        assert_eq!(viewer_dimensions(1600, 3200), (800, 1600));
+        assert_eq!(viewer_dimensions(0, 0), (VIEWER_MAX_DIMENSION, 0));
+    }
+
+    #[test]
+    fn viewer_proxy_empty_returns_empty() {
+        let cfg = AppConfig::dev_defaults();
+        assert_eq!(cfg.viewer_proxy("", 100, 100), "");
     }
 }

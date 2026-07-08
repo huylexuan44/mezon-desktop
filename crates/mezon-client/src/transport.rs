@@ -18,6 +18,7 @@ use tokio::sync::{oneshot, watch};
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
+const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
 
 fn parse_id<T>(value: &str) -> Result<T>
 where
@@ -58,6 +59,7 @@ pub enum RealtimeEvent {
     VoiceEnded(realtime::VoiceEndedEvent),
     VoiceJoined(realtime::VoiceJoinedEvent),
     VoiceLeaved(realtime::VoiceLeavedEvent),
+    VoiceReaction(realtime::VoiceReactionSend),
     UserChannelAdded(realtime::UserChannelAdded),
     UserChannelRemoved(realtime::UserChannelRemoved),
     AddClanUser(realtime::AddClanUserEvent),
@@ -102,6 +104,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceEndedEvent(m) => Ok(Self::VoiceEnded(m)),
             realtime::envelope::Message::VoiceJoinedEvent(m) => Ok(Self::VoiceJoined(m)),
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
+            realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
             realtime::envelope::Message::UserChannelRemovedEvent(m) => {
                 Ok(Self::UserChannelRemoved(m))
@@ -285,6 +288,17 @@ impl MezonTransport {
 
     /// Send a raw message and wait for response.
     pub async fn send(&self, cid: u16, message: Vec<u8>) -> Result<(u32, Vec<u8>)> {
+        self.send_with_timeout(cid, message, self.send_timeout_ms)
+            .await
+    }
+
+    /// Send a raw message and wait for response, using an explicit timeout.
+    pub async fn send_with_timeout(
+        &self,
+        cid: u16,
+        message: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
         let (tx, rx) = oneshot::channel();
         self.pending_requests
@@ -294,7 +308,7 @@ impl MezonTransport {
             self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
-        let result = tokio::time::timeout(self.send_timeout_ms, rx)
+        let result = tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| {
                 self.pending_requests.lock().remove(&cid);
@@ -472,6 +486,41 @@ pub struct ApiAttachment {
     pub thumbnail: String,
     pub duration: i32,
     pub size: i32,
+}
+
+/// A channel attachment record returned by `ListChannelAttachment` (gallery /
+/// image viewer). Richer than [`ApiAttachment`] — it carries the uploader, the
+/// originating message, and the creation timestamp used for date grouping and
+/// pagination cursors. Mirrors React's `ApiChannelAttachment` / `IAttachmentEntity`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiChannelAttachment {
+    pub id: i64,
+    pub url: String,
+    pub filename: String,
+    pub filetype: String,
+    pub filesize: String,
+    pub width: i32,
+    pub height: i32,
+    pub uploader: i64,
+    pub message_id: i64,
+    pub create_time_seconds: u32,
+}
+
+impl ApiChannelAttachment {
+    fn from_proto(a: api::ChannelAttachment) -> Self {
+        Self {
+            id: a.id,
+            url: a.url,
+            filename: a.filename,
+            filetype: a.filetype,
+            filesize: a.filesize,
+            width: a.width,
+            height: a.height,
+            uploader: a.uploader,
+            message_id: a.message_id,
+            create_time_seconds: a.create_time_seconds,
+        }
+    }
 }
 
 fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
@@ -1150,6 +1199,8 @@ pub struct ApiMessageContent {
     pub cvtt: HashMap<String, String>,
     #[serde(default)]
     pub lky: Vec<ContentToken>,
+    #[serde(default, skip_serializing)]
+    pub presign_finish: Option<Vec<String>>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -1479,6 +1530,39 @@ pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
     out
 }
 
+fn with_presign_finish(content_json: String, keys: &[String]) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = value.as_object_mut() else {
+        return content_json;
+    };
+    obj.insert(
+        "presign_finish".into(),
+        serde_json::Value::Array(
+            keys.iter()
+                .map(|k| serde_json::Value::String(k.clone()))
+                .collect(),
+        ),
+    );
+    serde_json::to_string(&value).unwrap_or(content_json)
+}
+
+fn with_create_time_seconds(content_json: String, create_time_seconds: u32) -> String {
+    if create_time_seconds == 0 {
+        return content_json;
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(obj) = value.as_object_mut() else {
+        return content_json;
+    };
+    obj.insert(
+        "create_time_seconds".into(),
+        serde_json::Value::Number(create_time_seconds.into()),
+    );
+    serde_json::to_string(&value).unwrap_or(content_json)
+}
+
 fn build_message_content_json(
     text: &str,
     mentions: &[OutgoingMention],
@@ -1648,6 +1732,18 @@ impl MezonTransport {
     ) -> Result<(u32, Vec<u8>)> {
         tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
         self.send(cid, self.build_api_request(cid, api_name, body)?)
+            .await
+    }
+
+    async fn send_api_request_with_timeout(
+        &self,
+        cid: u16,
+        api_name: &str,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
+        self.send_with_timeout(cid, self.build_api_request(cid, api_name, body)?, timeout)
             .await
     }
 
@@ -2386,6 +2482,27 @@ impl MezonTransport {
         Ok(())
     }
 
+    pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
+        let cid = self.generate_cid();
+        tracing::debug!(target: "socket", "realtime_send: action=VoiceReactionSend cid={} channel_id={channel_id}", i32::from(cid));
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::VoiceReactionSend(
+                realtime::VoiceReactionSend {
+                    emojis,
+                    channel_id,
+                    sender_id: 0,
+                    media_type: 0,
+                },
+            )),
+        };
+        let (code, _response) = self.send(cid, envelope.encode_to_vec()).await?;
+        if code != 0 {
+            anyhow::bail!("write_voice_reaction error: code={code}");
+        }
+        Ok(())
+    }
+
     /// Report the user's read position (cf. React `writeLastSeenMessage`).
     pub async fn write_last_seen_message(
         &self,
@@ -2461,10 +2578,12 @@ impl MezonTransport {
             mentions,
             hashtags,
             emojis,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_channel_message_with_attachments(
         &self,
         clan_id: i64,
@@ -2473,7 +2592,27 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         attachments: Vec<api::MessageAttachment>,
+        reply: Option<OutgoingReply>,
+        mentions: Vec<OutgoingMention>,
+        hashtags: Vec<OutgoingHashtag>,
+        emojis: Vec<OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
     ) -> Result<ApiMessage> {
+        let references = reply
+            .map(|reply| api::MessageRef {
+                message_ref_id: reply.message_ref_id,
+                content: reply.content,
+                has_attachment: reply.has_attachment,
+                ref_type: 0,
+                message_sender_id: reply.message_sender_id,
+                message_sender_username: reply.message_sender_username,
+                message_sender_avatar: reply.message_sender_avatar,
+                message_sender_clan_nick: reply.message_sender_clan_nick,
+                message_sender_display_name: reply.message_sender_display_name,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
         self.send_channel_message_inner(
             clan_id,
             channel_id,
@@ -2481,10 +2620,11 @@ impl MezonTransport {
             is_public,
             mode,
             attachments,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            references,
+            mentions,
+            hashtags,
+            emojis,
+            presign_finish,
         )
         .await
     }
@@ -2526,6 +2666,7 @@ impl MezonTransport {
             mentions,
             hashtags,
             emojis,
+            None,
         )
         .await
     }
@@ -2543,6 +2684,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: Vec<OutgoingHashtag>,
         emojis: Vec<OutgoingEmoji>,
+        presign_finish: Option<Vec<String>>,
     ) -> Result<ApiMessage> {
         let cid = self.generate_cid();
 
@@ -2561,6 +2703,10 @@ impl MezonTransport {
         let markdowns = detect_markdown(content);
         let content_json =
             build_message_content_json(content, &mentions, &hashtags, &emojis, &markdowns);
+        let content_json = match &presign_finish {
+            Some(keys) => with_presign_finish(content_json, keys),
+            None => content_json,
+        };
         let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
@@ -3395,18 +3541,29 @@ impl MezonTransport {
         Ok(api::SdTopic::decode(response.as_slice())?)
     }
 
-    /// List channel attachment.
+    /// List channel attachment. Parameter order and fields mirror mezon-js
+    /// `listChannelAttachments(clanId, channelId, fileType, state, limit, before, after)`
+    /// so the server cache key matches the web client (see `CACHE_FLOW.md`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_channel_attachment(
         &self,
-        channel_id: i64,
         clan_id: i64,
+        channel_id: i64,
+        file_type: String,
+        state: i32,
         limit: i32,
-    ) -> Result<api::ChannelAttachmentList> {
+        before: u32,
+        after: u32,
+    ) -> Result<Vec<ApiChannelAttachment>> {
         let cid = self.generate_cid();
         let body = api::ListChannelAttachmentRequest {
-            channel_id,
             clan_id,
+            channel_id,
+            file_type,
             limit,
+            state,
+            before,
+            after,
             ..Default::default()
         }
         .encode_to_vec();
@@ -3416,7 +3573,13 @@ impl MezonTransport {
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
-        Ok(api::ChannelAttachmentList::decode(response.as_slice())?)
+        let list = api::ChannelAttachmentList::decode(response.as_slice())?;
+        Ok(list
+            .attachments
+            .into_iter()
+            .filter(|a| !a.url.is_empty())
+            .map(ApiChannelAttachment::from_proto)
+            .collect())
     }
 
     pub async fn forward_channel_message(
@@ -3474,6 +3637,50 @@ impl MezonTransport {
             attachments,
             mode,
             is_public,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request(cid, "UpdateChannelMessage", body)
+            .await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={}", code));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn patch_message_presign_finish(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        message_id: i64,
+        content: &str,
+        mentions: Vec<OutgoingMention>,
+        presign_finish: Vec<String>,
+        create_time_seconds: u32,
+        mode: i32,
+        is_public: bool,
+    ) -> Result<()> {
+        let cid = self.generate_cid();
+        let markdowns = detect_markdown(content);
+        let content_json = build_message_content_json(content, &mentions, &[], &[], &markdowns);
+        let content_json = with_presign_finish(content_json, &presign_finish);
+        let content_json = with_create_time_seconds(content_json, create_time_seconds);
+        let proto_mentions: Vec<api::MessageMention> = mentions
+            .iter()
+            .filter_map(OutgoingMention::to_proto)
+            .collect();
+        let body = realtime::ChannelMessageUpdate {
+            clan_id,
+            channel_id,
+            message_id,
+            content: content_json,
+            mentions: proto_mentions,
+            mode,
+            is_public,
+            hide_editted: true,
+            create_time_seconds,
             ..Default::default()
         }
         .encode_to_vec();
@@ -6572,7 +6779,12 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = req.encode_to_vec();
         let (code, response) = self
-            .send_api_request(cid, "MultipartUploadAttachmentFileStart", body)
+            .send_api_request_with_timeout(
+                cid,
+                "MultipartUploadAttachmentFileStart",
+                body,
+                Duration::from_millis(MULTIPART_OP_TIMEOUT_MS),
+            )
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6588,7 +6800,12 @@ impl MezonTransport {
         let cid = self.generate_cid();
         let body = req.encode_to_vec();
         let (code, response) = self
-            .send_api_request(cid, "MultipartUploadAttachmentFileFinish", body)
+            .send_api_request_with_timeout(
+                cid,
+                "MultipartUploadAttachmentFileFinish",
+                body,
+                Duration::from_millis(MULTIPART_OP_TIMEOUT_MS),
+            )
             .await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -6739,6 +6956,32 @@ mod tests {
         };
         let parsed = MezonTransport::message_from_proto(&msg);
         assert_eq!(parsed.avatar, "user.png");
+    }
+
+    #[test]
+    fn message_from_proto_captures_presign_finish_from_content() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: r#"{"t":"hi","presign_finish":["a/b/photo.png"]}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content, "hi");
+        assert_eq!(
+            parsed.content_tokens.presign_finish,
+            Some(vec!["a/b/photo.png".to_string()])
+        );
+    }
+
+    #[test]
+    fn message_from_proto_presign_finish_absent_is_none() {
+        let msg = api::ChannelMessage {
+            message_id: 1,
+            content: r#"{"t":"hi"}"#.into(),
+            ..Default::default()
+        };
+        let parsed = MezonTransport::message_from_proto(&msg);
+        assert_eq!(parsed.content_tokens.presign_finish, None);
     }
 
     #[test]

@@ -14,7 +14,8 @@ use mezon_client::transport::{
     hashtag_content_tokens, markdown_content_tokens, mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile, UrlAttachment,
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile,
+    UploadThumbnail, UrlAttachment,
 };
 
 use crate::AppConfig;
@@ -93,6 +94,7 @@ pub enum MessagesEvent {
         index: usize,
         message_id: MessageId,
     },
+    ReplyTargetChanged,
 }
 
 /// The message currently being replied to (composer state), mirroring React's
@@ -105,6 +107,8 @@ pub struct ReplyDraft {
     pub sender_avatar: String,
     pub content_preview: String,
     pub has_attachment: bool,
+    pub has_embed: bool,
+    pub is_poll: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -180,6 +184,9 @@ pub struct OutgoingAttachment {
     pub path: PathBuf,
     pub filename: String,
     pub filetype: String,
+    pub width: i32,
+    pub height: i32,
+    pub poster_jpeg: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -268,13 +275,6 @@ impl MessageList {
 
     fn replace(&mut self, items: Vec<Message>) {
         self.items = items;
-        self.reindex();
-    }
-
-    fn push_trim_regroup(&mut self, msg: Message) {
-        self.items.push(msg);
-        trim_messages(&mut self.items);
-        recompute_message_grouping(&mut self.items);
         self.reindex();
     }
 
@@ -688,6 +688,14 @@ impl MessagesStore {
     /// `selectMessageViewportIdsByChannelId`).
     pub fn viewport_messages(&self) -> &[Message] {
         self.messages()
+    }
+
+    pub fn message_in_channel(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> Option<&Message> {
+        self.cache.get(&channel_id)?.messages.get_by_id(message_id)
     }
 
     pub fn reaction_view(
@@ -1114,6 +1122,8 @@ impl MessagesStore {
         );
 
         let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             if !backoff.is_zero() {
                 cx.background_executor().timer(backoff).await;
@@ -1127,31 +1137,39 @@ impl MessagesStore {
                     MESSAGE_PAGE_LIMIT,
                 )
                 .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("Failed to load more messages for {channel_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                fetched = msgs.len(),
+                "load_more: page received"
+            );
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move {
+                    msgs.into_iter()
+                        .map(|m| message_from_api(m, cfg.as_ref(), viewer_id))
+                        .collect()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
-                let msgs = match result {
-                    Ok(page) => page.messages,
-                    Err(e) => {
-                        tracing::error!("Failed to load more messages for {channel_id}: {e}");
-                        cx.notify();
-                        return;
-                    }
-                };
-                tracing::debug!(
-                    channel_id = channel_id.get(),
-                    fetched = msgs.len(),
-                    "load_more: page received"
-                );
-                let cfg = AppConfig::try_global(cx);
-                let viewer_id = viewer_user_id(cx);
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let older: Vec<Message> = msgs
+                    let older: Vec<Message> = parsed
                         .into_iter()
-                        .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
-                        .map(|m| message_from_api(m, cfg, viewer_id))
+                        .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if older.is_empty() {
                         channel.has_more = false;
@@ -1237,6 +1255,8 @@ impl MessagesStore {
         );
 
         let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -1247,36 +1267,44 @@ impl MessagesStore {
                     MESSAGE_PAGE_LIMIT,
                 )
                 .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("Failed to load newer messages for {channel_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                anchor_after = newest_id.get(),
+                fetched = msgs.len(),
+                raw_first = msgs.first().map(|m| m.message_id).unwrap_or(0),
+                raw_last = msgs.last().map(|m| m.message_id).unwrap_or(0),
+                raw_min = msgs.iter().map(|m| m.message_id).min().unwrap_or(0),
+                raw_max = msgs.iter().map(|m| m.message_id).max().unwrap_or(0),
+                "load_more_bottom: page received (raw server ids)"
+            );
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move {
+                    msgs.into_iter()
+                        .map(|m| message_from_api(m, cfg.as_ref(), viewer_id))
+                        .collect()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
-                let msgs = match result {
-                    Ok(page) => page.messages,
-                    Err(e) => {
-                        tracing::error!("Failed to load newer messages for {channel_id}: {e}");
-                        cx.notify();
-                        return;
-                    }
-                };
-                tracing::debug!(
-                    channel_id = channel_id.get(),
-                    anchor_after = newest_id.get(),
-                    fetched = msgs.len(),
-                    raw_first = msgs.first().map(|m| m.message_id).unwrap_or(0),
-                    raw_last = msgs.last().map(|m| m.message_id).unwrap_or(0),
-                    raw_min = msgs.iter().map(|m| m.message_id).min().unwrap_or(0),
-                    raw_max = msgs.iter().map(|m| m.message_id).max().unwrap_or(0),
-                    "load_more_bottom: page received (raw server ids)"
-                );
-                let cfg = AppConfig::try_global(cx);
-                let viewer_id = viewer_user_id(cx);
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         return;
                     };
-                    let newer: Vec<Message> = msgs
+                    let newer: Vec<Message> = parsed
                         .into_iter()
-                        .filter(|m| !channel.messages.contains_id(MessageId(m.message_id)))
-                        .map(|m| message_from_api(m, cfg, viewer_id))
+                        .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if newer.is_empty() {
                         cx.emit(MessagesEvent::Updated { message_id: None });
@@ -1374,6 +1402,8 @@ impl MessagesStore {
         );
 
         let api = self.api.clone();
+        let cfg = AppConfig::try_global(cx).cloned();
+        let viewer_id = viewer_user_id(cx);
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -1384,24 +1414,28 @@ impl MessagesStore {
                     MESSAGE_PAGE_LIMIT,
                 )
                 .await;
+            let msgs = match result {
+                Ok(page) => page.messages,
+                Err(e) => {
+                    tracing::error!("jump_to_message AROUND fetch failed for {channel_id}: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_more = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let parsed: Vec<Message> = cx
+                .background_executor()
+                .spawn(async move {
+                    msgs.into_iter()
+                        .map(|m| message_from_api(m, cfg.as_ref(), viewer_id))
+                        .collect()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_more = false;
-                let msgs = match result {
-                    Ok(page) => page.messages,
-                    Err(e) => {
-                        tracing::error!(
-                            "jump_to_message AROUND fetch failed for {channel_id}: {e}"
-                        );
-                        cx.notify();
-                        return;
-                    }
-                };
-                let cfg = AppConfig::try_global(cx);
-                let viewer_id = viewer_user_id(cx);
-                let mut window: Vec<Message> = msgs
-                    .into_iter()
-                    .map(|m| message_from_api(m, cfg, viewer_id))
-                    .collect();
+                let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
                 // Centered trim if the window somehow exceeds the cap, keeping the
                 // target near the middle so both directions stay scrollable.
@@ -1447,7 +1481,7 @@ impl MessagesStore {
     /// Set the composer reply target (from a "Reply" action on a message).
     pub fn set_reply(&mut self, draft: ReplyDraft, cx: &mut Context<Self>) {
         self.reply_target = Some(draft);
-        cx.emit(MessagesEvent::Updated { message_id: None });
+        cx.emit(MessagesEvent::ReplyTargetChanged);
         cx.notify();
     }
 
@@ -1466,6 +1500,8 @@ impl MessagesStore {
                 sender_avatar: msg.avatar_url.to_string(),
                 content_preview: msg.content.clone(),
                 has_attachment: !msg.attachments.is_empty(),
+                has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
+                is_poll: msg.poll.is_some(),
             })
         else {
             return;
@@ -1476,7 +1512,7 @@ impl MessagesStore {
     /// Clear the composer reply target.
     pub fn clear_reply(&mut self, cx: &mut Context<Self>) {
         if self.reply_target.take().is_some() {
-            cx.emit(MessagesEvent::Updated { message_id: None });
+            cx.emit(MessagesEvent::ReplyTargetChanged);
             cx.notify();
         }
     }
@@ -1954,6 +1990,9 @@ impl MessagesStore {
         let mode = self.mode;
         let has_attachments = !attachments.is_empty();
         let reply = self.reply_target.take();
+        if reply.is_some() {
+            cx.emit(MessagesEvent::ReplyTargetChanged);
+        }
 
         self.clear_last_read_message(channel_id);
         let Some(channel) = self.cache.get_mut(&channel_id) else {
@@ -2015,10 +2054,23 @@ impl MessagesStore {
                 content_preview: crate::message::reply_preview_line(&draft.content_preview).into(),
                 content: draft.content_preview.clone(),
                 has_attachment: draft.has_attachment,
+                has_embed: draft.has_embed,
+                is_poll: draft.is_poll,
             }]);
         }
+        if has_attachments {
+            let optimistic_attachments: Vec<MessageAttachment> = attachments
+                .iter()
+                .map(MessageAttachment::optimistic_local)
+                .collect();
+            let (album_layout, viewer_media) =
+                build_media_presentation(&optimistic_attachments, AppConfig::try_global(cx));
+            optimistic = optimistic
+                .with_attachments(optimistic_attachments)
+                .with_media_presentation(album_layout, viewer_media);
+        }
         let old_len = channel.messages.len();
-        channel.messages.push_trim_regroup(optimistic);
+        channel.messages.push_grouped(optimistic);
         self.emit_appended(old_len, cx);
 
         let api = self.api.clone();
@@ -2033,77 +2085,150 @@ impl MessagesStore {
             message_sender_display_name: draft.sender_name,
         });
         cx.spawn(async move |this, cx| {
-            let result = if has_attachments {
-                let files = cx
-                    .background_spawn(async move {
-                        attachments
-                            .into_iter()
-                            .filter_map(|att| {
-                                std::fs::read(&att.path)
-                                    .inspect_err(|e| {
-                                        tracing::error!(
-                                            "attachment read failed for {:?}: {e}",
-                                            att.path
-                                        )
-                                    })
-                                    .ok()
-                                    .map(|data| UploadFile {
-                                        filename: att.filename,
-                                        filetype: att.filetype,
-                                        data,
-                                    })
-                            })
-                            .collect::<Vec<_>>()
+            if has_attachments {
+                let files: Vec<UploadFile> = attachments
+                    .into_iter()
+                    .map(|att| {
+                        let thumbnail = att.poster_jpeg.map(|jpeg| UploadThumbnail {
+                            filename: format!("{}.jpg", att.filename),
+                            data: jpeg,
+                        });
+                        UploadFile {
+                            path: att.path,
+                            filename: att.filename,
+                            filetype: att.filetype,
+                            width: att.width,
+                            height: att.height,
+                            thumbnail,
+                        }
                     })
-                    .await;
-                api.send_message_with_attachments(
+                    .collect();
+                let presigned = match api.presign_files(files).await {
+                    Ok(presigned) => presigned,
+                    Err(e) => {
+                        tracing::error!("presign attachments failed: {e}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.mark_temp_failed(channel_id, temp_id, cx);
+                        });
+                        return;
+                    }
+                };
+                let msg_attachments: Vec<_> =
+                    presigned.iter().map(|p| p.attachment.clone()).collect();
+                let keys: Vec<String> = msg_attachments
+                    .iter()
+                    .map(|a| presign::normalize_presign_key(&a.url))
+                    .collect();
+                let update_mentions = transport_mentions.clone();
+                let sent = match api
+                    .send_presigned_message(
+                        clan_id.get(),
+                        channel_id.get(),
+                        &content,
+                        is_public,
+                        mode,
+                        msg_attachments,
+                        reply_ref,
+                        transport_mentions,
+                        transport_hashtags,
+                        transport_emojis,
+                        Vec::new(),
+                    )
+                    .await
+                {
+                    Ok(sent) => sent,
+                    Err(e) => {
+                        tracing::error!("send_presigned_message failed: {e}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.mark_temp_failed(channel_id, temp_id, cx);
+                        });
+                        return;
+                    }
+                };
+                let real_message_id = sent.message_id;
+                let create_time_seconds = sent.create_time.max(0) as u32;
+                let _ = this.update(cx, |this, cx| {
+                    let confirmed =
+                        message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+                    this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                });
+                let (on_complete, mut completions) =
+                    tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
+                let drain_this = this.clone();
+                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                    while let Some(outcome) = completions.recv().await {
+                        let _ = drain_this.update(cx, |this, cx| {
+                            let message_id = MessageId(real_message_id);
+                            match outcome {
+                                AttachmentUploadOutcome::Uploaded(key) => {
+                                    this.mark_attachment_uploaded(channel_id, message_id, &key, cx);
+                                }
+                                AttachmentUploadOutcome::Failed(key) => {
+                                    this.mark_attachment_failed(channel_id, message_id, &key, cx);
+                                }
+                            }
+                        });
+                    }
+                })
+                .detach();
+                api.upload_presigned_and_patch(
                     clan_id.get(),
                     channel_id.get(),
+                    real_message_id,
                     &content,
-                    is_public,
+                    update_mentions,
+                    create_time_seconds,
+                    presigned,
+                    keys,
                     mode,
-                    files,
-                )
-                .await
-            } else if let Some(reply_ref) = reply_ref {
-                api.send_channel_message_reply(
-                    clan_id.get(),
-                    channel_id.get(),
-                    &content,
                     is_public,
-                    mode,
-                    reply_ref,
-                    transport_mentions,
-                    transport_hashtags,
-                    transport_emojis,
+                    on_complete,
                 )
-                .await
+                .await;
             } else {
-                api.send_channel_message(
-                    clan_id.get(),
-                    channel_id.get(),
-                    &content,
-                    is_public,
-                    mode,
-                    transport_mentions,
-                    transport_hashtags,
-                    transport_emojis,
-                )
-                .await
-            };
-            match result {
-                Ok(sent) => {
-                    let _ = this.update(cx, |this, cx| {
-                        let confirmed =
-                            message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-                        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("send_channel_message failed: {e}");
-                    let _ = this.update(cx, |this, cx| {
-                        this.mark_temp_failed(channel_id, temp_id, cx);
-                    });
+                let result = if let Some(reply_ref) = reply_ref {
+                    api.send_channel_message_reply(
+                        clan_id.get(),
+                        channel_id.get(),
+                        &content,
+                        is_public,
+                        mode,
+                        reply_ref,
+                        transport_mentions,
+                        transport_hashtags,
+                        transport_emojis,
+                    )
+                    .await
+                } else {
+                    api.send_channel_message(
+                        clan_id.get(),
+                        channel_id.get(),
+                        &content,
+                        is_public,
+                        mode,
+                        transport_mentions,
+                        transport_hashtags,
+                        transport_emojis,
+                    )
+                    .await
+                };
+                match result {
+                    Ok(sent) => {
+                        let _ = this.update(cx, |this, cx| {
+                            let confirmed = message_from_api(
+                                sent,
+                                AppConfig::try_global(cx),
+                                viewer_user_id(cx),
+                            );
+                            this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("send_channel_message failed: {e}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.mark_temp_failed(channel_id, temp_id, cx);
+                        });
+                    }
                 }
             }
         })
@@ -2157,7 +2282,7 @@ impl MessagesStore {
             .with_avatar_proxied(avatar_proxied)
             .with_attachments(vec![optimistic_attachment]);
         let old_len = channel.messages.len();
-        channel.messages.push_trim_regroup(optimistic);
+        channel.messages.push_grouped(optimistic);
         self.emit_appended(old_len, cx);
 
         let api = self.api.clone();
@@ -2467,7 +2592,8 @@ impl MessagesStore {
         match code {
             MessageCode::ChatUpdate | MessageCode::UpdateEphemeralMsg => {
                 let incoming = message_from_channel_proto(m, message_id.get(), cfg, viewer_id);
-                self.apply_message_update(storage_id, message_id, incoming, cx);
+                let presign_keys = presign::parse_presign_finish_keys(&m.content);
+                self.apply_message_update(storage_id, message_id, incoming, presign_keys, cx);
             }
             MessageCode::ChatRemove | MessageCode::DeleteEphemeralMsg => {
                 self.apply_message_remove(storage_id, message_id, cx);
@@ -2554,8 +2680,12 @@ impl MessagesStore {
         storage_id: ChannelId,
         message_id: MessageId,
         incoming: Message,
+        presign_keys: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
+        let base_img = AppConfig::try_global(cx)
+            .map(|c| c.base_img_url.clone())
+            .unwrap_or_default();
         let is_active = self.active_channel_id == Some(storage_id);
         let preview = incoming.content.clone();
         let Some(channel) = self.cache.get_mut(&storage_id) else {
@@ -2565,6 +2695,14 @@ impl MessagesStore {
             return;
         };
         merge_message_update(existing, &incoming);
+        if let Some(keys) = &presign_keys {
+            apply_presign_gate(
+                &mut existing.attachments,
+                keys,
+                &base_img,
+                existing.create_time,
+            );
+        }
         patch_reply_previews_after_update(&mut channel.messages, message_id, &preview);
         if is_active {
             cx.emit(MessagesEvent::Updated {
@@ -2586,6 +2724,7 @@ impl MessagesStore {
             .is_some_and(|draft| draft.message_ref_id == message_id)
         {
             self.reply_target = None;
+            cx.emit(MessagesEvent::ReplyTargetChanged);
         }
         self.retreat_last_message(storage_id, message_id);
 
@@ -3036,6 +3175,69 @@ impl MessagesStore {
         }
     }
 
+    fn mark_attachment_uploaded(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let cleared = {
+            let Some(channel) = self.cache.get_mut(&channel_id) else {
+                return;
+            };
+            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
+                return;
+            };
+            let mut cleared = false;
+            for att in message.attachments.iter_mut() {
+                if att.uploading && presign::normalize_presign_key(&att.url) == key {
+                    att.uploading = false;
+                    cleared = true;
+                }
+            }
+            cleared
+        };
+        if cleared && self.active_channel_id == Some(channel_id) {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+            cx.notify();
+        }
+    }
+
+    fn mark_attachment_failed(
+        &mut self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = {
+            let Some(channel) = self.cache.get_mut(&channel_id) else {
+                return;
+            };
+            let Some(message) = channel.messages.get_mut_by_id(message_id) else {
+                return;
+            };
+            let mut changed = false;
+            for att in message.attachments.iter_mut() {
+                if att.uploading && presign::normalize_presign_key(&att.url) == key {
+                    att.uploading = false;
+                    att.upload_failed = true;
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed && self.active_channel_id == Some(channel_id) {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+            cx.notify();
+        }
+    }
+
     fn resync(&mut self, cx: &mut Context<Self>) {
         tracing::info!("MessagesStore resync — marking message cache stale");
         self.cache.mark_all_stale();
@@ -3208,7 +3410,22 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.content = incoming.content.clone();
     existing.spans = incoming.spans.clone();
     existing.rich_layout = incoming.rich_layout.clone();
-    existing.attachments = incoming.attachments.clone();
+    let prior_attachments = std::mem::take(&mut existing.attachments);
+    if incoming.attachments.is_empty() {
+        existing.attachments = prior_attachments;
+    } else {
+        let mut new_attachments = incoming.attachments.clone();
+        if prior_attachments.len() == new_attachments.len() {
+            for (att, prior_att) in new_attachments.iter_mut().zip(prior_attachments.iter()) {
+                if att.local_source.is_none() {
+                    att.local_source = prior_att.local_source.clone();
+                }
+                att.uploading = prior_att.uploading;
+                att.upload_failed = prior_att.upload_failed;
+            }
+        }
+        existing.attachments = new_attachments;
+    }
     existing.references = incoming.references.clone();
     existing.update_time = incoming.update_time;
     existing.is_edited = incoming.is_edited;
@@ -3406,7 +3623,23 @@ fn outgoing_sender_profile(
     (display_name, avatar_url, avatar_proxied.into())
 }
 
-/// Preserve optimistic/current-user metadata when send acks omit avatar/sender fields.
+fn carry_local_previews(prior: &Message, confirmed: &mut Message) {
+    if prior.attachments.len() != confirmed.attachments.len() {
+        return;
+    }
+    for (att, prior_att) in confirmed
+        .attachments
+        .iter_mut()
+        .zip(prior.attachments.iter())
+    {
+        if att.local_source.is_none() {
+            att.local_source = prior_att.local_source.clone();
+        }
+        att.uploading = prior_att.uploading;
+        att.upload_failed = prior_att.upload_failed;
+    }
+}
+
 fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     if incoming.sender_id.is_empty() || incoming.sender_id == "0" {
         incoming.sender_id = prior.sender_id.clone();
@@ -3424,7 +3657,50 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
         incoming.day_label = prior.day_label.clone();
         incoming.row_anchor_id = prior.row_anchor_id;
     }
+    if incoming.references.is_empty() && !prior.references.is_empty() {
+        incoming.references = prior.references.clone();
+    }
+    carry_local_previews(prior, &mut incoming);
     incoming
+}
+
+fn apply_presign_gate(
+    attachments: &mut Vec<MessageAttachment>,
+    keys: &[String],
+    base_img: &str,
+    create_time: i64,
+) {
+    let presignable = attachments
+        .iter()
+        .filter(|a| presign::is_mezon_cdn(&a.url, base_img))
+        .count();
+    let all_finished = presign::all_presign_finished(presignable, keys.len());
+    if all_finished {
+        for a in attachments.iter_mut() {
+            a.presign_pending = false;
+        }
+    } else {
+        let now = now_unix_seconds();
+        attachments.retain(|a| {
+            !presign::is_expired_presign_attachment(&a.url, Some(keys), base_img, create_time, now)
+        });
+        for a in attachments.iter_mut() {
+            a.presign_pending = presign::presign_pending(&a.url, Some(keys), base_img);
+        }
+    }
+    #[cfg(debug_assertions)]
+    for a in attachments
+        .iter()
+        .filter(|a| presign::is_mezon_cdn(&a.url, base_img))
+    {
+        tracing::info!(
+            key = %presign::normalize_presign_key(&a.url),
+            finish_keys = keys.len(),
+            all_finished,
+            pending = a.presign_pending,
+            "presign gate"
+        );
+    }
 }
 
 /// Client send timestamp for an optimistic row (React `client_send_time / 1000`).
@@ -3494,21 +3770,14 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         .into_iter()
         .map(|a| MessageAttachment::from_api(a, cfg))
         .collect();
-    if let Some(keys) = presign::parse_presign_finish_keys(&m.content) {
+    let presign_keys: Option<Vec<String>> = m.content_tokens.presign_finish.as_ref().map(|ks| {
+        ks.iter()
+            .map(|k| presign::normalize_presign_key(k))
+            .collect()
+    });
+    if let Some(keys) = presign_keys {
         let base_img = cfg.map(|c| c.base_img_url.as_str()).unwrap_or_default();
-        let now = now_unix_seconds();
-        attachments.retain(|a| {
-            !presign::is_expired_presign_attachment(
-                &a.url,
-                Some(&keys),
-                base_img,
-                m.create_time,
-                now,
-            )
-        });
-        for a in attachments.iter_mut() {
-            a.presign_pending = presign::presign_pending(&a.url, Some(&keys), base_img);
-        }
+        apply_presign_gate(&mut attachments, &keys, base_img, m.create_time);
     }
     let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let is_forwarded = m.content_tokens.fwd;
@@ -4084,10 +4353,18 @@ fn message_reference_from_api(
     } else {
         r.message_sender_username.clone()
     };
-    // The reference content is itself a JSON `IExtendedMessage`; extract its text.
-    let content = serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&r.content)
-        .map(|c| c.t)
-        .unwrap_or_else(|_| r.content.clone());
+    let parsed =
+        serde_json::from_str::<mezon_client::transport::ApiMessageContent>(&r.content).ok();
+    let content = parsed
+        .as_ref()
+        .map(|c| c.t.clone())
+        .unwrap_or_else(|| r.content.clone());
+    let has_embed = parsed
+        .as_ref()
+        .is_some_and(|c| c.t.is_empty() && !c.embed.is_empty());
+    let is_poll = parsed
+        .as_ref()
+        .is_some_and(|c| build_poll_data(c, &content, cfg).is_some());
     let sender_avatar = cfg
         .map(|c| c.avatar_proxy(&r.message_sender_avatar))
         .unwrap_or_else(|| r.message_sender_avatar.clone());
@@ -4100,6 +4377,8 @@ fn message_reference_from_api(
         content,
         content_preview,
         has_attachment: r.has_attachment,
+        has_embed,
+        is_poll,
     }
 }
 
@@ -4148,6 +4427,37 @@ impl MessageAttachment {
             display_width,
             display_height,
             tenor_mp4,
+            local_source: None,
+            uploading: false,
+            upload_failed: false,
+        }
+    }
+
+    pub(crate) fn optimistic_local(att: &OutgoingAttachment) -> Self {
+        let width = att.width.max(0) as u32;
+        let height = att.height.max(0) as u32;
+        let (display_width, display_height) =
+            crate::config::attachment_display_dimensions(width, height);
+        let is_image = att.filetype.starts_with("image/");
+        Self {
+            url: String::new(),
+            filename: att.filename.clone(),
+            filetype: att.filetype.clone(),
+            width,
+            height,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 0,
+            size_label: SharedString::default(),
+            presign_pending: false,
+            proxied_src: SharedString::default(),
+            thumbnail_proxied: SharedString::default(),
+            display_width,
+            display_height,
+            tenor_mp4: None,
+            local_source: is_image.then(|| att.path.clone()),
+            uploading: true,
+            upload_failed: false,
         }
     }
 }
@@ -4513,6 +4823,86 @@ mod tests {
         assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
     }
 
+    #[test]
+    fn message_from_api_gates_cdn_attachment_until_presign_finished() {
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.mezon.ai".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let msg = |finish: Option<Vec<String>>| ApiMessage {
+            message_id: 5,
+            content: "hi".into(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                t: "hi".into(),
+                presign_finish: finish,
+                ..Default::default()
+            },
+            code: 0,
+            sender_id: 1,
+            sender_name: "Alice".into(),
+            avatar: String::new(),
+            create_time: 0,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![mezon_client::transport::ApiAttachment {
+                url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+                filename: "photo.png".into(),
+                filetype: "image/png".into(),
+                width: 800,
+                height: 600,
+                thumbnail: String::new(),
+                duration: 0,
+                size: 0,
+            }],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+        };
+
+        let pending = message_from_api(msg(Some(vec![])), Some(&cfg), None);
+        assert!(pending.attachments[0].presign_pending);
+
+        let finished = message_from_api(msg(Some(vec!["photo".into()])), Some(&cfg), None);
+        assert!(!finished.attachments[0].presign_pending);
+
+        let mismatched_key_but_count_reached =
+            message_from_api(msg(Some(vec!["some-other-key".into()])), Some(&cfg), None);
+        assert!(!mismatched_key_but_count_reached.attachments[0].presign_pending);
+
+        let no_field = message_from_api(msg(None), Some(&cfg), None);
+        assert!(!no_field.attachments[0].presign_pending);
+    }
+
+    #[test]
+    fn partial_update_recomputes_presign_pending_on_kept_attachments() {
+        let base = "https://cdn.mezon.ai";
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        existing.attachments = vec![MessageAttachment {
+            url: "https://cdn.mezon.ai/uploads/photo.png".into(),
+            presign_pending: true,
+            ..Default::default()
+        }];
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        assert!(incoming.attachments.is_empty());
+        merge_message_update(&mut existing, &incoming);
+        assert!(
+            existing.attachments[0].presign_pending,
+            "partial update keeps the prior attachment with its stale flag"
+        );
+
+        apply_presign_gate(
+            &mut existing.attachments,
+            &["photo".to_string()],
+            base,
+            existing.create_time,
+        );
+        assert!(
+            !existing.attachments[0].presign_pending,
+            "recompute against the arrived presign_finish flips the gate"
+        );
+    }
+
     fn plain_api_message(
         code: i32,
         references: Vec<mezon_client::transport::ApiMessageRef>,
@@ -4578,12 +4968,125 @@ mod tests {
     }
 
     #[test]
+    fn merge_sparse_sender_carries_local_preview() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "", "42", "Me", 100)
+            .with_attachments(vec![MessageAttachment {
+                filename: "photo.png".into(),
+                local_source: Some(std::path::PathBuf::from("/tmp/photo.png")),
+                ..Default::default()
+            }]);
+        let confirmed = Message::new(MessageId(99), "", "42", "Me", 500).with_attachments(vec![
+            MessageAttachment {
+                filename: "sanitized_photo.png".into(),
+                url: "https://cdn.mezon.ai/photo.png".into(),
+                ..Default::default()
+            },
+        ]);
+        let merged = merge_sparse_sender(&optimistic, confirmed);
+        assert_eq!(
+            merged.attachments[0].local_source,
+            Some(std::path::PathBuf::from("/tmp/photo.png"))
+        );
+    }
+
+    #[test]
+    fn merge_sparse_sender_carries_reply_reference() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "hi", "42", "Me", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Alice".into(),
+                content: "original".into(),
+                content_preview: "original".into(),
+                ..Default::default()
+            }]);
+        let confirmed = Message::new(MessageId(99), "hi", "42", "Me", 500);
+        assert!(confirmed.references.is_empty());
+        let merged = merge_sparse_sender(&optimistic, confirmed);
+        assert_eq!(merged.references.len(), 1);
+        assert_eq!(merged.references[0].message_ref_id, MessageId(7));
+        assert_eq!(merged.references[0].sender_name, "Alice");
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_confirmed_reference_when_present() {
+        let optimistic = Message::new(MessageId::next_optimistic(), "hi", "42", "Me", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Stale".into(),
+                ..Default::default()
+            }]);
+        let confirmed = Message::new(MessageId(99), "hi", "42", "Me", 500).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Fresh".into(),
+                ..Default::default()
+            },
+        ]);
+        let merged = merge_sparse_sender(&optimistic, confirmed);
+        assert_eq!(merged.references[0].sender_name, "Fresh");
+    }
+
+    #[test]
+    fn carry_local_previews_copies_local_path_by_index() {
+        let prior = Message::new(MessageId::next_optimistic(), "", "42", "Me", 100)
+            .with_attachments(vec![MessageAttachment {
+                filename: "photo.png".into(),
+                local_source: Some(std::path::PathBuf::from("/tmp/photo.png")),
+                ..Default::default()
+            }]);
+        let mut confirmed = Message::new(MessageId(7), "", "42", "Me", 500).with_attachments(vec![
+            MessageAttachment {
+                filename: "1700_0_photo.png".into(),
+                url: "https://cdn.mezon.ai/photo.png".into(),
+                ..Default::default()
+            },
+        ]);
+        carry_local_previews(&prior, &mut confirmed);
+        assert_eq!(
+            confirmed.attachments[0].local_source,
+            Some(std::path::PathBuf::from("/tmp/photo.png"))
+        );
+    }
+
+    #[test]
+    fn optimistic_multi_image_gets_album_layout() {
+        let outgoing = |name: &str| OutgoingAttachment {
+            path: format!("/tmp/{name}").into(),
+            filename: name.to_string(),
+            filetype: "image/png".to_string(),
+            width: 100,
+            height: 100,
+            poster_jpeg: None,
+        };
+        let atts = [outgoing("a.png"), outgoing("b.png")];
+        let optimistic: Vec<MessageAttachment> = atts
+            .iter()
+            .map(MessageAttachment::optimistic_local)
+            .collect();
+        let (album_layout, _) = build_media_presentation(&optimistic, None);
+        assert!(album_layout.is_some());
+        assert!(optimistic.iter().all(|a| a.local_source.is_some()));
+    }
+
+    #[test]
+    fn carry_local_previews_skips_on_count_mismatch() {
+        let prior = Message::new(MessageId::next_optimistic(), "", "42", "Me", 100)
+            .with_attachments(vec![MessageAttachment {
+                local_source: Some(std::path::PathBuf::from("/tmp/a.png")),
+                ..Default::default()
+            }]);
+        let mut confirmed = Message::new(MessageId(7), "", "42", "Me", 500);
+        carry_local_previews(&prior, &mut confirmed);
+        assert!(confirmed.attachments.is_empty());
+    }
+
+    #[test]
     fn optimistic_create_time_increments_within_same_sender_burst() {
         let now = 1_700_000_000i64;
         let mut list =
             MessageList::from_messages(vec![Message::new(MessageId(1), "a", "42", "Me", now - 5)]);
         assert_eq!(optimistic_create_time_at(&list, "42", now), now + 1);
-        list.push_trim_regroup(Message::new(
+        list.push_grouped(Message::new(
             MessageId::next_optimistic(),
             "b",
             "42",
@@ -4993,6 +5496,8 @@ mod tests {
                     content: "orig".into(),
                     content_preview: "orig".into(),
                     has_attachment: false,
+                    has_embed: false,
+                    is_poll: false,
                 },
             ]),
         ]);

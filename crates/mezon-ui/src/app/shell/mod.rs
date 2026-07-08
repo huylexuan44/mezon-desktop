@@ -15,8 +15,10 @@ use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
 mod confirm_delete_message_modal;
+mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
+use upload_limit_modal::UploadLimitModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
@@ -151,6 +153,23 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn show_upload_limit(
+        &mut self,
+        title: impl Into<SharedString>,
+        content: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| UploadLimitModal {
+            focus_handle: cx.focus_handle(),
+            title: title.into(),
+            content: content.into(),
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

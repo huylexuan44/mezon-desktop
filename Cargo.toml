@@ -236,6 +236,7 @@ windows-core         = "0.61.2"
 windows-sys = { version = "0.61" }
 # ---------- Graphics ----------
 image                = "0.25.1"
+yuv                  = "0.8"
 qrcode               = { version = "0.14", default-features = false }
 wgpu                 = { git = "https://github.com/zed-industries/wgpu.git", branch = "v29", features = ["wgsl"] }
 naga                 = { version = "29.0", features = ["wgsl-in"] }

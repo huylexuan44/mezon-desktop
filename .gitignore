@@ -34,3 +34,9 @@ install-team.sh
 profile.json.gz
 scripts/*
 !scripts/linux-deps
+!scripts/build-deb.sh
+!scripts/perf-monitor-macos.sh
+!scripts/perf-monitor-windows.ps1
+!scripts/perf-compare.sh
+
+perf-report*.json

@@ -1,8 +1,10 @@
+use std::path::PathBuf;
+
 use gpui::{
-    AnyView, Context, Entity, SharedString, StyleRefinement, Subscription, Window, div, prelude::*,
-    px,
+    AnyView, App, Context, Entity, ExternalPaths, FontWeight, SharedString, StyleRefinement,
+    Subscription, Window, div, prelude::*, px, rgb, rgba,
 };
-use mezon_store::{ChannelId, Settings};
+use mezon_store::{ChannelId, MessagesEvent, MessagesStore, Settings};
 use ui::PopoverMenuHandle;
 
 use crate::chat::ReplyTarget;
@@ -14,9 +16,8 @@ use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
 use crate::chat::message::ChannelMessages;
 use crate::chat::pinned_popover::PinnedPopoverPanel;
-use crate::image_cache::{
-    AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
-};
+use crate::components::primitives::{Icon, IconName};
+use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
 pub struct ChatArea {
@@ -25,12 +26,11 @@ pub struct ChatArea {
     member_panel: Option<Entity<MemberListPanel>>,
     member_source: Option<MemberSource>,
     member_avatar_cache: Entity<LruImageCache>,
-    #[allow(dead_code)]
-    replying_to: Option<ReplyTarget>,
     settings: Entity<Settings>,
     header: Entity<ChatHeader>,
     typing: Entity<ChannelTyping>,
     _submit_sub: Option<Subscription>,
+    _reply_sub: Option<Subscription>,
 }
 
 impl ChatArea {
@@ -42,26 +42,18 @@ impl ChatArea {
         let layout = cx.weak_entity();
         let header = cx.new(|cx| ChatHeader::new(layout, &settings, cx));
         let typing = cx.new(|cx| ChannelTyping::new(&settings, cx));
-        let member_avatar_cache = cx.new(|cx| {
-            LruImageCache::avatar_thumbnail(
-                "member-avatar",
-                AVATAR_IMAGE_CACHE_CAPACITY,
-                AVATAR_IMAGE_CACHE_BYTES,
-                AVATAR_ENTRY_MAX_BYTES,
-                cx,
-            )
-        });
+        let member_avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         Self {
             timeline,
             mention_input: None,
             member_panel: None,
             member_source: None,
             member_avatar_cache,
-            replying_to: None,
             settings,
             header,
             typing,
             _submit_sub: None,
+            _reply_sub: None,
         }
     }
 
@@ -111,7 +103,9 @@ impl ChatArea {
                 |this: &mut crate::ChatLayout, _, event: &MentionInputEvent, window, cx| match event
                 {
                     MentionInputEvent::Submit => this.send_current_message(window, cx),
-                    MentionInputEvent::Cancel => {}
+                    MentionInputEvent::Cancel => {
+                        MessagesStore::global(cx).update(cx, |store, cx| store.clear_reply(cx));
+                    }
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }
@@ -119,6 +113,22 @@ impl ChatArea {
             );
             self._submit_sub = Some(submit_sub);
             self.mention_input = Some(mention_input);
+
+            let reply_sub = cx.subscribe_in(
+                &MessagesStore::global(cx),
+                window,
+                |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
+                    if matches!(event, MessagesEvent::ReplyTargetChanged) {
+                        if store.read(cx).reply_target().is_some()
+                            && let Some(input) = this.chat_area.mention_input.clone()
+                        {
+                            input.update(cx, |input, cx| input.focus_input(window, cx));
+                        }
+                        cx.notify();
+                    }
+                },
+            );
+            self._reply_sub = Some(reply_sub);
         }
     }
 
@@ -169,7 +179,15 @@ impl ChatArea {
 
         let theme = cx.theme();
 
-        let input_bar = InputBar::new().with_mention_input(mention_input);
+        let replying_to = MessagesStore::global(cx)
+            .read(cx)
+            .reply_target()
+            .map(|draft| ReplyTarget {
+                sender_name: draft.sender_name.clone(),
+            });
+        let input_bar = InputBar::new()
+            .with_mention_input(mention_input.clone())
+            .replying_to(replying_to);
 
         let header = AnyView::from(self.header.clone()).cached(
             StyleRefinement::default()
@@ -178,18 +196,76 @@ impl ChatArea {
                 .flex_shrink_0(),
         );
 
+        let drop_input = mention_input.clone();
+        let drop_title = mezon_i18n::t(locale, "common.uploadToChannel")
+            .replace("{{channelName}}", channel_name.unwrap_or_default());
+        let drop_body = mezon_i18n::t(locale, "common.uploadInstructions");
+        let drop_overlay = div()
+            .absolute()
+            .inset_0()
+            .invisible()
+            .group_drag_over::<ExternalPaths>("chat-drop-zone", |style| style.visible())
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000e6))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(16.))
+                    .w(px(400.))
+                    .h(px(240.))
+                    .rounded(px(8.))
+                    .border_2()
+                    .border_dashed()
+                    .border_color(rgb(0xffffff))
+                    .bg(rgb(0x5865f2))
+                    .child(
+                        Icon::new(IconName::FileAndFolder)
+                            .size(px(48.))
+                            .text_color(rgb(0xffffff)),
+                    )
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(18.))
+                            .text_color(rgb(0xffffff))
+                            .child(SharedString::from(drop_title)),
+                    )
+                    .child(
+                        div()
+                            .px(px(24.))
+                            .text_center()
+                            .text_size(px(14.))
+                            .text_color(rgb(0xffffff))
+                            .child(SharedString::from(drop_body)),
+                    ),
+            );
+
         let message_column = div()
+            .relative()
+            .group("chat-drop-zone")
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
+            .on_drop(
+                move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                    let dropped: Vec<PathBuf> = paths.paths().to_vec();
+                    drop_input.update(cx, |input, cx| input.add_dropped_paths(dropped, window, cx));
+                },
+            )
             .child(div().flex_1().min_h_0().overflow_hidden().child(
                 AnyView::from(self.timeline.clone()).cached(StyleRefinement::default().size_full()),
             ))
             .child(self.typing.clone())
-            .child(input_bar.render(theme, locale));
+            .child(input_bar.render(theme, locale))
+            .child(drop_overlay);
 
         let body = div()
             .flex()
