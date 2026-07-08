@@ -41,15 +41,15 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
     ranges
 }
 
-fn attachment_cdn_url(base_img_url: &str, presigned_url: &str, filename: &str) -> String {
+fn attachment_cdn_url(base_img_url: &str, filename: &str) -> Result<String> {
     if filename.is_empty() {
-        return presigned_url
-            .split('?')
-            .next()
-            .unwrap_or(presigned_url)
-            .to_string();
+        anyhow::bail!("attachment upload returned an empty filename");
     }
-    format!("{}/{}", base_img_url.trim_end_matches('/'), filename)
+    Ok(format!(
+        "{}/{}",
+        base_img_url.trim_end_matches('/'),
+        filename
+    ))
 }
 
 fn image_dimensions(data: &[u8]) -> (i32, i32) {
@@ -130,6 +130,12 @@ pub struct UrlAttachment {
     pub url: String,
     pub filename: String,
     pub filetype: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum AttachmentUploadOutcome {
+    Uploaded(String),
+    Failed(String),
 }
 
 impl AppApi {
@@ -801,7 +807,9 @@ impl AppApi {
             thumbnail,
         } = file;
         let filename = sanitize_filename(&filename);
-        let size = clamp_i32(crate::transport_runtime::file_len(path.clone()).await? as usize);
+        let raw_size = crate::transport_runtime::file_len(path.clone()).await?;
+        let size = i32::try_from(raw_size)
+            .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
         let thumbnail_url = match thumbnail {
             Some(thumb) => self.upload_thumbnail(thumb).await,
             None => String::new(),
@@ -826,7 +834,7 @@ impl AppApi {
                     ranges.len()
                 );
             }
-            let url = attachment_cdn_url(&self.base_img_url, "", &started.filename);
+            let url = attachment_cdn_url(&self.base_img_url, &started.filename)?;
             (
                 url,
                 UploadPlan::Multipart {
@@ -843,7 +851,7 @@ impl AppApi {
                 .transport
                 .upload_attachment_file(&filename, &filetype, size, width, height)
                 .await?;
-            let url = attachment_cdn_url(&self.base_img_url, &upload.url, &upload.filename);
+            let url = attachment_cdn_url(&self.base_img_url, &upload.filename)?;
             (
                 url,
                 UploadPlan::Single {
@@ -1027,7 +1035,7 @@ impl AppApi {
         keys: Vec<String>,
         mode: i32,
         is_public: bool,
-        on_complete: tokio::sync::mpsc::UnboundedSender<String>,
+        on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
     ) {
         use futures::StreamExt as _;
         let mut stream = futures::stream::iter(
@@ -1042,10 +1050,13 @@ impl AppApi {
         while let Some((key, result)) = stream.next().await {
             match result {
                 Ok(()) => {
-                    let _ = on_complete.send(key.clone());
+                    let _ = on_complete.send(AttachmentUploadOutcome::Uploaded(key.clone()));
                     finished.push(key);
                 }
-                Err(e) => tracing::error!("attachment upload failed: {e}"),
+                Err(e) => {
+                    tracing::error!("attachment upload failed: {e}");
+                    let _ = on_complete.send(AttachmentUploadOutcome::Failed(key));
+                }
             }
             if finished.len() - synced >= PRESIGN_EDIT_BATCH_SIZE {
                 if let Err(e) = self
@@ -1170,11 +1181,7 @@ impl AppApi {
             .upload_attachment_file(filename, filetype, size, width, height)
             .await?;
         crate::transport_runtime::put_bytes_to_url(&upload.url, data).await?;
-        Ok(attachment_cdn_url(
-            &self.base_img_url,
-            &upload.url,
-            &upload.filename,
-        ))
+        attachment_cdn_url(&self.base_img_url, &upload.filename)
     }
 
     async fn upload_media_from_url(
@@ -1507,9 +1514,9 @@ mod tests {
         assert_eq!(
             attachment_cdn_url(
                 "https://cdn.mezon.ai",
-                "https://cdn-api.mezon.ai/mezon/1826814768338440192/2074336632294608896.png?X-Amz-Signature=deadbeef",
                 "mezon/1826814768338440192/2074336632294608896.png",
-            ),
+            )
+            .unwrap(),
             "https://cdn.mezon.ai/mezon/1826814768338440192/2074336632294608896.png"
         );
     }
@@ -1517,20 +1524,13 @@ mod tests {
     #[test]
     fn attachment_url_trims_trailing_slash_on_base() {
         assert_eq!(
-            attachment_cdn_url("https://cdn.mezon.ai/", "https://s3/x.png?sig=1", "x.png"),
+            attachment_cdn_url("https://cdn.mezon.ai/", "x.png").unwrap(),
             "https://cdn.mezon.ai/x.png"
         );
     }
 
     #[test]
-    fn attachment_url_falls_back_to_presigned_when_filename_empty() {
-        assert_eq!(
-            attachment_cdn_url(
-                "https://cdn.mezon.ai",
-                "https://cdn-api.mezon.ai/x.png?sig=1",
-                ""
-            ),
-            "https://cdn-api.mezon.ai/x.png"
-        );
+    fn attachment_url_errors_when_filename_empty() {
+        assert!(attachment_cdn_url("https://cdn.mezon.ai", "").is_err());
     }
 }
