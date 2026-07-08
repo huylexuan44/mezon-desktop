@@ -562,6 +562,14 @@ impl ChatLayout {
         changed
     }
 
+    fn drive_voice_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.voice_store
+            .update(cx, |store, cx| store.flush_texture_drops(None, cx));
+        if self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video() {
+            window.request_animation_frame();
+        }
+    }
+
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
         if self.is_dm_route(cx) {
             return false;
@@ -670,6 +678,7 @@ impl Render for ChatLayout {
         self.chat_area.ensure_input(window, cx);
         self.chat_area.bind_window(window, cx);
         self.maybe_prefetch_voice_token(cx);
+        self.drive_voice_video(window, cx);
 
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
