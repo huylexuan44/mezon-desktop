@@ -10,7 +10,7 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, Settings, VoiceMember,
+    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, Settings, VoiceMember,  PERMISSION_CLAN_OWNER, PermissionStore
 };
 
 use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
@@ -392,6 +392,12 @@ impl Render for ChannelSidebar {
         let sidebar_for_clan_menu = sidebar.clone();
         let channel_list_for_clan_menu = self.channel_list_handle.clone();
         let locale = self.settings.read(cx).language.clone();
+        let can_create_category = if let Some(clan_id) = self.active_clan_id {
+            PermissionStore::try_global(cx).is_some_and(|store| {
+                store.read(cx).check_permission(clan_id, PERMISSION_CLAN_OWNER, cx)})
+        } else {
+            false
+        };
         let menu_overlay = self.open_menu.as_ref().map(|menu| {
             (
                 menu.position,
@@ -406,6 +412,7 @@ impl Render for ChannelSidebar {
                 self.channel_list
                     .read(cx)
                     .is_show_empty_category(self.active_clan_id.unwrap_or(ClanId(0))),
+                can_create_category,
                 locale.clone(),
             )
         });
@@ -521,7 +528,7 @@ impl Render for ChannelSidebar {
                                 .child(clan_name.clone()),
                         )
                     })
-                    .when_some(clan_menu_data, move |el, (clan_id, show_empty, locale)| {
+                    .when_some(clan_menu_data, move |el, (clan_id, show_empty, can_create_category, locale)| {
                         let Some(clan_id) = clan_id else {
                             return el;
                         };
@@ -532,6 +539,7 @@ impl Render for ChannelSidebar {
                                 clan_id,
                                 &locale,
                                 show_empty,
+                                can_create_category,
                             ),
                             px(50.),
                             px(8.),
