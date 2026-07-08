@@ -22,6 +22,7 @@ const SLOT_WAIT: Duration = Duration::from_millis(250);
 struct SlotState {
     frame: Option<BGRAFrame>,
     closed: bool,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -39,6 +40,17 @@ impl LatestFrameSlot {
     fn close(&self) {
         self.state.lock().closed = true;
         self.cond.notify_one();
+    }
+
+    fn fail(&self, error: String) {
+        let mut state = self.state.lock();
+        state.error = Some(error);
+        state.closed = true;
+        self.cond.notify_one();
+    }
+
+    fn take_error(&self) -> Option<String> {
+        self.state.lock().error.take()
     }
 
     fn take_latest(&self, stop: &AtomicBool) -> Option<BGRAFrame> {
@@ -120,21 +132,20 @@ pub fn start_screen(
                 ..Default::default()
             };
 
-            let mut capturer = match Capturer::build(options) {
-                Ok(capturer) => capturer,
-                Err(e) => {
-                    let _ = track_tx.send(Err(format!("screen capture init failed: {e}")));
-                    return;
-                }
-            };
-            capturer.start_capture();
-
             let slot = Arc::new(LatestFrameSlot::default());
             let pump_slot = slot.clone();
             let pump_stop = thread_stop.clone();
             let pump = std::thread::Builder::new()
                 .name("mezon-screen-pump".into())
                 .spawn(move || {
+                    let mut capturer = match Capturer::build(options) {
+                        Ok(capturer) => capturer,
+                        Err(e) => {
+                            pump_slot.fail(format!("screen capture init failed: {e}"));
+                            return;
+                        }
+                    };
+                    capturer.start_capture();
                     while !pump_stop.load(Ordering::Relaxed) {
                         match capturer.get_next_frame() {
                             Ok(frame) => {
@@ -248,7 +259,10 @@ pub fn start_screen(
 
             frame_store.remove(local_screen_key(&identity));
             if !sent_track {
-                let _ = track_tx.send(Err("screen capture produced no frames".into()));
+                let msg = slot
+                    .take_error()
+                    .unwrap_or_else(|| "screen capture produced no frames".into());
+                let _ = track_tx.send(Err(msg));
             }
             tracing::info!("screen capture stopped");
         });
