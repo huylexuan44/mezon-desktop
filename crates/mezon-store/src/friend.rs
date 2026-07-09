@@ -114,6 +114,7 @@ impl Global for GlobalFriendStore {}
 pub struct FriendStore {
     friends: Vec<Friend>,
     loading: bool,
+    pending_refetch: bool,
     adding: bool,
     freshness: Freshness,
     reset_generation: u64,
@@ -144,6 +145,7 @@ impl FriendStore {
         Self {
             friends: Vec::new(),
             loading: false,
+            pending_refetch: false,
             adding: false,
             freshness: Freshness::new(),
             reset_generation: 0,
@@ -156,6 +158,7 @@ impl FriendStore {
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.friends.clear();
         self.loading = false;
+        self.pending_refetch = false;
         self.adding = false;
         self.freshness.mark_stale();
         cx.emit(FriendEvent::Changed);
@@ -235,8 +238,10 @@ impl FriendStore {
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
         if self.loading {
+            self.pending_refetch = true;
             return;
         }
+        self.pending_refetch = false;
         self.loading = true;
         let api = self.api.clone();
         let generation = self.reset_generation;
@@ -255,6 +260,10 @@ impl FriendStore {
                         cx.notify();
                     }
                     Err(e) => tracing::error!("list_friends failed: {e}"),
+                }
+                if this.pending_refetch {
+                    this.pending_refetch = false;
+                    this.fetch(cx);
                 }
             });
         })

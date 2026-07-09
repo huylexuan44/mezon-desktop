@@ -1091,8 +1091,9 @@ fn render_friend_row(
         .child(profile)
         .child(actions)
         .when(clickable_open_dm, |el| {
+            let err = SharedString::from(mezon_i18n::t(locale, "shareContact.card.messageError"));
             el.on_click(move |_, _window, cx| {
-                open_dm_with_user(id, SharedString::from("Failed to open conversation"), cx);
+                open_dm_with_user(id, err.clone(), cx);
             })
         });
 
@@ -1200,8 +1201,12 @@ fn render_row_actions(
                     IconName::Chat,
                     theme,
                 )
-                .on_click(move |_, _window, cx| {
-                    open_dm_with_user(id, SharedString::from("Failed to open conversation"), cx);
+                .on_click({
+                    let err =
+                        SharedString::from(mezon_i18n::t(locale, "shareContact.card.messageError"));
+                    move |_, _window, cx| {
+                        open_dm_with_user(id, err.clone(), cx);
+                    }
                 }),
             )
             .child(

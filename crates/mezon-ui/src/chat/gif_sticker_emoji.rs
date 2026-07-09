@@ -233,7 +233,7 @@ impl GifStickerEmojiPopup {
                 .height(px(32.))
         });
         let emoji = cx.new(|cx| ReactionPicker::new_hosted(window, cx));
-        let sticker = cx.new(|cx| StickerPanel::new(cx));
+        let sticker = cx.new(StickerPanel::new);
 
         let mut subs = Vec::new();
         subs.push(cx.subscribe(&emoji, |_this, _emoji, event, cx| {
