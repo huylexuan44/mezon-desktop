@@ -4,9 +4,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, DirectChannel,
-    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore,
-    PinnedMessagesStore, Settings, ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError,
-    VoiceStore,
+    DirectKind, DirectMessageStore, GroupMembersStore, InboxStore, MessagesStore, Settings,
+    ThreadsEvent, ThreadsStore, VoiceMember, VoiceModerationError, VoiceStore,
 };
 use ui::PopoverMenuHandle;
 use ui::utils::ROUNDED_BORDER_WINDOW;

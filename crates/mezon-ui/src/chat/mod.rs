@@ -8,6 +8,7 @@ pub mod inbox;
 pub mod input_bar;
 pub mod layout;
 pub mod member_list;
+pub mod member_row_element;
 pub mod mention_input;
 pub mod message;
 pub mod pinned_popover;
