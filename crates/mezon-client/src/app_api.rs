@@ -749,7 +749,11 @@ impl AppApi {
     }
 
     /// Create a category in a clan; returns its id.
-    pub async fn create_category(&self, clan_id: i64, category_name: &str) -> Result<ApiCategoryDesc> {
+    pub async fn create_category(
+        &self,
+        clan_id: i64,
+        category_name: &str,
+    ) -> Result<ApiCategoryDesc> {
         let category = self
             .transport
             .create_category_desc(category_name, clan_id)

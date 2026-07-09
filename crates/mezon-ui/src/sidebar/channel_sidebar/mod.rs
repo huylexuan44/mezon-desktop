@@ -10,7 +10,8 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, Settings, VoiceMember,  PERMISSION_CLAN_OWNER, PermissionStore
+    ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID, PERMISSION_MANAGE_CLAN,
+    PermissionStore, Settings, VoiceMember,
 };
 
 use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
@@ -395,7 +396,10 @@ impl Render for ChannelSidebar {
         let locale = self.settings.read(cx).language.clone();
         let can_create_category = if let Some(clan_id) = self.active_clan_id {
             PermissionStore::try_global(cx).is_some_and(|store| {
-                store.read(cx).check_permission(clan_id, PERMISSION_CLAN_OWNER, cx)})
+                store
+                    .read(cx)
+                    .check_permission(clan_id, PERMISSION_MANAGE_CLAN, cx)
+            })
         } else {
             false
         };
@@ -529,23 +533,26 @@ impl Render for ChannelSidebar {
                                 .child(clan_name.clone()),
                         )
                     })
-                    .when_some(clan_menu_data, move |el, (clan_id, show_empty, can_create_category, locale)| {
-                        let Some(clan_id) = clan_id else {
-                            return el;
-                        };
-                        el.child(clan_menu_overlay(
-                            build_clan_menu(
-                                sidebar_for_menu.clone(),
-                                channel_list_for_menu.clone(),
-                                clan_id,
-                                &locale,
-                                show_empty,
-                                can_create_category,
-                            ),
-                            px(50.),
-                            px(8.),
-                        ))
-                    })
+                    .when_some(
+                        clan_menu_data,
+                        move |el, (clan_id, show_empty, can_create_category, locale)| {
+                            let Some(clan_id) = clan_id else {
+                                return el;
+                            };
+                            el.child(clan_menu_overlay(
+                                build_clan_menu(
+                                    sidebar_for_menu.clone(),
+                                    channel_list_for_menu.clone(),
+                                    clan_id,
+                                    &locale,
+                                    show_empty,
+                                    can_create_category,
+                                ),
+                                px(50.),
+                                px(8.),
+                            ))
+                        },
+                    )
             })
             .child(
                 div()

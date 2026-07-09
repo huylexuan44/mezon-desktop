@@ -1,11 +1,13 @@
-use gpui::{App, Context, Entity, FocusHandle, Focusable, SharedString, Subscription, Task, Window, div, prelude::*, px, FontWeight};
-use mezon_store::{ChannelList, ClanId, CreateCategoryError, validate_category_name};
 use crate::app::shell::Shell;
-use crate::components::primitives::{Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex, };
+use crate::components::primitives::{
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
+};
 use crate::theme::ActiveTheme;
-
-
-
+use gpui::{
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
+};
+use mezon_store::{ChannelList, ClanId, CreateCategoryError, validate_category_name};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Validation {
@@ -86,7 +88,7 @@ impl CreateCategoryModal {
     }
 
     fn create_category(&mut self, cx: &mut Context<Self>) {
-        if self.validation != Validation::Validated {
+        if self.validation != Validation::Validated || self.creating {
             return;
         }
         let name = self.name_input.read(cx).value().to_string();
@@ -162,7 +164,7 @@ impl Render for CreateCategoryModal {
         let name_input = self.name_input.clone();
         let show_invalid = self.validation == Validation::InvalidName;
         let show_duplicate = self.validation == Validation::DuplicateName;
-        let can_create = self.validation == Validation::Validated;
+        let can_create = self.validation == Validation::Validated && !self.creating;
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -256,6 +258,7 @@ impl Render for CreateCategoryModal {
                             .primary()
                             .min_w(px(128.))
                             .disabled(!can_create)
+                            .loading(self.creating)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.create_category(cx);
                             })),

@@ -14,6 +14,8 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
 pub const CATEGORY_NAME_MAX_CHARS: usize = 64;
+const CATEGORY_EVENT_CREATED: i32 = 1;
+const CATEGORY_EVENT_UPDATED: i32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelType {
@@ -134,13 +136,17 @@ pub enum CreateCategoryError {
 }
 
 pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError> {
-    if name.is_empty() || name.chars().count() > CATEGORY_NAME_MAX_CHARS {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > CATEGORY_NAME_MAX_CHARS {
         return Err(CreateCategoryError::InvalidName);
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ' ') {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ' ')
+    {
         return Err(CreateCategoryError::InvalidName);
     }
-    Ok(name.to_string())
+    Ok(trimmed.to_string())
 }
 
 fn collapse_state_path() -> std::path::PathBuf {
@@ -593,17 +599,22 @@ impl ChannelList {
         }
     }
 
-    fn apply_category_upsert(&mut self, clan_id: ClanId, mut category: Category, cx: &mut Context<Self>, ) {
+    fn apply_category_upsert(
+        &mut self,
+        clan_id: ClanId,
+        mut category: Category,
+        cx: &mut Context<Self>,
+    ) {
         if category.clan_id.is_zero() {
             category.clan_id = clan_id;
         }
         if !self.cache.contains(&clan_id) {
-            self.cache.insert(clan_id, assemble_with_favorites(vec![category], clan_id), None);
-            self.invalidate_channel_index(clan_id);
-            self.notify_channel_list(clan_id, cx);
             return;
         }
-        let changed = self.cache.get_mut(&clan_id).is_some_and(|categories| upsert_category(categories, category));
+        let changed = self
+            .cache
+            .get_mut(&clan_id)
+            .is_some_and(|categories| upsert_category(categories, category));
         if changed {
             self.invalidate_channel_index(clan_id);
             self.notify_channel_list(clan_id, cx);
@@ -851,7 +862,8 @@ impl ChannelList {
         let normalized = name.trim();
         self.cache.get(&clan_id).is_some_and(|categories| {
             categories.iter().any(|category| {
-                category.id != FAVOR_CATE_ID && category.name.eq_ignore_ascii_case(normalized)
+                category.id != FAVOR_CATE_ID
+                    && category.name.trim().to_lowercase() == normalized.to_lowercase()
             })
         })
     }
@@ -862,13 +874,15 @@ impl ChannelList {
         name: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), CreateCategoryError>> {
+        let trimmed = match validate_category_name(&name) {
+            Ok(trimmed) => trimmed,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        if self.category_name_exists(clan_id, &trimmed) {
+            return Task::ready(Err(CreateCategoryError::DuplicateName));
+        }
         let api = self.api.clone();
-        let duplicate = self.category_name_exists(clan_id, &name);
         cx.spawn(async move |this, cx| {
-            let trimmed = validate_category_name(&name)?;
-            if duplicate {
-                return Err(CreateCategoryError::DuplicateName);
-            }
             let desc = api
                 .create_category(clan_id.get(), &trimmed)
                 .await
@@ -883,15 +897,14 @@ impl ChannelList {
     }
 
     pub fn is_show_empty_category(&self, clan_id: ClanId) -> bool {
-        !self.show_empty_categories.contains(&clan_id)
+        self.show_empty_categories.contains(&clan_id)
     }
 
     pub fn set_show_empty_category(&mut self, clan_id: ClanId, show: bool, cx: &mut Context<Self>) {
         if show {
+            self.show_empty_categories.insert(clan_id);
+        } else {
             self.show_empty_categories.remove(&clan_id);
-        } else if self.show_empty_categories.insert(clan_id) {
-            cx.notify();
-            return;
         }
         cx.notify();
     }
@@ -984,29 +997,34 @@ impl ChannelList {
                     return;
                 }
                 let clan_id = ClanId(e.clan_id);
-                let order = self
-                    .cache
-                    .get(&clan_id)
-                    .and_then(|categories| {
-                        categories
-                            .iter()
-                            .find(|category| category.id == e.id.to_string())
-                            .map(|category| category.order)
-                    })
-                    .or_else(|| {
-                        self.cache
+                match e.status {
+                    CATEGORY_EVENT_CREATED | CATEGORY_EVENT_UPDATED => {
+                        let name = e.category_name.trim();
+                        if name.is_empty() {
+                            return;
+                        }
+                        let id = e.id.to_string();
+                        let order = self
+                            .cache
                             .get(&clan_id)
-                            .map(|categories| next_category_order(categories))
-                    })
-                    .unwrap_or(0);
-                let category = Category {
-                    id: e.id.to_string(),
-                    clan_id,
-                    name: e.category_name.trim().to_string(),
-                    order,
-                    channels: Vec::new(),
-                };
-                self.apply_category_upsert(clan_id, category, cx);
+                            .and_then(|categories| {
+                                categories
+                                    .iter()
+                                    .find(|category| category.id == id)
+                                    .map(|category| category.order)
+                            })
+                            .unwrap_or(0);
+                        let category = Category {
+                            id,
+                            clan_id,
+                            name: name.to_string(),
+                            order,
+                            channels: Vec::new(),
+                        };
+                        self.apply_category_upsert(clan_id, category, cx);
+                    }
+                    _ => {}
+                }
             }
             RealtimeEvent::ChannelCreated(e) => {
                 let clan_id = ClanId(e.clan_id);
@@ -1606,16 +1624,6 @@ fn category_from_desc(c: ApiCategoryDesc) -> Category {
     }
 }
 
-fn next_category_order(categories: &[Category]) -> i32 {
-    categories
-        .iter()
-        .filter(|category| category.id != FAVOR_CATE_ID)
-        .map(|category| category.order)
-        .max()
-        .unwrap_or(-1)
-        .saturating_add(1)
-}
-
 fn upsert_category(categories: &mut Vec<Category>, category: Category) -> bool {
     if category.id == FAVOR_CATE_ID {
         return false;
@@ -1641,11 +1649,7 @@ fn upsert_category(categories: &mut Vec<Category>, category: Category) -> bool {
         return changed;
     }
 
-    let insert_pos = categories
-        .iter()
-        .position(|existing| existing.id != FAVOR_CATE_ID && existing.order > category.order)
-        .unwrap_or(categories.len());
-    categories.insert(insert_pos, category);
+    categories.push(category);
     true
 }
 
@@ -2713,5 +2717,108 @@ mod tests {
 
         assert_eq!(cleared, 1);
         assert_eq!(categories[0].channels[0].badge_count, 2);
+    }
+
+    #[test]
+    fn validate_category_name_trims_and_accepts_64_char_boundary() {
+        let boundary = "a".repeat(CATEGORY_NAME_MAX_CHARS);
+
+        assert_eq!(validate_category_name(&boundary).unwrap(), boundary);
+        assert_eq!(
+            validate_category_name("  test_2026-9-7  ").unwrap(),
+            "test_2026-9-7"
+        );
+    }
+
+    #[test]
+    fn validate_category_name_rejects_empty_long_space_or_unicode() {
+        let too_long = "a".repeat(CATEGORY_NAME_MAX_CHARS + 1);
+
+        assert_eq!(
+            validate_category_name("   "),
+            Err(CreateCategoryError::InvalidName)
+        );
+        assert_eq!(
+            validate_category_name(&too_long),
+            Err(CreateCategoryError::InvalidName)
+        );
+    }
+
+    #[test]
+    fn upsert_category_appends_new_category_without_sorting_by_order() {
+        let mut cats = vec![
+            Category {
+                id: FAVOR_CATE_ID.into(),
+                clan_id: ClanId(1),
+                name: "favoriteChannel".into(),
+                order: i32::MIN,
+                channels: Vec::new(),
+            },
+            Category {
+                id: "a".into(),
+                clan_id: ClanId(1),
+                name: "A".into(),
+                order: 10,
+                channels: Vec::new(),
+            },
+            Category {
+                id: "b".into(),
+                clan_id: ClanId(1),
+                name: "B".into(),
+                order: 1,
+                channels: Vec::new(),
+            },
+        ];
+
+        assert!(upsert_category(
+            &mut cats,
+            Category {
+                id: "new".into(),
+                clan_id: ClanId(1),
+                name: "New".into(),
+                order: 0,
+                channels: Vec::new(),
+            },
+        ));
+
+        let ids: Vec<&str> = cats.iter().map(|category| category.id.as_str()).collect();
+        assert_eq!(ids, vec![FAVOR_CATE_ID, "a", "b", "new"]);
+    }
+
+    #[test]
+    fn upsert_category_updates_existing_without_moving_or_clearing_channels() {
+        let mut cats = vec![
+            Category {
+                id: "a".into(),
+                clan_id: ClanId(1),
+                name: "A".into(),
+                order: 0,
+                channels: vec![make_channel(10, "testa", "a")],
+            },
+            Category {
+                id: "b".into(),
+                clan_id: ClanId(1),
+                name: "B".into(),
+                order: 1,
+                channels: Vec::new(),
+            },
+        ];
+
+        assert!(upsert_category(
+            &mut cats,
+            Category {
+                id: "a".into(),
+                clan_id: ClanId(1),
+                name: "Renamed".into(),
+                order: 42,
+                channels: Vec::new(),
+            },
+        ));
+
+        let ids: Vec<&str> = cats.iter().map(|category| category.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(cats[0].name, "Renamed");
+        assert_eq!(cats[0].order, 42);
+        assert_eq!(cats[0].channels.len(), 1);
     }
 }
