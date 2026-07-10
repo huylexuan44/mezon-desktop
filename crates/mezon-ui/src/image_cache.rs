@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::future::{AbortHandle, Abortable};
@@ -19,15 +19,55 @@ pub(crate) fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
     cx.default_global::<PendingAtlasDrops>().0.push(image);
 }
 
+const RELIEF_FLUSH_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
 pub fn flush_atlas_drops(window: &mut Window, cx: &mut App) {
     let pending = std::mem::take(&mut cx.default_global::<PendingAtlasDrops>().0);
+    if pending.is_empty() {
+        return;
+    }
+    let mut freed_bytes = 0u64;
     for image in pending {
+        freed_bytes = freed_bytes.saturating_add(image_bytes(&image));
         cx.drop_image(image, Some(window));
+    }
+    if freed_bytes >= RELIEF_FLUSH_THRESHOLD_BYTES {
+        release_freed_memory_to_os(cx);
     }
 }
 
 const IDLE_TRIM_INTERVAL: Duration = Duration::from_secs(120);
 const IDLE_TRIM_TTL: Duration = Duration::from_secs(600);
+
+/// Decode-completion notifies are coalesced per view: a burst of images
+/// finishing across many frames (fast scroll, channel open) would otherwise
+/// trigger one full re-render of the list per completion frame.
+const DECODE_NOTIFY_DEBOUNCE: Duration = Duration::from_millis(50);
+
+#[derive(Default)]
+struct PendingDecodeNotifies(std::collections::HashSet<gpui::EntityId>);
+impl Global for PendingDecodeNotifies {}
+
+fn schedule_decode_notify(entity: gpui::EntityId, cx: &mut App) {
+    if !cx
+        .default_global::<PendingDecodeNotifies>()
+        .0
+        .insert(entity)
+    {
+        return;
+    }
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        executor.timer(DECODE_NOTIFY_DEBOUNCE).await;
+        cx.update(|cx| {
+            cx.default_global::<PendingDecodeNotifies>()
+                .0
+                .remove(&entity);
+            cx.notify(entity);
+        });
+    })
+    .detach();
+}
 
 #[derive(Default)]
 struct IdleTrimRegistry(Vec<gpui::WeakEntity<LruImageCache>>);
@@ -103,16 +143,16 @@ pub fn shared_small_avatar_cache(cx: &mut App) -> Entity<LruImageCache> {
     cache
 }
 
-pub fn clear_shared_avatar_cache(cx: &mut App) {
-    if let Some(cache) = cx.try_global::<SharedAvatarCache>().map(|s| s.0.clone()) {
-        cache.update(cx, |cache, cx| cache.clear_app(cx));
+pub fn clear_all_image_caches(cx: &mut App) {
+    let registry = std::mem::take(&mut cx.default_global::<IdleTrimRegistry>().0);
+    let mut live = Vec::with_capacity(registry.len());
+    for weak in registry {
+        if let Some(cache) = weak.upgrade() {
+            cache.update(cx, |cache, cx| cache.clear_app(cx));
+            live.push(weak);
+        }
     }
-    if let Some(cache) = cx
-        .try_global::<SharedSmallAvatarCache>()
-        .map(|s| s.0.clone())
-    {
-        cache.update(cx, |cache, cx| cache.clear_app(cx));
-    }
+    cx.default_global::<IdleTrimRegistry>().0.extend(live);
 }
 
 #[cfg(target_os = "macos")]
@@ -143,11 +183,39 @@ mod os_mem {
     }
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(target_os = "windows")]
+mod os_mem {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetProcessHeap() -> *mut c_void;
+        fn HeapCompact(heap: *mut c_void, flags: u32) -> usize;
+    }
+
+    pub fn release_freed_pages() {
+        unsafe {
+            let heap = GetProcessHeap();
+            if !heap.is_null() {
+                HeapCompact(heap, 0);
+            }
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", target_env = "gnu")
+))]
 static MEMORY_RELIEF_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 pub fn release_freed_memory_to_os(cx: &mut App) {
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     {
         if MEMORY_RELIEF_IN_FLIGHT.swap(true, Ordering::AcqRel) {
             return;
@@ -159,7 +227,11 @@ pub fn release_freed_memory_to_os(cx: &mut App) {
             })
             .detach();
     }
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     let _ = cx;
 }
 
@@ -676,9 +748,7 @@ impl LruImageCache {
         window
             .spawn(cx, async move |cx| {
                 let _ = Abortable::new(notify_task, abort_reg).await;
-                cx.on_next_frame(move |_, cx| {
-                    cx.notify(entity);
-                });
+                let _ = cx.update(|_, cx| schedule_decode_notify(entity, cx));
             })
             .detach();
 

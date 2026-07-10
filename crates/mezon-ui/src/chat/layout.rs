@@ -1717,7 +1717,7 @@ impl ChatLayout {
         root.into_any_element()
     }
 
-    fn render_content(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme();
         let locale = self.settings.read(cx).language.clone();
         let inbox_handle = self.inbox_handle.clone();

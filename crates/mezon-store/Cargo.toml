@@ -25,3 +25,4 @@ flume.workspace = true
 url.workspace = true
 tokio.workspace = true
 prost.workspace = true
+regex.workspace = true

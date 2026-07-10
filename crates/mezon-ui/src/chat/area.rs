@@ -32,6 +32,7 @@ pub struct ChatArea {
     typing: Entity<ChannelTyping>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
+    drop_title_cache: Option<(SharedString, SharedString, SharedString)>,
 }
 
 impl ChatArea {
@@ -55,6 +56,7 @@ impl ChatArea {
             typing,
             _submit_sub: None,
             _reply_sub: None,
+            drop_title_cache: None,
         }
     }
 
@@ -135,7 +137,7 @@ impl ChatArea {
 
     #[allow(clippy::too_many_arguments)]
     pub fn render(
-        &self,
+        &mut self,
         locale: &str,
         channel_name: Option<&str>,
         is_dm: bool,
@@ -208,8 +210,25 @@ impl ChatArea {
         );
 
         let drop_input = mention_input.clone();
-        let drop_title = mezon_i18n::t(locale, "common.uploadToChannel")
-            .replace("{{channelName}}", channel_name.unwrap_or_default());
+        let channel_label = channel_name.unwrap_or_default();
+        let drop_title = match &self.drop_title_cache {
+            Some((cached_locale, cached_channel, title))
+                if cached_locale.as_ref() == locale && cached_channel.as_ref() == channel_label =>
+            {
+                title.clone()
+            }
+            _ => {
+                let title: SharedString = mezon_i18n::t(locale, "common.uploadToChannel")
+                    .replace("{{channelName}}", channel_label)
+                    .into();
+                self.drop_title_cache = Some((
+                    SharedString::from(locale.to_string()),
+                    SharedString::from(channel_label.to_string()),
+                    title.clone(),
+                ));
+                title
+            }
+        };
         let drop_body = mezon_i18n::t(locale, "common.uploadInstructions");
         let drop_overlay = div()
             .absolute()
@@ -244,7 +263,7 @@ impl ChatArea {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(px(18.))
                             .text_color(rgb(0xffffff))
-                            .child(SharedString::from(drop_title)),
+                            .child(drop_title),
                     )
                     .child(
                         div()
@@ -252,7 +271,7 @@ impl ChatArea {
                             .text_center()
                             .text_size(px(14.))
                             .text_color(rgb(0xffffff))
-                            .child(SharedString::from(drop_body)),
+                            .child(drop_body),
                     ),
             );
 

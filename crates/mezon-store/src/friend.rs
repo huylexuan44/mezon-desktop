@@ -59,8 +59,15 @@ impl Friend {
 #[derive(Debug, Clone)]
 pub enum FriendEvent {
     Changed,
+    AddSucceeded,
+    AcceptSucceeded,
     /// A friend request could not be sent (server rejected the username or the RPC failed).
     AddFailed,
+    AddingChanged,
+    BlockSucceeded,
+    BlockFailed,
+    UnblockSucceeded,
+    UnblockFailed,
 }
 
 fn friend_from_api(f: ApiFriend) -> Friend {
@@ -106,6 +113,39 @@ fn apply_remove_friend(list: &mut Vec<Friend>, id: UserId) -> bool {
     let before = list.len();
     list.retain(|f| f.id != id);
     list.len() != before
+}
+
+fn is_blocked_by(list: &[Friend], target: UserId, me: UserId) -> bool {
+    list.iter()
+        .any(|f| f.id == target && f.state == FriendState::Blocked && f.source_id == me)
+}
+
+fn apply_unblock_friend(list: &mut Vec<Friend>, e: &realtime::UnblockFriend, me: UserId) -> bool {
+    let id = UserId(e.user_id);
+    if let Some(existing) = list.iter_mut().find(|f| f.id == id) {
+        let mut changed = existing.state != FriendState::Friend;
+        existing.state = FriendState::Friend;
+        for (field, value) in [
+            (&mut existing.username, &e.username),
+            (&mut existing.display_name, &e.display_name),
+            (&mut existing.avatar_url, &e.avatar),
+        ] {
+            if !value.is_empty() && field != value {
+                field.clone_from(value);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+    list.push(Friend {
+        id,
+        username: e.username.clone(),
+        display_name: e.display_name.clone(),
+        avatar_url: e.avatar.clone(),
+        state: FriendState::Friend,
+        source_id: me,
+    });
+    true
 }
 
 struct GlobalFriendStore(Entity<FriendStore>);
@@ -168,7 +208,12 @@ impl FriendStore {
     fn register_realtime(cx: &mut Context<Self>) {
         let entity = cx.entity();
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
-            for kind in [RealtimeKind::AddFriend, RealtimeKind::RemoveFriend] {
+            for kind in [
+                RealtimeKind::AddFriend,
+                RealtimeKind::RemoveFriend,
+                RealtimeKind::BlockFriend,
+                RealtimeKind::UnblockFriend,
+            ] {
                 dispatch.on(kind, &entity, |this, event, cx| {
                     this.handle_event(event, cx)
                 });
@@ -210,6 +255,13 @@ impl FriendStore {
 
     pub fn is_adding(&self) -> bool {
         self.adding
+    }
+
+    pub fn is_blocked_by_me(&self, username: &str, cx: &App) -> bool {
+        let me = self.current_user_id(cx);
+        self.friends
+            .iter()
+            .any(|f| f.state == FriendState::Blocked && f.source_id == me && f.username == username)
     }
 
     /// Count of incoming friend requests awaiting the current user's response
@@ -271,10 +323,26 @@ impl FriendStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let me = self.current_user_id(cx);
         let changed = match event {
             RealtimeEvent::AddFriend(e) => apply_add_friend(&mut self.friends, e),
             RealtimeEvent::RemoveFriend(e) => {
                 apply_remove_friend(&mut self.friends, UserId(e.user_id))
+            }
+            RealtimeEvent::BlockFriend(e) => {
+                let target = UserId(e.user_id);
+                if target != me && !is_blocked_by(&self.friends, target, me) {
+                    self.refresh(cx);
+                }
+                false
+            }
+            RealtimeEvent::UnblockFriend(e) => {
+                if UserId(e.user_id) == me {
+                    self.refresh(cx);
+                    false
+                } else {
+                    apply_unblock_friend(&mut self.friends, e, me)
+                }
             }
             _ => false,
         };
@@ -291,6 +359,7 @@ impl FriendStore {
             return;
         }
         self.adding = true;
+        cx.emit(FriendEvent::AddingChanged);
         cx.notify();
         let me = self.current_user_id(cx);
         let api = self.api.clone();
@@ -302,6 +371,7 @@ impl FriendStore {
                     return;
                 }
                 this.adding = false;
+                cx.emit(FriendEvent::AddingChanged);
                 match result {
                     Ok(ids) => match ids.first() {
                         Some(&id) if id != 0 => {
@@ -317,6 +387,7 @@ impl FriendStore {
                                 });
                             }
                             cx.emit(FriendEvent::Changed);
+                            cx.emit(FriendEvent::AddSucceeded);
                         }
                         _ => {
                             tracing::warn!("add_friend: server returned no id");
@@ -343,14 +414,25 @@ impl FriendStore {
         let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.add_friends(vec![friend_id.0], Vec::new()).await;
-            if let Err(e) = result {
-                tracing::error!("accept_friend failed: {e}");
-                let _ = this.update(cx, |this, cx| {
-                    if this.reset_generation == generation {
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(ids) if ids.first().is_some_and(|&id| id != 0) => {
+                        cx.emit(FriendEvent::AcceptSucceeded);
+                    }
+                    Ok(_) => {
+                        tracing::warn!("accept_friend: server returned no id");
                         this.refresh(cx);
                     }
-                });
-            }
+                    Err(e) => {
+                        tracing::error!("accept_friend failed: {e}");
+                        cx.emit(FriendEvent::AddFailed);
+                        this.refresh(cx);
+                    }
+                }
+            });
         })
         .detach();
     }
@@ -396,14 +478,19 @@ impl FriendStore {
         let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.block_friends(vec![friend_id.0]).await;
-            if let Err(e) = result {
-                tracing::error!("block_friend failed: {e}");
-                let _ = this.update(cx, |this, cx| {
-                    if this.reset_generation == generation {
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(()) => cx.emit(FriendEvent::BlockSucceeded),
+                    Err(e) => {
+                        tracing::error!("block_friend failed: {e}");
+                        cx.emit(FriendEvent::BlockFailed);
                         this.refresh(cx);
                     }
-                });
-            }
+                }
+            });
         })
         .detach();
     }
@@ -417,14 +504,19 @@ impl FriendStore {
         let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.unblock_friends(vec![friend_id.0]).await;
-            if let Err(e) = result {
-                tracing::error!("unblock_friend failed: {e}");
-            }
             let _ = this.update(cx, |this, cx| {
-                if this.reset_generation == generation {
-                    this.freshness.mark_stale();
-                    this.fetch(cx);
+                if this.reset_generation != generation {
+                    return;
                 }
+                match result {
+                    Ok(()) => cx.emit(FriendEvent::UnblockSucceeded),
+                    Err(e) => {
+                        tracing::error!("unblock_friend failed: {e}");
+                        cx.emit(FriendEvent::UnblockFailed);
+                    }
+                }
+                this.freshness.mark_stale();
+                this.fetch(cx);
             });
         })
         .detach();
@@ -514,6 +606,85 @@ mod tests {
         // Duplicate incoming request is a no-op.
         assert!(!apply_add_friend(&mut list, &e));
         assert_eq!(list.len(), 1);
+    }
+
+    fn unblock_event(
+        user_id: i64,
+        username: &str,
+        display: &str,
+        avatar: &str,
+    ) -> realtime::UnblockFriend {
+        realtime::UnblockFriend {
+            user_id,
+            username: username.into(),
+            avatar: avatar.into(),
+            display_name: display.into(),
+            status: String::new(),
+            user_status: String::new(),
+        }
+    }
+
+    fn blocked_row(id: i64, source: i64) -> Friend {
+        Friend {
+            id: UserId(id),
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar_url: String::new(),
+            state: FriendState::Blocked,
+            source_id: UserId(source),
+        }
+    }
+
+    #[test]
+    fn block_event_echo_of_our_own_block_needs_no_refetch() {
+        let me = UserId(1);
+        let list = vec![blocked_row(42, 1)];
+        assert!(is_blocked_by(&list, UserId(42), me));
+    }
+
+    #[test]
+    fn block_event_by_the_other_side_needs_a_refetch() {
+        let me = UserId(1);
+        let list = vec![blocked_row(42, 42)];
+        assert!(!is_blocked_by(&list, UserId(42), me));
+
+        let unknown: Vec<Friend> = Vec::new();
+        assert!(!is_blocked_by(&unknown, UserId(42), me));
+    }
+
+    #[test]
+    fn unblock_event_restores_friend_and_refreshes_user_fields() {
+        let mut list = vec![blocked_row(42, 1)];
+        let e = unblock_event(42, "carol2", "Carol", "a.png");
+        assert!(apply_unblock_friend(&mut list, &e, UserId(1)));
+        assert_eq!(list[0].state, FriendState::Friend);
+        assert_eq!(list[0].username, "carol2");
+        assert_eq!(list[0].display_name, "Carol");
+        assert_eq!(list[0].avatar_url, "a.png");
+
+        assert!(!apply_unblock_friend(&mut list, &e, UserId(1)));
+    }
+
+    #[test]
+    fn unblock_event_keeps_existing_fields_when_event_omits_them() {
+        let mut list = vec![blocked_row(42, 1)];
+        list[0].display_name = "Carol".into();
+        let e = unblock_event(42, "", "", "");
+        assert!(apply_unblock_friend(&mut list, &e, UserId(1)));
+        assert_eq!(list[0].state, FriendState::Friend);
+        assert_eq!(list[0].username, "carol");
+        assert_eq!(list[0].display_name, "Carol");
+    }
+
+    #[test]
+    fn unblock_event_inserts_unknown_user_as_friend() {
+        let mut list = Vec::new();
+        let e = unblock_event(42, "carol", "Carol", "a.png");
+        assert!(apply_unblock_friend(&mut list, &e, UserId(1)));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, UserId(42));
+        assert_eq!(list[0].state, FriendState::Friend);
+        assert_eq!(list[0].source_id, UserId(1));
     }
 
     #[test]

@@ -163,7 +163,7 @@ fn content_payload_utf8_len(text: &str) -> usize {
 fn needs_png_transcode(format: ImageFormat) -> bool {
     matches!(
         format,
-        ImageFormat::Tiff | ImageFormat::Ico | ImageFormat::Pnm
+        ImageFormat::Bmp | ImageFormat::Tiff | ImageFormat::Ico | ImageFormat::Pnm
     )
 }
 

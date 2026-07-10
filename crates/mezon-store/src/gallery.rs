@@ -544,6 +544,18 @@ impl GalleryStore {
         }
     }
 
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        if self.by_channel.is_empty() {
+            return;
+        }
+        let channel_ids: Vec<ChannelId> = self.by_channel.keys().copied().collect();
+        self.by_channel.clear();
+        for channel_id in channel_ids {
+            cx.emit(GalleryEvent::Changed(channel_id));
+        }
+        cx.notify();
+    }
+
     fn fetch(
         &mut self,
         clan_id: ClanId,
