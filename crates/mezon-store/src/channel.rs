@@ -897,14 +897,14 @@ impl ChannelList {
     }
 
     pub fn is_show_empty_category(&self, clan_id: ClanId) -> bool {
-        self.show_empty_categories.contains(&clan_id)
+        !self.show_empty_categories.contains(&clan_id)
     }
 
     pub fn set_show_empty_category(&mut self, clan_id: ClanId, show: bool, cx: &mut Context<Self>) {
         if show {
-            self.show_empty_categories.insert(clan_id);
-        } else {
             self.show_empty_categories.remove(&clan_id);
+        } else {
+            self.show_empty_categories.insert(clan_id);
         }
         cx.notify();
     }
