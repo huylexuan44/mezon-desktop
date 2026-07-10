@@ -20,6 +20,7 @@ pub mod ids;
 pub mod inbox;
 pub mod login;
 pub mod message;
+pub mod message_search;
 pub mod message_time;
 pub mod messages;
 pub mod permissions;
@@ -83,10 +84,20 @@ pub use message::{
     COMBINE_TIME_WINDOW, Message, MessageAttachment, message_combined_with_prev,
     recompute_message_grouping, same_message_sender, should_show_message_head,
 };
+pub use message_search::{
+    ChannelSearchState, MessageSearchEvent, MessageSearchStore, SearchHit, SearchHitImage,
+    enrich_search_results_ogp, resolve_search_hit_ogp, search_hit_from_document,
+};
 pub use messages::*;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
     attachment_link_is_image, message_content_is_attachment,
+};
+pub use mezon_client::{
+    SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
+    finalize_incomplete_filter_token, has_filter_options, insert_filter_markup,
+    search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
+    search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 pub use permissions::{
     ClanSettingsPermissions, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER,

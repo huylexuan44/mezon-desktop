@@ -544,16 +544,7 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
             .attachments
             .into_iter()
             .filter(|a| !a.url.is_empty())
-            .map(|a| ApiAttachment {
-                url: a.url,
-                filename: a.filename,
-                filetype: a.filetype,
-                width: a.width,
-                height: a.height,
-                thumbnail: a.thumbnail,
-                duration: a.duration,
-                size: a.size,
-            })
+            .map(api_attachment_from_proto)
             .collect(),
         Err(e) => {
             tracing::warn!(
@@ -563,6 +554,172 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
             Vec::new()
         }
     }
+}
+
+fn api_attachment_from_proto(a: api::MessageAttachment) -> ApiAttachment {
+    ApiAttachment {
+        url: a.url,
+        filename: a.filename,
+        filetype: a.filetype,
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail,
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+pub fn parse_search_attachment_field(raw: &str) -> Vec<ApiAttachment> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if (trimmed.starts_with('[') || trimmed.starts_with('{'))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let parsed = parse_search_attachment_json_value(&value);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed) {
+        let decoded = parse_message_attachments(&bytes);
+        if !decoded.is_empty() {
+            return decoded;
+        }
+    }
+    parse_message_attachments(trimmed.as_bytes())
+}
+
+pub fn parse_search_mentions_field(raw: &str) -> Vec<ApiEntityMention> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if (trimmed.starts_with('[') || trimmed.starts_with('{'))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let parsed = parse_search_mentions_json_value(&value);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed) {
+        let decoded = parse_message_mentions(&bytes);
+        if !decoded.is_empty() {
+            return decoded;
+        }
+    }
+    parse_message_mentions(trimmed.as_bytes())
+}
+
+fn parse_search_mentions_json_value(value: &serde_json::Value) -> Vec<ApiEntityMention> {
+    let items = if let Some(array) = value.as_array() {
+        array.clone()
+    } else if let Some(array) = value.get("mentions").and_then(|v| v.as_array()) {
+        array.clone()
+    } else if value.is_object() {
+        vec![value.clone()]
+    } else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(parse_search_mention_json_item)
+        .collect()
+}
+
+fn parse_search_mention_json_item(item: &serde_json::Value) -> Option<ApiEntityMention> {
+    let s = item.get("s").and_then(json_to_i32).unwrap_or(0);
+    let e = item.get("e").and_then(json_to_i32)?;
+    if e <= s {
+        return None;
+    }
+    let user_id = item
+        .get("user_id")
+        .or_else(|| item.get("userId"))
+        .and_then(json_to_i64)
+        .unwrap_or_default();
+    let role_id = item
+        .get("role_id")
+        .or_else(|| item.get("roleId"))
+        .and_then(json_to_i64)
+        .unwrap_or_default();
+    let username = item
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(ApiEntityMention {
+        user_id,
+        role_id,
+        username,
+        s,
+        e,
+    })
+}
+
+fn json_to_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().map(|v| v as i64))
+        .or_else(|| value.as_f64().map(|v| v as i64))
+        .or_else(|| value.as_str()?.parse().ok())
+}
+
+fn parse_search_attachment_json_value(value: &serde_json::Value) -> Vec<ApiAttachment> {
+    let items = if let Some(array) = value.as_array() {
+        array.clone()
+    } else if let Some(array) = value.get("attachments").and_then(|v| v.as_array()) {
+        array.clone()
+    } else if value.is_object() {
+        vec![value.clone()]
+    } else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(parse_search_attachment_json_item)
+        .collect()
+}
+
+fn parse_search_attachment_json_item(item: &serde_json::Value) -> Option<ApiAttachment> {
+    let url = item.get("url").and_then(|v| v.as_str())?;
+    if url.is_empty() {
+        return None;
+    }
+    Some(ApiAttachment {
+        url: url.to_string(),
+        filename: item
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        filetype: item
+            .get("filetype")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        width: item.get("width").and_then(json_to_i32).unwrap_or_default(),
+        height: item.get("height").and_then(json_to_i32).unwrap_or_default(),
+        thumbnail: item
+            .get("thumbnail")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        duration: item
+            .get("duration")
+            .and_then(json_to_i32)
+            .unwrap_or_default(),
+        size: item.get("size").and_then(json_to_i32).unwrap_or_default(),
+    })
+}
+
+fn json_to_i32(value: &serde_json::Value) -> Option<i32> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+        .and_then(|n| i32::try_from(n).ok())
 }
 
 fn parse_message_text(content: &str) -> String {
@@ -782,15 +939,15 @@ fn parse_message_reactions(bytes: &[u8]) -> Vec<ApiMessageReaction> {
 /// includes what is relevant for that token kind.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContentToken {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_i64_flex::deserialize")]
     pub s: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "opt_i64_flex::deserialize")]
     pub e: Option<i64>,
     #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub user_id: Option<String>,
     #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub role_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub username: Option<String>,
     #[serde(
         default,
@@ -798,19 +955,23 @@ pub struct ContentToken {
         deserialize_with = "string_or_number::deserialize"
     )]
     pub channel_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub emojiid: Option<String>,
-    #[serde(default, rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "string_or_number::deserialize"
+    )]
     pub kind: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub image: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub banner: Option<String>,
     #[serde(default, deserialize_with = "opt_i64_flex::deserialize")]
     pub member_count: Option<i64>,
@@ -921,6 +1082,51 @@ mod vec_i32_flex {
     }
 }
 
+mod vec_null_as_empty {
+    use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: DeserializeOwned,
+    {
+        Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+    }
+}
+
+mod vec_content_token_lenient {
+    use super::ContentToken;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ContentToken>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+        Ok(raw
+            .into_iter()
+            .filter_map(|value| serde_json::from_value(value).ok())
+            .collect())
+    }
+}
+
+mod map_null_as_empty {
+    use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Deserializer};
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn deserialize<'de, D, K, V>(deserializer: D) -> Result<HashMap<K, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: DeserializeOwned + Eq + Hash,
+        V: DeserializeOwned,
+    {
+        Ok(Option::<HashMap<K, V>>::deserialize(deserializer)?.unwrap_or_default())
+    }
+}
+
 mod poll_answers {
     use super::ApiPollAnswer;
     use serde::{Deserialize, Deserializer};
@@ -1015,7 +1221,7 @@ pub struct ApiEmbed {
     pub description: Option<String>,
     #[serde(default)]
     pub thumbnail: Option<ApiEmbedThumbnail>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
     pub fields: Vec<ApiEmbedField>,
     #[serde(default)]
     pub image: Option<ApiEmbedImage>,
@@ -1131,7 +1337,7 @@ impl<'de> Deserialize<'de> for ApiMessageComponent {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiActionRow {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
     pub components: Vec<ApiMessageComponent>,
 }
 
@@ -1163,19 +1369,17 @@ pub struct ApiCallLog {
 pub struct ApiMessageContent {
     #[serde(default)]
     pub t: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub mentions: Vec<ContentToken>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub hg: Vec<ContentToken>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub ej: Vec<ContentToken>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub mk: Vec<ContentToken>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub lk: Vec<ContentToken>,
-    /// `true` when this message is a forward (rides inside the content JSON as
-    /// `fwd` in mezon-react `IMessageSendPayload`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bool_flex::deserialize")]
     pub fwd: bool,
     #[serde(default, alias = "id", deserialize_with = "opt_i64_flex::deserialize")]
     pub poll_id: Option<i64>,
@@ -1191,11 +1395,11 @@ pub struct ApiMessageContent {
     pub is_closed: bool,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub total_votes: Option<i32>,
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "opt_i64_flex::deserialize")]
     pub poll_type: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
     pub embed: Vec<ApiEmbed>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
     pub components: Vec<ApiActionRow>,
     #[serde(default, rename = "callLog")]
     pub call_log: Option<ApiCallLog>,
@@ -1205,11 +1409,11 @@ pub struct ApiMessageContent {
     pub tp: Option<String>,
     #[serde(default, deserialize_with = "string_or_number::deserialize")]
     pub cid: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub vk: Vec<ContentToken>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "map_null_as_empty::deserialize")]
     pub cvtt: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "vec_content_token_lenient::deserialize")]
     pub lky: Vec<ContentToken>,
     #[serde(default, skip_serializing)]
     pub presign_finish: Option<Vec<String>>,
@@ -4007,18 +4211,20 @@ impl MezonTransport {
         Ok(api::ListAuditLog::decode(response.as_slice())?)
     }
 
-    /// Search message.
+    /// Search messages via Elasticsearch (server RPC `SearchMessage`).
     pub async fn search_message(
         &self,
-        _query: &str,
+        filters: Vec<api::FilterParam>,
         from: i32,
         size: i32,
+        sorts: Vec<api::SortParam>,
     ) -> Result<api::SearchMessageResponse> {
         let cid = self.generate_cid();
         let body = api::SearchMessageRequest {
+            filters,
             from,
             size,
-            ..Default::default()
+            sorts,
         }
         .encode_to_vec();
         let (code, response) = self.send_api_request(cid, "SearchMessage", body).await?;
@@ -7628,5 +7834,21 @@ mod tests {
         assert!(!call_log.is_video);
         assert_eq!(call_log.call_log_type, 1);
         assert!(!call_log.show_call_back);
+    }
+
+    #[test]
+    fn parse_search_attachment_reads_json_object_wrapper() {
+        let raw = r#"{"attachments":[{"url":"https://cdn/a.jpg","filetype":"image/jpeg","width":400,"height":300}]}"#;
+        let parsed = parse_search_attachment_field(raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://cdn/a.jpg");
+    }
+
+    #[test]
+    fn parse_search_attachment_reads_json_array() {
+        let raw = r#"[{"url":"https://cdn/b.png","filetype":"image/png"}]"#;
+        let parsed = parse_search_attachment_field(raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "https://cdn/b.png");
     }
 }
