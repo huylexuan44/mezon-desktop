@@ -75,16 +75,19 @@ fn is_animated_image(att: &ChannelAttachment) -> bool {
             .is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"))
 }
 
-/// Return freed heap pages back to the OS after tearing down the viewer.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) fn trim_process_memory() {
-    unsafe {
-        libc::malloc_trim(0);
-    }
+/// Tear down the viewer window (if one is open) and drop its decoded images.
+/// Called on logout so a viewer left open cannot keep the previous account's
+/// attachments and image cache alive.
+pub fn close_image_viewer(cx: &mut App) {
+    let Some(handle) = cx.try_global::<GlobalImageViewer>().map(|g| g.0) else {
+        return;
+    };
+    let _ = handle.update(cx, |viewer, window, cx| {
+        viewer.release_resources(window, cx);
+        window.remove_window();
+    });
+    clear_image_viewer_global(cx);
 }
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub(crate) fn trim_process_memory() {}
 
 fn prior_viewer_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
     let handle = cx.try_global::<GlobalImageViewer>().map(|g| g.0)?;
@@ -224,7 +227,7 @@ impl ImageViewer {
             viewer.rotation_loading = false;
             viewer.attachments.clear();
             cache_for_release.update(cx, |cache, cx| cache.clear_app(cx));
-            trim_process_memory();
+            crate::image_cache::release_freed_memory_to_os(cx);
         });
         let channel_label = resolve_channel_label(
             request.clan_id,
@@ -287,7 +290,7 @@ impl ImageViewer {
         self.attachments.clear();
         self.image_cache
             .update(cx, |cache, cx| cache.clear(window, cx));
-        trim_process_memory();
+        crate::image_cache::release_freed_memory_to_os(cx);
     }
 
     fn clear_rotated_image(&mut self, window: Option<&mut Window>, cx: &mut App) {
@@ -296,7 +299,7 @@ impl ImageViewer {
         }
     }
 
-    fn trim_memory_throttled(&mut self) {
+    fn trim_memory_throttled(&mut self, cx: &mut App) {
         const MIN_TRIM_INTERVAL: Duration = Duration::from_millis(300);
         let now = Instant::now();
         if self
@@ -304,7 +307,7 @@ impl ImageViewer {
             .is_none_or(|last| now.duration_since(last) >= MIN_TRIM_INTERVAL)
         {
             self.last_trim = Some(now);
-            trim_process_memory();
+            crate::image_cache::release_freed_memory_to_os(cx);
         }
     }
 
@@ -324,7 +327,7 @@ impl ImageViewer {
         self.active_video_url = None;
         self.video_sync_token = None;
         if had_player {
-            self.trim_memory_throttled();
+            self.trim_memory_throttled(cx);
         }
     }
 

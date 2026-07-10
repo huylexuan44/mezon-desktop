@@ -1,13 +1,16 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
-use gpui::{AnyElement, Context, ObjectFit, SharedString, Window, div, img, prelude::*, px};
+use gpui::{AnyElement, Context, ObjectFit, SharedString, Task, Window, div, img, prelude::*, px};
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::theme::ActiveTheme;
 
 const LOOP_EPSILON_SECONDS: f64 = 0.08;
 const THUMB_DECODE_MAX_PX: u32 = 120;
+const GIF_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const THUMB_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 struct GifPlayback {
@@ -19,6 +22,7 @@ pub struct VideoThumbView {
     player: Option<Rc<VideoPlayer>>,
     shared: Rc<RefCell<GifPlayback>>,
     frozen: bool,
+    _frame_pump: Option<Task<()>>,
 }
 
 impl VideoThumbView {
@@ -35,20 +39,38 @@ impl VideoThumbView {
         }
         let shared = Rc::new(RefCell::new(GifPlayback::default()));
         Self::register_teardown(cx);
-        Self {
+        let mut this = Self {
             player,
             shared,
             frozen: false,
-        }
+            _frame_pump: None,
+        };
+        this.start_frame_pump(cx);
+        this
     }
 
     pub fn decoding(&self) -> bool {
         self.player.is_some() && !self.frozen
     }
 
-    fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(player) = self.player.clone() else {
+    fn start_frame_pump(&mut self, cx: &mut Context<Self>) {
+        if self.player.is_none() {
             return;
+        }
+        self._frame_pump = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(THUMB_POLL_INTERVAL).await;
+                let proceed = this.update(cx, |this, cx| this.pump_frame(cx));
+                if !matches!(proceed, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn pump_frame(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(player) = self.player.clone() else {
+            return false;
         };
         let failed = player.failed();
         let new_frame = player.copy_frame();
@@ -58,27 +80,30 @@ impl VideoThumbView {
             shared.failed = failed;
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
-        Self::release_frame(previous, window, cx);
-        if captured && !self.frozen {
+        Self::queue_release(previous, cx);
+        if captured {
             player.pause();
             self.frozen = true;
             self.player = None;
             cx.notify();
+            false
         } else if failed {
             self.frozen = true;
             self.player = None;
             cx.notify();
+            false
+        } else {
+            true
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn release_frame(_previous: Option<VideoFrame>, _window: &mut Window, _cx: &mut Context<Self>) {
-    }
+    fn queue_release(_previous: Option<VideoFrame>, _cx: &mut Context<Self>) {}
 
     #[cfg(not(target_os = "macos"))]
-    fn release_frame(previous: Option<VideoFrame>, window: &mut Window, cx: &mut Context<Self>) {
+    fn queue_release(previous: Option<VideoFrame>, cx: &mut Context<Self>) {
         if let Some(previous) = previous {
-            cx.drop_image(previous, Some(window));
+            crate::image_cache::queue_atlas_drop(cx, previous);
         }
     }
 
@@ -116,12 +141,8 @@ impl VideoThumbView {
 }
 
 impl Render for VideoThumbView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.poll_frame(window, cx);
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let has_frame = self.shared.borrow().frame.is_some();
-        if !self.frozen && self.player.is_some() && !self.shared.borrow().failed {
-            window.request_animation_frame();
-        }
         div()
             .size_full()
             .children(if has_frame { self.frame_child() } else { None })
@@ -135,6 +156,7 @@ pub struct GifVideoView {
     player: Option<Rc<VideoPlayer>>,
     shared: Rc<RefCell<GifPlayback>>,
     playing: bool,
+    _frame_pump: Option<Task<()>>,
 }
 
 impl GifVideoView {
@@ -155,14 +177,17 @@ impl GifVideoView {
         let playing = player.is_some();
         let shared = Rc::new(RefCell::new(GifPlayback::default()));
         Self::register_teardown(cx);
-        Self {
+        let mut this = Self {
             fallback_gif,
             width,
             height,
             player,
             shared,
             playing,
-        }
+            _frame_pump: None,
+        };
+        this.start_frame_pump(cx);
+        this
     }
 
     pub fn set_playing(&mut self, playing: bool, cx: &mut Context<Self>) {
@@ -175,12 +200,35 @@ impl GifVideoView {
             player.pause();
         }
         self.playing = playing;
+        if playing {
+            self.start_frame_pump(cx);
+        } else {
+            self._frame_pump = None;
+        }
         cx.notify();
     }
 
-    fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(player) = self.player.clone() else {
+    fn start_frame_pump(&mut self, cx: &mut Context<Self>) {
+        if self.player.is_none() || !self.playing {
             return;
+        }
+        self._frame_pump = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(GIF_FRAME_INTERVAL).await;
+                let proceed = this.update(cx, |this, cx| this.pump_frame(cx));
+                if !matches!(proceed, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn pump_frame(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.playing {
+            return false;
+        }
+        let Some(player) = self.player.clone() else {
+            return false;
         };
         let failed = player.failed();
         let duration = player.duration();
@@ -190,24 +238,30 @@ impl GifVideoView {
             player.play();
         }
         let new_frame = player.copy_frame();
-        let previous = {
+        let advanced = new_frame.is_some();
+        let (previous, failed_changed) = {
             let mut shared = self.shared.borrow_mut();
-            if failed != shared.failed {
-                shared.failed = failed;
-            }
-            new_frame.and_then(|frame| shared.frame.replace(frame))
+            let failed_changed = failed != shared.failed;
+            shared.failed = failed;
+            (
+                new_frame.and_then(|frame| shared.frame.replace(frame)),
+                failed_changed,
+            )
         };
-        Self::release_frame(previous, window, cx);
+        Self::queue_release(previous, cx);
+        if advanced || failed_changed {
+            cx.notify();
+        }
+        !failed
     }
 
     #[cfg(target_os = "macos")]
-    fn release_frame(_previous: Option<VideoFrame>, _window: &mut Window, _cx: &mut Context<Self>) {
-    }
+    fn queue_release(_previous: Option<VideoFrame>, _cx: &mut Context<Self>) {}
 
     #[cfg(not(target_os = "macos"))]
-    fn release_frame(previous: Option<VideoFrame>, window: &mut Window, cx: &mut Context<Self>) {
+    fn queue_release(previous: Option<VideoFrame>, cx: &mut Context<Self>) {
         if let Some(previous) = previous {
-            cx.drop_image(previous, Some(window));
+            crate::image_cache::queue_atlas_drop(cx, previous);
         }
     }
 
@@ -254,8 +308,7 @@ impl GifVideoView {
 }
 
 impl Render for GifVideoView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.poll_frame(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let failed = self.shared.borrow().failed;
         let root = div()
@@ -272,10 +325,6 @@ impl Render for GifVideoView {
                     .size_full()
                     .object_fit(ObjectFit::Contain),
             );
-        }
-
-        if self.playing && !failed && self.player.is_some() && window.is_window_active() {
-            window.request_animation_frame();
         }
 
         root.children(if failed { None } else { self.frame_child() })

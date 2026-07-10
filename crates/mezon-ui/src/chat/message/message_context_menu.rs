@@ -48,7 +48,7 @@ pub(crate) fn build(
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
-    let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
+    let t = |key: &'static str| mezon_i18n::t(locale, key);
     let coming_soon_msg: SharedString = t("common.comingSoon").into();
     let is_own_message = current_user_id == msg.sender_id.as_str();
     let is_poll = msg.code == MessageCode::Poll;

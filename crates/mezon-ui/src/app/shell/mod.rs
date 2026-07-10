@@ -15,9 +15,12 @@ use crate::components::primitives::{Toast, ToastKind};
 
 mod coming_soon_modal;
 mod confirm_delete_message_modal;
+mod confirm_remove_friend_modal;
 mod upload_limit_modal;
 use coming_soon_modal::ComingSoonModal;
 use confirm_delete_message_modal::ConfirmDeleteMessageModal;
+pub use confirm_remove_friend_modal::FriendRemovalKind;
+use confirm_remove_friend_modal::{ConfirmRemoveFriendModal, interpolate_username};
 use upload_limit_modal::UploadLimitModal;
 
 const TOAST_TTL: Duration = Duration::from_secs(4);
@@ -166,6 +169,43 @@ impl Shell {
             description,
             cancel_label,
             delete_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_remove_friend(
+        &mut self,
+        friend_id: mezon_store::UserId,
+        display_username: &str,
+        kind: FriendRemovalKind,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let username = if display_username.is_empty() {
+            mezon_i18n::t(locale, "friendsPage.friend")
+        } else {
+            display_username
+        };
+        let (title, _) = interpolate_username(mezon_i18n::t(locale, kind.title_key()), username);
+        let (description, description_bold) =
+            interpolate_username(mezon_i18n::t(locale, kind.description_key()), username);
+        let cancel_label: SharedString =
+            mezon_i18n::t(locale, "friendsPage.removeFriendModal.cancel")
+                .to_string()
+                .into();
+        let confirm_label: SharedString =
+            mezon_i18n::t(locale, kind.confirm_key()).to_string().into();
+        let view = cx.new(|cx| ConfirmRemoveFriendModal {
+            focus_handle: cx.focus_handle(),
+            friend_id,
+            title,
+            description,
+            description_bold,
+            cancel_label,
+            confirm_label,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);

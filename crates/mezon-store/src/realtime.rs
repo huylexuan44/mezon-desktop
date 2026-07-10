@@ -45,6 +45,8 @@ pub enum RealtimeKind {
     Notifications,
     AddFriend,
     RemoveFriend,
+    BlockFriend,
+    UnblockFriend,
 }
 
 impl RealtimeKind {
@@ -79,6 +81,8 @@ impl RealtimeKind {
             RealtimeEvent::Notifications(_) => Self::Notifications,
             RealtimeEvent::AddFriend(_) => Self::AddFriend,
             RealtimeEvent::RemoveFriend(_) => Self::RemoveFriend,
+            RealtimeEvent::BlockFriend(_) => Self::BlockFriend,
+            RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             _ => return None,
         })
     }
@@ -266,6 +270,16 @@ mod tests {
                 realtime::RemoveFriend::default()
             )),
             Some(RealtimeKind::RemoveFriend)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::BlockFriend(realtime::BlockFriend::default())),
+            Some(RealtimeKind::BlockFriend)
+        );
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::UnblockFriend(
+                realtime::UnblockFriend::default()
+            )),
+            Some(RealtimeKind::UnblockFriend)
         );
     }
 }

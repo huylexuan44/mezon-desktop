@@ -557,9 +557,21 @@ fn render_heading(level: u8, text: SharedString) -> AnyElement {
         .into_any_element()
 }
 
+/// A stable element id derived from `name` + a hash of `key`, without the
+/// per-frame `String` allocation of `format!("{name}-{key}")` ids. Ids only
+/// need to be unique among siblings of the same parent element.
+pub(crate) fn hashed_element_id(name: &'static str, key: &str) -> gpui::ElementId {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    gpui::ElementId::NamedInteger(SharedString::new_static(name), hash)
+}
+
 fn render_canvas_chip(title: SharedString) -> AnyElement {
     div()
-        .id(SharedString::from(format!("canvas-chip-{title}")))
+        .id(hashed_element_id("canvas-chip", &title))
         .flex()
         .flex_none()
         .flex_row()
@@ -597,7 +609,7 @@ fn render_social_link_card(
     };
     let resolved = resolve_link_url(url, text);
     let display = text.clone();
-    let id = SharedString::from(format!("msg-social-{resolved}"));
+    let id = hashed_element_id("msg-social", &resolved);
     div()
         .id(id)
         .flex()
@@ -1150,7 +1162,7 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
 }
 
 fn link_block(url: String, display: impl Into<SharedString>, color: gpui::Rgba) -> AnyElement {
-    let id = SharedString::from(format!("msg-link-{url}"));
+    let id = hashed_element_id("msg-link", &url);
     let display = display.into();
     div()
         .id(id)

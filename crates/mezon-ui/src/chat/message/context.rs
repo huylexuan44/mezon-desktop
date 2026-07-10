@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::{App, Entity, SharedString, WeakEntity};
-use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings};
+use mezon_store::{ChannelType, ClanId, Emoji, MessageId, ProfileContext, Settings, UserId};
 
 use super::audio_player::AudioPlayerView;
 use super::channel_messages::ChannelMessages;
@@ -80,6 +82,21 @@ pub struct RowCtx<'a> {
     pub emoji_recent: &'a [Emoji],
     /// `common.comingSoon`, resolved once per render pass (not per row).
     pub coming_soon: SharedString,
+    /// Cross-frame memo for per-row derived values that are expensive to
+    /// recompute every frame (live avatar resolution, formatted time labels).
+    /// Owned by the view; invalidated on member-store change, channel switch,
+    /// locale change and day rollover.
+    pub row_memo: Rc<RefCell<RowMemo>>,
+}
+
+#[derive(Default)]
+pub struct RowMemo {
+    /// sender -> live-resolved (raw, proxied) avatar urls; `None` caches a
+    /// failed resolution so the per-message fallback is used without a
+    /// store lookup every frame.
+    pub avatars: HashMap<UserId, Option<(SharedString, SharedString)>>,
+    /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
+    pub time_labels: HashMap<MessageId, SharedString>,
 }
 
 pub const DEFAULT_DISPLAY_NAME_COLOR: u32 = 0x17_ac_86;

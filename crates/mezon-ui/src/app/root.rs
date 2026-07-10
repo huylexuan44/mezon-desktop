@@ -26,8 +26,8 @@ pub struct RootView {
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
     clan_setting_screen: Entity<ClanSettingScreen>,
-    settings: Entity<Settings>,
     applied_theme: String,
+    cached_locale: String,
     image_cache: Entity<LruImageCache>,
 }
 
@@ -44,7 +44,14 @@ impl RootView {
         cx.observe(&shell, |_, _, cx| cx.notify()).detach();
 
         cx.observe(&settings, |this, settings, cx| {
-            let name = settings.read(cx).theme.clone();
+            let (language, name) = {
+                let settings = settings.read(cx);
+                (settings.language.clone(), settings.theme.clone())
+            };
+            if language != this.cached_locale {
+                this.cached_locale = language;
+                cx.notify();
+            }
             if name != this.applied_theme {
                 crate::theme::set_theme(resolve_theme(&name), cx);
                 this.applied_theme = name;
@@ -68,7 +75,8 @@ impl RootView {
 
         cx.observe(&auth_state, |_, auth_state, cx| {
             if matches!(*auth_state.read(cx), AuthState::NotAuthenticated) {
-                crate::image_cache::clear_shared_avatar_cache(cx);
+                crate::image_viewer::close_image_viewer(cx);
+                crate::image_cache::clear_all_image_caches(cx);
             }
             cx.notify();
         })
@@ -127,6 +135,7 @@ impl RootView {
         });
 
         let applied_theme = settings.read(cx).theme.clone();
+        let cached_locale = settings.read(cx).language.clone();
         crate::image_cache::start_idle_trim(cx);
         let image_cache = cx.new(|cx| {
             LruImageCache::labeled(
@@ -144,8 +153,8 @@ impl RootView {
             chat_layout,
             settings_screen,
             clan_setting_screen,
-            settings,
             applied_theme,
+            cached_locale,
             image_cache,
         }
     }
@@ -187,19 +196,18 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
         crate::image_cache::flush_atlas_drops(window, cx);
-        let locale = self.settings.read(cx).language.clone();
+        let locale = self.cached_locale.as_str();
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();
-        let state = self.auth_state.read(cx).clone();
 
-        let content: gpui::AnyElement = match state {
+        let content: gpui::AnyElement = match self.auth_state.read(cx) {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
             }
-            AuthState::AwaitingCallback => render_awaiting_callback(theme, &locale),
+            AuthState::AwaitingCallback => render_awaiting_callback(theme, locale),
             AuthState::Connecting(_) => {
                 let attempt = ConnectionStore::global(cx).read(cx).connecting_attempt();
-                render_connecting(theme, &locale, attempt)
+                render_connecting(theme, locale, attempt)
             }
             AuthState::Authenticated(_) => {
                 let route = Router::global(cx).read(cx).route();
@@ -214,7 +222,7 @@ impl Render for RootView {
                     | Route::SettingsVoice
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
-                    Route::NotFound { .. } => render_not_found(theme, &locale),
+                    Route::NotFound { .. } => render_not_found(theme, locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
                     _ => uncached_fill(self.chat_layout.clone()),

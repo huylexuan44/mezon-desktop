@@ -109,7 +109,7 @@ impl GalleryModal {
                     store.reset_channel_attachments(channel_id);
                 });
             }
-            crate::image_viewer::trim_process_memory();
+            crate::image_cache::release_freed_memory_to_os(cx);
         });
         let from_date_picker = cx.new(DatePicker::new);
         let to_date_picker = cx.new(DatePicker::new);
@@ -400,7 +400,7 @@ impl GalleryModal {
         GalleryStore::global(cx).update(cx, |store, _| {
             store.reset_channel_attachments(self.channel_id);
         });
-        crate::image_viewer::trim_process_memory();
+        crate::image_cache::release_freed_memory_to_os(cx);
         cx.emit(DismissEvent);
     }
 

@@ -9,10 +9,10 @@ use mezon_store::{
     FriendState, FriendStore, PresenceEvent, PresenceStore, Settings, UserActivity, UserId,
 };
 
-use crate::app::shell::Shell;
+use crate::app::shell::{FriendRemovalKind, Shell};
 use crate::app::window_controls::APP_HEADER_HEIGHT;
 use crate::components::primitives::{
-    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, context_menu_at,
+    Avatar, ContextMenu, Icon, IconName, Input, InputEvent, InputState, ToastKind, context_menu_at,
 };
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, Router, navigate};
@@ -129,8 +129,43 @@ impl FriendsPage {
                         this.rebuild(cx);
                     }
                 }
+                FriendEvent::AddSucceeded => {
+                    this.toast(ToastKind::Success, "friends.toast.sendAddFriendSuccess", cx);
+                }
+                FriendEvent::AcceptSucceeded => {
+                    this.toast(
+                        ToastKind::Success,
+                        "friends.toast.acceptAddFriendSuccess",
+                        cx,
+                    );
+                }
                 FriendEvent::AddFailed => {
-                    this.set_add_error("friendsPage.requestFailedPopup.title", cx);
+                    this.toast(ToastKind::Error, "friends.toast.sendAddFriendFail", cx);
+                }
+                FriendEvent::AddingChanged => cx.notify(),
+                FriendEvent::BlockSucceeded => {
+                    this.toast(
+                        ToastKind::Success,
+                        "friendsPage.toast.userBlockedSuccess",
+                        cx,
+                    );
+                }
+                FriendEvent::BlockFailed => {
+                    this.toast(ToastKind::Error, "friendsPage.toast.userBlockedFailed", cx);
+                }
+                FriendEvent::UnblockSucceeded => {
+                    this.toast(
+                        ToastKind::Success,
+                        "friendsPage.toast.userUnblockedSuccess",
+                        cx,
+                    );
+                }
+                FriendEvent::UnblockFailed => {
+                    this.toast(
+                        ToastKind::Error,
+                        "friendsPage.toast.userUnblockedFailed",
+                        cx,
+                    );
                 }
             }),
         );
@@ -214,15 +249,12 @@ impl FriendsPage {
                 InputState::new(window, cx)
                     .placeholder(placeholder)
                     .embedded(true)
+                    .validate(|value, _| value.chars().count() <= MAX_USERNAME_LEN)
             });
             self._subs.push(cx.subscribe(
                 &add_input,
                 |this, _, event: &InputEvent, cx| match event {
-                    InputEvent::Change => {
-                        if this.add_error.take().is_some() {
-                            cx.notify();
-                        }
-                    }
+                    InputEvent::Change => this.revalidate_add_input(cx),
                     InputEvent::PressEnter => this.submit_add_friend(cx),
                 },
             ));
@@ -331,19 +363,17 @@ impl FriendsPage {
         }
         let value: String = raw.chars().take(MAX_USERNAME_LEN).collect();
         if !is_valid_username(&value) {
-            self.add_error = Some(SharedString::from(
-                mezon_i18n::t(
-                    &self.settings.read(cx).language,
-                    "friendsPage.addFriendModal.invalidInput",
-                )
-                .to_string(),
-            ));
-            cx.notify();
+            self.set_add_error("friendsPage.addFriendModal.invalidInput", cx);
+            return;
+        }
+
+        let store = FriendStore::global(cx);
+        if store.read(cx).is_blocked_by_me(&value, cx) {
+            self.set_add_error("friendsPage.addFriendModal.blockedUser", cx);
             return;
         }
 
         let lower = value.to_lowercase();
-        let store = FriendStore::global(cx);
         let existing = store
             .read(cx)
             .friends()
@@ -357,13 +387,10 @@ impl FriendsPage {
                     store.update(cx, |s, cx| s.accept_friend(id, cx));
                     self.clear_add_field(cx);
                 }
-                FriendState::Blocked => {
-                    self.set_add_error("friendsPage.addFriendModal.blockedUser", cx);
-                }
                 FriendState::InviteSent => {
                     self.set_add_error("friendsPage.addFriendModal.waitAccept", cx);
                 }
-                FriendState::Friend => {
+                FriendState::Friend | FriendState::Blocked => {
                     self.set_add_error("friendsPage.addFriendModal.alreadyFriends", cx);
                 }
             }
@@ -372,6 +399,55 @@ impl FriendsPage {
 
         store.update(cx, |s, cx| s.add_friend_by_username(value, cx));
         self.clear_add_field(cx);
+    }
+
+    fn revalidate_add_input(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.add_input.clone() else {
+            return;
+        };
+        let value = input.read(cx).value().to_string();
+        let key = if value.is_empty() {
+            None
+        } else if !is_valid_username(&value) {
+            Some("friendsPage.addFriendModal.invalidInput")
+        } else if FriendStore::global(cx)
+            .read(cx)
+            .is_blocked_by_me(&value, cx)
+        {
+            Some("friendsPage.addFriendModal.blockedUser")
+        } else {
+            None
+        };
+        let next = key.map(|key| {
+            SharedString::from(mezon_i18n::t(&self.settings.read(cx).language, key).to_string())
+        });
+        if self.add_error != next {
+            self.add_error = next;
+            cx.notify();
+        }
+    }
+
+    fn can_submit_add_friend(&self, cx: &App) -> bool {
+        let Some(input) = self.add_input.as_ref() else {
+            return false;
+        };
+        !input.read(cx).value().trim().is_empty()
+            && self.add_error.is_none()
+            && !FriendStore::global(cx).read(cx).is_adding()
+    }
+
+    fn friend_label(&self, user_id: UserId) -> SharedString {
+        self.rows
+            .iter()
+            .find(|row| row.id == user_id)
+            .map(|row| row.label.clone())
+            .unwrap_or_default()
+    }
+
+    fn toast(&self, kind: ToastKind, key: &'static str, cx: &mut Context<Self>) {
+        let message =
+            SharedString::from(mezon_i18n::t(&self.settings.read(cx).language, key).to_string());
+        Shell::global(cx).update(cx, |shell, cx| shell.toast(kind, message, cx));
     }
 
     fn set_add_error(&mut self, key: &'static str, cx: &mut Context<Self>) {
@@ -470,6 +546,19 @@ fn is_valid_username(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_alphanumeric() || ('+'..='_').contains(&c))
+}
+
+fn open_remove_friend_modal(
+    user_id: UserId,
+    username: SharedString,
+    kind: FriendRemovalKind,
+    locale: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    Shell::global(cx).update(cx, |shell, cx| {
+        shell.confirm_remove_friend(user_id, &username, kind, &locale, window, cx);
+    });
 }
 
 fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
@@ -860,6 +949,21 @@ impl FriendsPage {
             }
         };
 
+        let confirm_remove = {
+            let username = self.friend_label(user_id);
+            let locale = SharedString::from(locale.to_string());
+            move |window: &mut Window, cx: &mut App| {
+                open_remove_friend_modal(
+                    user_id,
+                    username.clone(),
+                    FriendRemovalKind::RemoveFriend,
+                    locale.clone(),
+                    window,
+                    cx,
+                );
+            }
+        };
+
         ContextMenu::new()
             .on_dismiss(dismiss)
             .item(
@@ -867,12 +971,7 @@ impl FriendsPage {
                 coming_soon.clone(),
             )
             .item(t("friendsPage.friendMenu.startVoiceCall"), coming_soon)
-            .danger_item(
-                t("friendsPage.friendMenu.removeFriend"),
-                move |_window, cx| {
-                    FriendStore::global(cx).update(cx, |s, cx| s.delete_friend(user_id, cx));
-                },
-            )
+            .danger_item(t("friendsPage.friendMenu.removeFriend"), confirm_remove)
             .danger_item(t("friendsPage.friendMenu.block"), move |_window, cx| {
                 FriendStore::global(cx).update(cx, |s, cx| s.block_friend(user_id, cx));
             })
@@ -908,6 +1007,7 @@ impl FriendsPage {
                     .text_color(theme.tokens.text_theme_primary),
             );
         }
+        let can_submit = self.can_submit_add_friend(cx);
         input_wrap = input_wrap.child(
             div()
                 .id("friend-add-send")
@@ -923,9 +1023,17 @@ impl FriendsPage {
                 .text_size(px(14.))
                 .bg(theme.tokens.button_theme_primary)
                 .text_color(gpui::white())
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.tokens.bg_button_primary_hover))
-                .on_click(cx.listener(|this, _, _window, cx| this.submit_add_friend(cx)))
+                .map(|el| {
+                    if can_submit {
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(theme.tokens.bg_button_primary_hover))
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.submit_add_friend(cx)),
+                            )
+                    } else {
+                        el.cursor_not_allowed().opacity(0.5)
+                    }
+                })
                 .child(mezon_i18n::t(locale, "friendsPage.addFriendModal.sendRequest").to_string()),
         );
 
@@ -1074,7 +1182,7 @@ fn render_friend_row(
         .child(avatar_slot)
         .child(name_col);
 
-    let actions = render_row_actions(theme, id, state, entity.clone(), locale);
+    let actions = render_row_actions(theme, id, state, entity.clone(), locale, row.label.clone());
 
     let clickable_open_dm = !matches!(state, FriendState::InviteSent | FriendState::InviteReceived);
 
@@ -1190,7 +1298,9 @@ fn render_row_actions(
     state: FriendState,
     entity: Entity<FriendsPage>,
     locale: &str,
+    label: SharedString,
 ) -> gpui::AnyElement {
+    let locale_owned = SharedString::from(locale.to_string());
     match state {
         FriendState::Friend => div()
             .flex()
@@ -1240,8 +1350,15 @@ fn render_row_actions(
                     "✕",
                     theme,
                 )
-                .on_click(move |_, _window, cx| {
-                    FriendStore::global(cx).update(cx, |s, cx| s.delete_friend(id, cx));
+                .on_click(move |_, window, cx| {
+                    open_remove_friend_modal(
+                        id,
+                        label.clone(),
+                        FriendRemovalKind::CancelRequest,
+                        locale_owned.clone(),
+                        window,
+                        cx,
+                    );
                 }),
             )
             .into_any_element(),
@@ -1266,8 +1383,15 @@ fn render_row_actions(
                     "✕",
                     theme,
                 )
-                .on_click(move |_, _window, cx| {
-                    FriendStore::global(cx).update(cx, |s, cx| s.delete_friend(id, cx));
+                .on_click(move |_, window, cx| {
+                    open_remove_friend_modal(
+                        id,
+                        label.clone(),
+                        FriendRemovalKind::RejectRequest,
+                        locale_owned.clone(),
+                        window,
+                        cx,
+                    );
                 }),
             )
             .into_any_element(),

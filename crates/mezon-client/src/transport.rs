@@ -70,6 +70,8 @@ pub enum RealtimeEvent {
     ClanEmoji(realtime::EventEmoji),
     AddFriend(realtime::AddFriend),
     RemoveFriend(realtime::RemoveFriend),
+    BlockFriend(realtime::BlockFriend),
+    UnblockFriend(realtime::UnblockFriend),
     /// Server-pushed session refresh over the socket (`refresh_session_event`, field 96).
     /// The native equivalent of mezon-js `client.onrefreshsession`.
     SessionRefreshed(api::Session),
@@ -119,6 +121,8 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::EventEmoji(m) => Ok(Self::ClanEmoji(m)),
             realtime::envelope::Message::AddFriend(m) => Ok(Self::AddFriend(m)),
             realtime::envelope::Message::RemoveFriend(m) => Ok(Self::RemoveFriend(m)),
+            realtime::envelope::Message::BlockFriend(m) => Ok(Self::BlockFriend(m)),
+            realtime::envelope::Message::UnBlockFriend(m) => Ok(Self::UnblockFriend(m)),
             realtime::envelope::Message::RefreshSessionEvent(s) => Ok(Self::SessionRefreshed(s)),
             realtime::envelope::Message::LastPinMessageEvent(m) => Ok(Self::LastPinMessage(m)),
             realtime::envelope::Message::UnpinMessageEvent(m) => Ok(Self::UnpinMessage(m)),
@@ -1395,7 +1399,11 @@ pub struct ApiMessageContent {
     pub is_closed: bool,
     #[serde(default, deserialize_with = "opt_i32_flex::deserialize")]
     pub total_votes: Option<i32>,
-    #[serde(default, rename = "type", deserialize_with = "opt_i64_flex::deserialize")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
     pub poll_type: Option<i64>,
     #[serde(default, deserialize_with = "vec_null_as_empty::deserialize")]
     pub embed: Vec<ApiEmbed>,

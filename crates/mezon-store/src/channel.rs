@@ -1,7 +1,8 @@
 use crate::ids::{ChannelId, ClanId, MessageId, UserId};
+use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
@@ -139,15 +140,29 @@ pub enum CreateCategoryError {
     Other(String),
 }
 
+static EMOJI_PRESENTATION_CHAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\p{Emoji_Presentation}$").expect("emoji presentation regex"));
+
+fn is_allowed_category_name_char(c: char) -> bool {
+    if c == '\'' {
+        return false;
+    }
+    c.is_alphanumeric()
+        || matches!(c, '_' | '-' | ' ')
+        || EMOJI_PRESENTATION_CHAR.is_match(&c.to_string())
+}
+
 pub fn validate_category_name(name: &str) -> Result<String, CreateCategoryError> {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed.chars().count() > CATEGORY_NAME_MAX_CHARS {
         return Err(CreateCategoryError::InvalidName);
     }
-    if !trimmed
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ' ')
-    {
+    let mut chars = trimmed.chars();
+    let first = chars.next().expect("non-empty");
+    if matches!(first, '_' | '-' | ' ') || !is_allowed_category_name_char(first) {
+        return Err(CreateCategoryError::InvalidName);
+    }
+    if !chars.all(is_allowed_category_name_char) {
         return Err(CreateCategoryError::InvalidName);
     }
     Ok(trimmed.to_string())
@@ -3032,7 +3047,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_category_name_rejects_empty_long_space_or_unicode() {
+    fn validate_category_name_accepts_emoji_and_vietnamese() {
+        assert_eq!(validate_category_name("🎮 Games").unwrap(), "🎮 Games");
+        assert_eq!(validate_category_name("Kênh chung").unwrap(), "Kênh chung");
+    }
+
+    #[test]
+    fn validate_category_name_rejects_empty_long_apostrophe_or_leading_space() {
         let too_long = "a".repeat(CATEGORY_NAME_MAX_CHARS + 1);
 
         assert_eq!(
@@ -3041,6 +3062,14 @@ mod tests {
         );
         assert_eq!(
             validate_category_name(&too_long),
+            Err(CreateCategoryError::InvalidName)
+        );
+        assert_eq!(
+            validate_category_name("it's"),
+            Err(CreateCategoryError::InvalidName)
+        );
+        assert_eq!(
+            validate_category_name("_hidden"),
             Err(CreateCategoryError::InvalidName)
         );
     }

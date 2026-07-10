@@ -56,30 +56,60 @@ fn resolve_message_avatar_urls(
     msg: &Message,
     ctx: &RowCtx,
     cx: &App,
-) -> (String, Option<SharedString>) {
+) -> (SharedString, Option<SharedString>) {
     if let Some(context) = ctx.profile_context
         && let Some(user_id) = msg.sender_user_id
-        && let Some(avatar_url) = resolve_avatar_url(user_id, context, cx)
-        && !avatar_url.is_empty()
     {
-        let proxied = if avatar_url.as_str() == msg.avatar_url.as_ref() {
-            msg.avatar_proxied.clone()
-        } else {
-            SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar_url))
+        let cached = ctx.row_memo.borrow().avatars.get(&user_id).cloned();
+        let resolved = match cached {
+            Some(resolved) => resolved,
+            None => {
+                let resolved = resolve_avatar_url(user_id, context, cx)
+                    .filter(|url| !url.is_empty())
+                    .map(|avatar_url| {
+                        let proxied = if avatar_url.as_str() == msg.avatar_url.as_ref() {
+                            msg.avatar_proxied.clone()
+                        } else {
+                            SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar_url))
+                        };
+                        (SharedString::from(avatar_url), proxied)
+                    });
+                ctx.row_memo
+                    .borrow_mut()
+                    .avatars
+                    .insert(user_id, resolved.clone());
+                resolved
+            }
         };
-        return (avatar_url, Some(proxied));
+        if let Some((raw_url, proxied)) = resolved {
+            return (raw_url, Some(proxied));
+        }
     }
 
     let proxied = msg.avatar_proxied.clone();
     if !proxied.is_empty() {
-        return (msg.avatar_url.to_string(), Some(proxied));
+        return (msg.avatar_url.clone(), Some(proxied));
     }
-    (msg.avatar_url.to_string(), None)
+    (msg.avatar_url.clone(), None)
 }
 
 pub fn render_head(msg: &Message, ctx: &RowCtx, name_color: u32) -> AnyElement {
     let theme = ctx.theme;
-    let time_label = format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now);
+    let time_label = {
+        let mut memo = ctx.row_memo.borrow_mut();
+        match memo.time_labels.get(&msg.id) {
+            Some(label) => label.clone(),
+            None => {
+                let label =
+                    format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now);
+                if memo.time_labels.len() >= 4096 {
+                    memo.time_labels.clear();
+                }
+                memo.time_labels.insert(msg.id, label.clone());
+                label
+            }
+        }
+    };
     let name = div()
         .text_size(px(16.))
         .font_weight(FontWeight::MEDIUM)
@@ -151,7 +181,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                     .italic()
                     .text_size(px(13.))
                     .text_color(theme.tokens.text_theme_primary)
-                    .child(mezon_i18n::t(ctx.locale, "message.messageDeleteReply").to_string()),
+                    .child(mezon_i18n::t(ctx.locale, "message.messageDeleteReply")),
             )
             .into_any_element();
     }
@@ -219,7 +249,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .child(
                     div()
                         .italic()
-                        .child(mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment").to_string()),
+                        .child(mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment")),
                 )
                 .child(
                     Icon::new(IconName::ImageThumbnail)
@@ -235,7 +265,7 @@ pub fn render_reply(reference: &MessageReference, ctx: &RowCtx) -> AnyElement {
                 .gap_1()
                 .text_color(theme.tokens.text_theme_message)
                 .child("📊")
-                .child(mezon_i18n::t(ctx.locale, "message.poll.pollLabel").to_string())
+                .child(mezon_i18n::t(ctx.locale, "message.poll.pollLabel"))
                 .into_any_element()
         } else {
             div()
@@ -437,11 +467,9 @@ fn render_audio(
     };
     let activate_download_url = download_url.clone();
     let activate_download_name = download_name.clone();
-    let play_id = SharedString::from(format!("audio-play-{}-{}", msg_id.0, index));
-    let download_id = SharedString::from(format!("audio-dl-{}-{}", msg_id.0, index));
     audio_pill(
-        play_id,
-        download_id,
+        ("audio-play", index),
+        ("audio-dl", index),
         false,
         audio_time_label(0.0, duration),
         move |_, _, cx| {
@@ -864,7 +892,7 @@ fn file_icon_for(filetype: &str) -> IconName {
 }
 
 fn file_box_action(
-    id: SharedString,
+    id: impl Into<gpui::ElementId>,
     icon: IconName,
     theme: &Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -1005,7 +1033,7 @@ fn render_file_box(
                     .opacity(0.)
                     .group_hover(group_name, |s| s.opacity(1.))
                     .child(file_box_action(
-                        SharedString::from(format!("file-dl-{}-{}", msg.id.0, index)),
+                        ("file-dl", index),
                         IconName::Download,
                         theme,
                         move |_, _, cx| {
@@ -1019,7 +1047,7 @@ fn render_file_box(
                     .when(is_owner, |d| {
                         let remove_msg_id = msg.id;
                         d.child(file_box_action(
-                            SharedString::from(format!("file-rm-{}-{}", msg.id.0, index)),
+                            ("file-rm", index),
                             IconName::TrashIcon,
                             theme,
                             move |_, _, cx| {
@@ -1031,7 +1059,7 @@ fn render_file_box(
                     })
                     .when(is_pdf, |d| {
                         d.child(file_box_action(
-                            SharedString::from(format!("file-pdf-{}-{}", msg.id.0, index)),
+                            ("file-pdf", index),
                             IconName::FileIcon,
                             theme,
                             move |_, _, cx| open_external(&pdf_url, cx),
@@ -1072,8 +1100,8 @@ pub fn render_reactions(msg: &Message, ctx: &RowCtx) -> Option<AnyElement> {
         return None;
     }
     let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_1().w_full();
-    for (i, reaction) in msg.reactions.iter().enumerate() {
-        row = row.child(reaction_pill(i, reaction, msg.id, ctx));
+    for reaction in msg.reactions.iter() {
+        row = row.child(reaction_pill(reaction, msg.id, ctx));
     }
     row = row.child(add_reaction_button(msg.id, ctx));
     Some(row.into_any_element())
@@ -1112,12 +1140,7 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
         .into_any_element()
 }
 
-fn reaction_pill(
-    index: usize,
-    reaction: &Reaction,
-    message_id: MessageId,
-    ctx: &RowCtx,
-) -> AnyElement {
+fn reaction_pill(reaction: &Reaction, message_id: MessageId, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let reacted = !ctx.current_user_id.is_empty() && reaction.has_sender(ctx.current_user_id);
     let count_label = reaction.count_label.clone();
@@ -1129,7 +1152,10 @@ fn reaction_pill(
     let avatar_cache = ctx.avatar_cache.clone();
 
     let mut pill = div()
-        .id(("reaction", index))
+        .id(super::content::hashed_element_id(
+            "reaction",
+            &reaction.emoji_id,
+        ))
         .relative()
         .flex()
         .flex_row()
@@ -1435,7 +1461,7 @@ fn open_viewer_from_message(
 pub fn render_date_divider(theme: &Theme, label: &str) -> AnyElement {
     let line_color = theme.tokens.border_color_primary;
     div()
-        .id(SharedString::from(format!("date-sep-{}", label)))
+        .id(super::content::hashed_element_id("date-sep", label))
         .w_full()
         .mt_5()
         .mb_2()
