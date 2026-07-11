@@ -25,6 +25,22 @@ pub struct AsyncApp {
     pub(crate) foreground_executor: ForegroundExecutor,
 }
 
+/// mezon vendor edit: an async update racing a live App borrow is the
+/// "RefCell already borrowed" failure seen in field crash logs. Capture the
+/// FAILING side's backtrace for the first few occurrences so the culprit task
+/// is identifiable; eprintln because vendored `log::*` has no bridge in mezon.
+pub(crate) fn log_reentrant_borrow(site: &str) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    let n = LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n < 8 {
+        eprintln!(
+            "[gpui_reentrancy] {site}: app already borrowed (occurrence {n})\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+}
+
 impl AsyncApp {
     fn app(&self) -> std::rc::Rc<AppCell> {
         self.app
@@ -87,7 +103,13 @@ impl AppContext for AsyncApp {
         F: FnOnce(AnyView, &mut Window, &mut App) -> T,
     {
         let app = self.app.upgrade().context("app was released")?;
-        let mut lock = app.try_borrow_mut()?;
+        let mut lock = match app.try_borrow_mut() {
+            Ok(lock) => lock,
+            Err(err) => {
+                log_reentrant_borrow("AsyncApp::update_window");
+                return Err(err.into());
+            }
+        };
         if lock.quitting {
             bail!("app is quitting");
         }
@@ -100,7 +122,13 @@ impl AppContext for AsyncApp {
         f: impl FnOnce(&mut Window, &mut App) -> R,
     ) -> Option<R> {
         let app = self.app.upgrade()?;
-        let mut lock = app.try_borrow_mut().ok()?;
+        let mut lock = match app.try_borrow_mut() {
+            Ok(lock) => lock,
+            Err(_) => {
+                log_reentrant_borrow("AsyncApp::with_window");
+                return None;
+            }
+        };
         if lock.quitting {
             return None;
         }

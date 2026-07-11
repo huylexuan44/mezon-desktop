@@ -677,39 +677,39 @@ impl<T: ScrollableHandle> ScrollbarState<T> {
     /// allocation per frame); now it only pushes `hide_deadline` forward and the single
     /// task re-sleeps until the final deadline is reached.
     fn schedule_auto_hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.visible() && self.show_behavior == ShowBehavior::Autohide {
-            self.hide_deadline = Some(Instant::now() + SCROLLBAR_HIDE_DELAY_INTERVAL);
+        if !(self.visible() && self.show_behavior == ShowBehavior::Autohide) {
+            self.hide_deadline = None;
+            self._auto_hide_task = None;
+            return;
         }
+        self.hide_deadline = Some(Instant::now() + SCROLLBAR_HIDE_DELAY_INTERVAL);
         if self._auto_hide_task.is_none() {
-            self._auto_hide_task = (self.visible() && self.show_behavior == ShowBehavior::Autohide)
-                .then(|| {
-                    cx.spawn_in(window, async move |scrollbar_state, cx| {
-                        loop {
-                            let Ok(remaining) = scrollbar_state.read_with(cx, |state, _| {
-                                state.hide_deadline.and_then(|deadline| {
-                                    deadline.checked_duration_since(Instant::now())
-                                })
-                            }) else {
-                                return;
-                            };
-                            match remaining {
-                                Some(remaining) => {
-                                    cx.background_executor().timer(remaining).await
-                                }
-                                None => break,
-                            }
+            self._auto_hide_task = Some(cx.spawn_in(window, async move |scrollbar_state, cx| {
+                loop {
+                    let Ok(remaining) = scrollbar_state.read_with(cx, |state, _| {
+                        state
+                            .hide_deadline
+                            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                    }) else {
+                        return;
+                    };
+                    match remaining {
+                        Some(remaining) => cx.background_executor().timer(remaining).await,
+                        None => break,
+                    }
+                }
+                scrollbar_state
+                    .update(cx, |state, cx| {
+                        if state.thumb_state == ThumbState::Inactive
+                            && state.show_behavior == ShowBehavior::Autohide
+                        {
+                            state.set_visibility(VisibilityState::for_autohide(), cx);
                         }
-                        scrollbar_state
-                            .update(cx, |state, cx| {
-                                if state.thumb_state == ThumbState::Inactive {
-                                    state.set_visibility(VisibilityState::for_autohide(), cx);
-                                }
-                                state.hide_deadline = None;
-                                state._auto_hide_task.take();
-                            })
-                            .log_err();
+                        state.hide_deadline = None;
+                        state._auto_hide_task.take();
                     })
-                });
+                    .log_err();
+            }));
         }
     }
 

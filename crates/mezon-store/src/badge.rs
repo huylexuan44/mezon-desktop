@@ -260,10 +260,16 @@ impl BadgeService {
         clan_id: ClanId,
         cx: &App,
     ) -> bool {
-        let role_ids: Vec<i64> = ClanMembersStore::global(cx)
-            .read(cx)
-            .member(clan_id, UserId(user_id))
-            .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+        let store = ClanMembersStore::global(cx);
+        let store = store.read(cx);
+        let role_ids: Vec<i64> = store
+            .self_role_ids(clan_id)
+            .map(<[i64]>::to_vec)
+            .or_else(|| {
+                store
+                    .member(clan_id, UserId(user_id))
+                    .map(|member| member.role_ids.iter().map(|role| role.get()).collect())
+            })
             .unwrap_or_default();
         mezon_client::transport::is_mention_or_reply(
             content,

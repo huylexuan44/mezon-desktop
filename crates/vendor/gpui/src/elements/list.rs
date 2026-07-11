@@ -1522,12 +1522,25 @@ impl Element for List {
         let scroll_top = prepaint.layout.scroll_top;
         let hitbox_id = prepaint.hitbox.id;
         let mut accumulated_scroll_delta = ScrollDelta::default();
-        const MEZON_MOUSE_WHEEL_SCROLL_SENSITIVITY: f32 = 3.0;
+        // Mezon rows (messages, channels, clans) are substantially taller than
+        // Zed's text rows. Keep line-wheel behavior at the existing 3x tuning,
+        // while giving high-resolution wheels/trackpads a smaller boost. The
+        // previous implementation multiplied the `line_height` argument, which
+        // `ScrollDelta::Pixels` intentionally ignores, so precise devices never
+        // received any sensitivity adjustment.
+        const MEZON_LINE_SCROLL_SENSITIVITY: f32 = 3.0;
+        const MEZON_PRECISE_SCROLL_SENSITIVITY: f32 = 1.5;
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
+                let sensitivity = if accumulated_scroll_delta.precise() {
+                    MEZON_PRECISE_SCROLL_SENSITIVITY
+                } else {
+                    MEZON_LINE_SCROLL_SENSITIVITY
+                };
                 let pixel_delta = accumulated_scroll_delta
-                    .pixel_delta(px(20.) * MEZON_MOUSE_WHEEL_SCROLL_SENSITIVITY);
+                    .pixel_delta(px(20.))
+                    .map(|delta| delta * sensitivity);
                 list_state.0.borrow_mut().scroll(
                     &scroll_top,
                     height,

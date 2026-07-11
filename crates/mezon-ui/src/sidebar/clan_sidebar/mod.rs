@@ -5,7 +5,7 @@ use gpui::{
     list, prelude::*, px,
 };
 use mezon_store::{AccountStore, ClanList, DirectMessageStore, Settings};
-use ui::Tooltip;
+use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 
 use crate::app::shell::Shell;
 use crate::app::window_controls;
@@ -207,7 +207,7 @@ impl ClanSidebar {
 }
 
 impl Render for ClanSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let avatar_cache = self.image_cache.clone();
         let theme = cx.theme();
         let dm_active = self.dm_active;
@@ -295,7 +295,19 @@ impl Render for ClanSidebar {
                     .child(unread_list)
                     .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3().mb_3()),
             )
-            .child(div().flex_1().min_h_0().w_full().child(list_element))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(list_element)
+                    .custom_scrollbars(
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.list_state),
+                        window,
+                        cx,
+                    ),
+            )
     }
 }
 

@@ -427,7 +427,7 @@ impl Render for MessageSearchPanel {
                             .size_full(),
                         )
                         .custom_scrollbars(
-                            Scrollbars::new(ScrollAxes::Vertical)
+                            Scrollbars::always_visible(ScrollAxes::Vertical)
                                 .tracked_scroll_handle(&list_state),
                             window,
                             cx,

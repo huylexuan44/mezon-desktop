@@ -265,6 +265,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_close_msg(&self) -> Option<isize> {
+        eprintln!("[gpui_window_lifecycle] WM_CLOSE");
         let mut callback = self.state.callbacks.should_close.take()?;
         let should_close = callback();
         self.state.callbacks.should_close.set(Some(callback));
@@ -272,6 +273,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        eprintln!("[gpui_window_lifecycle] WM_DESTROY hwnd={handle:?}");
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {

@@ -409,7 +409,8 @@ impl Render for ReactionPicker {
                 .pr_1()
                 .child(list)
                 .custom_scrollbars(
-                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.scroll),
+                    Scrollbars::always_visible(ScrollAxes::Vertical)
+                        .tracked_scroll_handle(&self.scroll),
                     window,
                     cx,
                 ),

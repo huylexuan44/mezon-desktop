@@ -559,7 +559,8 @@ impl Render for GalleryModal {
                     .size_full(),
                 )
                 .custom_scrollbars(
-                    Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.list_state),
+                    Scrollbars::always_visible(ScrollAxes::Vertical)
+                        .tracked_scroll_handle(&self.list_state),
                     window,
                     cx,
                 )

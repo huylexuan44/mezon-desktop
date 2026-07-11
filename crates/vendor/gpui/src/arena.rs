@@ -76,6 +76,8 @@ pub struct Arena {
     current_chunk_index: usize,
     chunk_size: NonZeroUsize,
     low_use_clears: u32,
+    elements_window_peak: usize,
+    elements_window_clears: u32,
 }
 
 const ARENA_SHRINK_AFTER_CLEARS: u32 = 600;
@@ -96,6 +98,8 @@ impl Arena {
             current_chunk_index: 0,
             chunk_size,
             low_use_clears: 0,
+            elements_window_peak: 0,
+            elements_window_clears: 0,
         }
     }
 
@@ -106,6 +110,7 @@ impl Arena {
     pub fn clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
+        self.elements_window_peak = self.elements_window_peak.max(self.elements.len());
         self.elements.clear();
         for chunk_index in 0..=self.current_chunk_index {
             self.chunks[chunk_index].reset();
@@ -122,6 +127,20 @@ impl Arena {
             }
         } else {
             self.low_use_clears = 0;
+        }
+        // Independent window for the element-header Vec: a spike frame raises
+        // this window's peak (blocking the shrink once), but the NEXT full
+        // window sees the true low peak and releases the capacity — unlike the
+        // chunk counter above, this cannot be permanently disarmed by the
+        // spike it is meant to undo.
+        self.elements_window_clears += 1;
+        if self.elements_window_clears >= ARENA_SHRINK_AFTER_CLEARS {
+            let keep = self.elements_window_peak.max(64) * 2;
+            if self.elements.capacity() > keep {
+                self.elements.shrink_to(keep);
+            }
+            self.elements_window_clears = 0;
+            self.elements_window_peak = 0;
         }
         self.current_chunk_index = 0;
     }

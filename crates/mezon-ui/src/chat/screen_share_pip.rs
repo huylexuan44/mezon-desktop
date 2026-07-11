@@ -10,6 +10,7 @@ use crate::components::primitives::{Icon, IconName};
 pub struct ScreenSharePipView {
     voice: Entity<VoiceStore>,
     key: u64,
+    _frame_pump: Option<gpui::Task<()>>,
 }
 
 impl ScreenSharePipView {
@@ -20,7 +21,38 @@ impl ScreenSharePipView {
             release_voice.update(cx, |store, cx| store.on_pip_closed(key, cx));
         })
         .detach();
-        Self { voice, key }
+        let mut this = Self {
+            voice,
+            key,
+            _frame_pump: None,
+        };
+        this.start_frame_pump(cx);
+        this
+    }
+
+    fn start_frame_pump(&mut self, cx: &mut Context<Self>) {
+        const PIP_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+        self._frame_pump = Some(cx.spawn(async move |this, cx| {
+            let mut last_seq = 0u64;
+            loop {
+                cx.background_executor().timer(PIP_FRAME_INTERVAL).await;
+                let stepped = this.update(cx, |this, cx| {
+                    let seq = this
+                        .voice
+                        .read(cx)
+                        .frame_store()
+                        .map(|store| store.publish_seq())
+                        .unwrap_or(0);
+                    if seq != last_seq {
+                        last_seq = seq;
+                        cx.notify();
+                    }
+                });
+                if stepped.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 }
 
@@ -29,9 +61,6 @@ impl Render for ScreenSharePipView {
         let image = self.voice.read(cx).render_image(self.key);
         self.voice
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        if image.is_some() {
-            window.request_animation_frame();
-        }
         let content = match image {
             Some(image) => img(image)
                 .size_full()

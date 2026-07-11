@@ -83,8 +83,11 @@ impl ClanBucket {
     }
 }
 
+const MAX_CACHED_CLANS: usize = 16;
+
 pub struct ClanMembersStore {
     cache: KeyedCache<ClanId, ClanBucket>,
+    self_role_ids: HashMap<ClanId, Vec<i64>>,
     loading: HashSet<ClanId>,
     api: Arc<AppApi>,
     _clan_sub: Subscription,
@@ -114,8 +117,13 @@ impl ClanMembersStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.cache.clear();
+        self.self_role_ids.clear();
         self.loading.clear();
         cx.notify();
+    }
+
+    pub fn self_role_ids(&self, clan_id: ClanId) -> Option<&[i64]> {
+        self.self_role_ids.get(&clan_id).map(Vec::as_slice)
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -130,11 +138,8 @@ impl ClanMembersStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            cache: // Unbounded on purpose: BadgeService::is_mention reads member(clan_id, uid)
-        // role_ids for EVERY incoming message in EVERY clan through an immutable
-        // read that cannot refresh recency — bounding this cache evicts background
-        // clans and silently kills their role-mention badges (>N clans).
-        KeyedCache::new(None),
+            cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
+            self_role_ids: HashMap::new(),
             loading: HashSet::new(),
             api,
             _clan_sub: clan_sub,
@@ -251,6 +256,16 @@ impl ClanMembersStore {
                             "ClanMembersStore: fetched {} members for clan {clan_id}",
                             bucket.ids.len()
                         );
+                        if let Some(self_id) = self_id {
+                            let roles = bucket
+                                .by_id
+                                .get(&UserId(self_id))
+                                .map(|member| {
+                                    member.role_ids.iter().map(|role| role.get()).collect()
+                                })
+                                .unwrap_or_default();
+                            this.self_role_ids.insert(clan_id, roles);
+                        }
                         this.cache.insert(clan_id, bucket, None);
                         let online_uids: Vec<UserId> =
                             online_ids.iter().map(|id| UserId(*id)).collect();
@@ -281,6 +296,12 @@ impl ClanMembersStore {
             RealtimeEvent::UserClanRemoved(e) => {
                 let clan_id = ClanId(e.clan_id);
                 let ids: Vec<UserId> = e.user_ids.iter().map(|id| UserId(*id)).collect();
+                let self_id = BadgeService::global(cx).read(cx).current_user_id(cx);
+                if let Some(self_id) = self_id
+                    && ids.contains(&self_id)
+                {
+                    self.self_role_ids.remove(&clan_id);
+                }
                 apply_remove_members(&mut self.cache, clan_id, &ids).then_some(clan_id)
             }
             RealtimeEvent::ClanProfileUpdated(e) => {

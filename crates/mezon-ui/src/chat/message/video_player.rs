@@ -200,7 +200,7 @@ impl VideoPlayerView {
             playing = false;
         }
         let new_frame = if playing { player.copy_frame() } else { None };
-        let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, window));
+        let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, window, cx));
         let previous = {
             let mut shared = self.shared.borrow_mut();
             shared.failed = failed;
@@ -422,6 +422,7 @@ impl VideoPlayerView {
         _shared: &Rc<RefCell<SharedPlayback>>,
         frame: VideoFrame,
         _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> VideoFrame {
         frame
     }
@@ -431,6 +432,7 @@ impl VideoPlayerView {
         shared: &Rc<RefCell<SharedPlayback>>,
         frame: VideoFrame,
         window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> VideoFrame {
         let stream_id = shared.borrow().stream_image_id;
         match stream_id {
@@ -441,7 +443,7 @@ impl VideoPlayerView {
             Some(id) => match std::sync::Arc::try_unwrap(frame) {
                 Ok(image) => {
                     let rebranded = std::sync::Arc::new(image.with_id(id));
-                    window.update_render_image(&rebranded).ok();
+                    cx.update_render_image(&rebranded, Some(window));
                     rebranded
                 }
                 Err(still_shared) => {

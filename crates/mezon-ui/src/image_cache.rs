@@ -36,7 +36,7 @@ pub(crate) fn queue_atlas_replace(cx: &mut App, image: Arc<RenderImage>) {
 pub fn flush_atlas_replaces(window: &mut Window, cx: &mut App) {
     let pending = std::mem::take(&mut cx.default_global::<PendingAtlasReplaces>().0);
     for image in pending {
-        window.update_render_image(&image).ok();
+        cx.update_render_image(&image, Some(window));
     }
 }
 
@@ -355,10 +355,12 @@ struct CacheEntry {
     /// The sweep epoch in which this entry was last requested.
     touched_epoch: u64,
     last_used: Instant,
-    /// When a transient load failure was first observed. Oversized-image
-    /// rejections (`bytes == Some(0)`) are deterministic and never retried;
-    /// transient failures are retried once per [`NEGATIVE_CACHE_RETRY_TTL`]
-    /// while the image keeps being requested.
+    /// When a transient load failure was first observed. Deterministic
+    /// failures — oversized-image rejections (`bytes == Some(0)`), canvas/
+    /// dimension guards (`Asset`), decode/limits errors (`Image`), bad SVGs
+    /// (`Usvg`) — are never retried; only network-shaped failures (`Io`,
+    /// `BadStatus`, `Other`) are retried once per
+    /// [`NEGATIVE_CACHE_RETRY_TTL`] while the image keeps being requested.
     failed_at: Option<Instant>,
 }
 
@@ -734,8 +736,13 @@ impl LruImageCache {
         if self.cache.contains_key(&hash) {
             let retry_failed = {
                 let entry = self.cache.get_mut(&hash).expect("checked contains_key");
-                let transient_failure =
-                    entry.bytes.is_none() && matches!(entry.item.get(), Some(Err(_)));
+                let transient_failure = entry.bytes.is_none()
+                    && matches!(
+                        entry.item.get(),
+                        Some(Err(ImageCacheError::Io(_)
+                            | ImageCacheError::BadStatus { .. }
+                            | ImageCacheError::Other(_)))
+                    );
                 if transient_failure {
                     match entry.failed_at {
                         Some(failed_at) => failed_at.elapsed() >= NEGATIVE_CACHE_RETRY_TTL,
@@ -1082,11 +1089,16 @@ fn downscaled_static_frame(decoded: image::DynamicImage, max_px: u32) -> image::
     bgra_frame(decoded)
 }
 
+enum AnimationDecodeError {
+    BudgetExceeded,
+    Image(ImageCacheError),
+}
+
 fn downscaled_animation_frames<I>(
     frames: I,
     max_px: u32,
     byte_budget: u64,
-) -> Result<Vec<image::Frame>, ImageCacheError>
+) -> Result<Vec<image::Frame>, AnimationDecodeError>
 where
     I: Iterator<Item = image::ImageResult<image::Frame>>,
 {
@@ -1094,16 +1106,14 @@ where
     let mut target: Option<(u32, u32)> = None;
     let mut decoded_bytes: u64 = 0;
     for frame in frames {
-        let frame = frame?;
+        let frame = frame.map_err(|err| AnimationDecodeError::Image(err.into()))?;
         let delay = frame.delay();
         let buffer = frame.into_buffer();
         let (tw, th) = *target
             .get_or_insert_with(|| downscale_dimensions(buffer.width(), buffer.height(), max_px));
         decoded_bytes = decoded_bytes.saturating_add(u64::from(tw) * u64::from(th) * 4);
         if decoded_bytes > byte_budget {
-            return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                "animation exceeds the {byte_budget} decoded-byte budget; decoding stopped"
-            ))));
+            return Err(AnimationDecodeError::BudgetExceeded);
         }
         let mut buffer = if buffer.width() == tw && buffer.height() == th {
             buffer
@@ -1116,9 +1126,9 @@ where
         out.push(image::Frame::from_parts(buffer, 0, 0, delay));
     }
     if out.is_empty() {
-        return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-            "animation decoded to zero frames"
-        ))));
+        return Err(AnimationDecodeError::Image(ImageCacheError::Other(
+            Arc::new(anyhow::anyhow!("animation decoded to zero frames")),
+        )));
     }
     Ok(out)
 }
@@ -1162,7 +1172,16 @@ fn decode_static_image(
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
-const MAX_DECODE_PIXELS: u64 = 80_000_000;
+const MAX_DECODE_PIXELS: u64 = 48_000_000;
+const MAX_DECODER_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+fn decoder_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_DECODER_ALLOC_BYTES);
+    limits
+}
 
 fn reject_oversized_canvas(
     bytes: &[u8],
@@ -1171,6 +1190,11 @@ fn reject_oversized_canvas(
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
     reader.set_format(format);
     let (width, height) = reader.into_dimensions()?;
+    if width > 16_384 || height > 16_384 {
+        return Err(ImageCacheError::Asset(
+            format!("image dimension too large to decode: {width}x{height}").into(),
+        ));
+    }
     if width as u64 * height as u64 > MAX_DECODE_PIXELS {
         return Err(ImageCacheError::Asset(
             format!("image dimensions too large to decode: {width}x{height}").into(),
@@ -1190,21 +1214,26 @@ fn decode_message_image(
     reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
-            let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+            let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             match downscaled_animation_frames(
                 decoder.into_frames(),
                 animation_max_px,
                 animation_byte_budget,
             ) {
                 Ok(frames) => frames,
-                Err(_) => {
-                    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+                Err(AnimationDecodeError::BudgetExceeded) => {
+                    let mut decoder =
+                        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+                    image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
                     first_frame_fallback(decoder, static_max_px)?
                 }
+                Err(AnimationDecodeError::Image(err)) => return Err(err),
             }
         }
         image::ImageFormat::WebP => {
-            let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+            let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
             if decoder.has_animation() {
                 match downscaled_animation_frames(
                     decoder.into_frames(),
@@ -1212,11 +1241,13 @@ fn decode_message_image(
                     animation_byte_budget,
                 ) {
                     Ok(frames) => frames,
-                    Err(_) => {
-                        let decoder =
+                    Err(AnimationDecodeError::BudgetExceeded) => {
+                        let mut decoder =
                             image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+                        image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
                         first_frame_fallback(decoder, static_max_px)?
                     }
+                    Err(AnimationDecodeError::Image(err)) => return Err(err),
                 }
             } else {
                 vec![downscaled_static_frame(

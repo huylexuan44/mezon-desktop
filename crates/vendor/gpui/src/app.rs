@@ -2446,6 +2446,25 @@ impl App {
         }
     }
 
+    /// mezon vendor edit: multi-window counterpart of
+    /// [`Window::update_render_image`]. Sprite atlases are per-window, so a
+    /// stable-id streaming frame must be pushed into EVERY live window that may
+    /// paint it (main call view + PIP), mirroring [`Self::drop_image`]'s
+    /// iteration. A window that is currently checked out is absent from
+    /// `self.windows` and must be passed as `current_window`.
+    pub fn update_render_image(
+        &mut self,
+        image: &Arc<RenderImage>,
+        current_window: Option<&mut Window>,
+    ) {
+        for window in self.windows.values_mut().flatten() {
+            _ = window.update_render_image(image);
+        }
+        if let Some(window) = current_window {
+            _ = window.update_render_image(image);
+        }
+    }
+
     /// Sets the renderer for the inspector.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn set_inspector_renderer(&mut self, f: crate::InspectorRenderer) {

@@ -281,7 +281,8 @@ fn render_body(
                 .size_full(),
             )
             .custom_scrollbars(
-                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&list_state),
+                Scrollbars::always_visible(ScrollAxes::Vertical)
+                    .tracked_scroll_handle(&list_state),
                 window,
                 cx,
             )

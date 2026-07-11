@@ -711,11 +711,14 @@ impl MentionInput {
         let mut min_next = 0usize;
         let mut reanchored = false;
         self.committed.retain_mut(|token| {
-            for start in [token.start, token.start.wrapping_add_signed(delta)] {
+            let candidates = [Some(token.start), token.start.checked_add_signed(delta)];
+            for start in candidates.into_iter().flatten() {
                 if start < min_next {
                     continue;
                 }
-                let end = start + token.display.len();
+                let Some(end) = start.checked_add(token.display.len()) else {
+                    continue;
+                };
                 if content.get(start..end) == Some(token.display.as_str()) {
                     reanchored |= token.start != start;
                     token.start = start;

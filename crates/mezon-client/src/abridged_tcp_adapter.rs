@@ -120,6 +120,29 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+/// A realtime frame that fails Envelope decode is either corrupt or not an
+/// Envelope at all (schema drift, stray JSON, misaligned framing). Log a capped
+/// hex prefix for the first few occurrences so a field report identifies the
+/// actual wire content instead of just prost's error string.
+fn log_undecodable_frame(kind: &str, payload: &[u8], err: &impl std::fmt::Display) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    let n = LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n < 4 {
+        let prefix_len = payload.len().min(64);
+        let hex: String = payload[..prefix_len]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        tracing::warn!(
+            "{kind} decode failed (len={}, occurrence {n}): {err}; first {prefix_len} bytes: {hex}",
+            payload.len()
+        );
+    } else {
+        tracing::warn!("{kind} decode failed (len={}): {err}", payload.len());
+    }
+}
+
 fn scan_realtime_cid(payload: &[u8]) -> Option<i32> {
     match payload.first() {
         Some(&ENVELOPE_CID_TAG) => {
@@ -491,7 +514,7 @@ impl IoLoopState {
                         None => match mezon_proto::realtime::Envelope::decode(payload.as_slice()) {
                             Ok(envelope) => envelope.cid,
                             Err(e) => {
-                                tracing::warn!("realtime frame decode failed: {e}");
+                                log_undecodable_frame("realtime frame", &payload, &e);
                                 continue;
                             }
                         },

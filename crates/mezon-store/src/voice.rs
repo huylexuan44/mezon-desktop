@@ -440,12 +440,10 @@ impl VoiceStore {
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
-        if let Some(window) = window {
-            let replaces: Vec<Arc<RenderImage>> =
-                std::mem::take(&mut *self.pending_texture_replaces.lock());
-            for image in replaces {
-                window.update_render_image(&image).ok();
-            }
+        let replaces: Vec<Arc<RenderImage>> =
+            std::mem::take(&mut *self.pending_texture_replaces.lock());
+        for image in replaces {
+            cx.update_render_image(&image, window.as_deref_mut());
         }
     }
 

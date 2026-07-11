@@ -146,10 +146,26 @@ fn dispatch_realtime_push(
             }
             None => tracing::warn!("server push (cid={cid}): envelope has no message"),
         },
-        Err(e) => tracing::warn!(
-            "server push (cid={cid}) decode failed (len={}): {e}",
-            payload.len()
-        ),
+        Err(e) => {
+            let prefix_len = payload.len().min(64);
+            let hex: String = payload[..prefix_len]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            if cid != 0 {
+                tracing::debug!(
+                    "late RPC response for cid={cid} (len={}) — request already timed out or \
+                     the connection was reset; dropping. Envelope parse said: {e}; first \
+                     {prefix_len} bytes: {hex}",
+                    payload.len()
+                );
+            } else {
+                tracing::warn!(
+                    "server push decode failed (len={}): {e}; first {prefix_len} bytes: {hex}",
+                    payload.len()
+                );
+            }
+        }
     }
 }
 
@@ -543,6 +559,9 @@ fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     if bytes.is_empty() {
         return Vec::new();
     }
+    if let Some(value) = message_field_json(bytes) {
+        return parse_search_attachment_json_value(&value);
+    }
     match api::MessageAttachmentList::decode(bytes) {
         Ok(list) => list
             .attachments
@@ -754,6 +773,9 @@ pub fn parse_message_mentions(bytes: &[u8]) -> Vec<ApiEntityMention> {
     if bytes.is_empty() {
         return Vec::new();
     }
+    if let Some(value) = message_field_json(bytes) {
+        return parse_search_mentions_json_value(&value);
+    }
     match api::MessageMentionList::decode(bytes) {
         Ok(list) => list
             .mentions
@@ -814,9 +836,102 @@ pub fn enrich_content_tokens(tokens: &mut ApiMessageContent, entity_mentions: &[
     tokens.mentions.sort_by_key(|tok| tok.s.unwrap_or(i64::MAX));
 }
 
+/// Some producers (the web client and certain server pushes) fill the binary
+/// message fields (`mentions`/`attachments`/`references`/`reactions`) with a
+/// JSON array instead of the protobuf list encoding. `[` (0x5B) and `]` (0x5D)
+/// decode as protobuf group tags, which is exactly the garbled
+/// "unexpected end group tag" / "buffer underflow" warnings seen in the field.
+/// Sniff and parse those as JSON before attempting a protobuf decode.
+fn message_field_json(bytes: &[u8]) -> Option<serde_json::Value> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('[') || trimmed.starts_with('{')) {
+        return None;
+    }
+    serde_json::from_str(trimmed).ok()
+}
+
+fn json_items<'a>(value: &'a serde_json::Value, key: &str) -> Vec<&'a serde_json::Value> {
+    if let Some(array) = value.as_array() {
+        array.iter().collect()
+    } else if let Some(array) = value.get(key).and_then(|v| v.as_array()) {
+        array.iter().collect()
+    } else if value.is_object() {
+        vec![value]
+    } else {
+        Vec::new()
+    }
+}
+
+fn json_field_string(value: &serde_json::Value, key: &str) -> String {
+    match value.get(key) {
+        Some(serde_json::Value::String(raw)) => raw.clone(),
+        Some(serde_json::Value::Number(num)) => num.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn parse_references_json_value(value: &serde_json::Value) -> Vec<ApiMessageRef> {
+    json_items(value, "references")
+        .into_iter()
+        .filter_map(|item| {
+            let message_ref_id = json_field_i64(item, "message_ref_id");
+            if message_ref_id == 0 {
+                return None;
+            }
+            let avatar = match item.get("message_sender_avatar") {
+                Some(serde_json::Value::String(raw)) => raw.clone(),
+                _ => json_field_string(item, "mesages_sender_avatar"),
+            };
+            Some(ApiMessageRef {
+                message_ref_id,
+                content: json_field_string(item, "content"),
+                has_attachment: item
+                    .get("has_attachment")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                message_sender_id: json_field_i64(item, "message_sender_id"),
+                message_sender_username: json_field_string(item, "message_sender_username"),
+                message_sender_avatar: avatar,
+                message_sender_clan_nick: json_field_string(item, "message_sender_clan_nick"),
+                message_sender_display_name: json_field_string(item, "message_sender_display_name"),
+            })
+        })
+        .collect()
+}
+
+fn parse_reactions_json_value(value: &serde_json::Value) -> Vec<ApiMessageReaction> {
+    json_items(value, "reactions")
+        .into_iter()
+        .filter_map(|item| {
+            let emoji_id = json_field_string(item, "emoji_id");
+            if emoji_id.is_empty() {
+                return None;
+            }
+            Some(ApiMessageReaction {
+                emoji_id,
+                emoji: json_field_string(item, "emoji"),
+                count: item
+                    .get("count")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .max(0) as u32,
+                sender_id: json_field_string(item, "sender_id"),
+                action: item
+                    .get("action")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
 fn parse_message_references(bytes: &[u8]) -> Vec<ApiMessageRef> {
     if bytes.is_empty() {
         return Vec::new();
+    }
+    if let Some(value) = message_field_json(bytes) {
+        return parse_references_json_value(&value);
     }
     match api::MessageRefList::decode(bytes) {
         Ok(list) => list
@@ -914,6 +1029,9 @@ fn mention_targets_user(token: &ContentToken, user_id: i64, role_ids: &[i64]) ->
 fn parse_message_reactions(bytes: &[u8]) -> Vec<ApiMessageReaction> {
     if bytes.is_empty() {
         return Vec::new();
+    }
+    if let Some(value) = message_field_json(bytes) {
+        return parse_reactions_json_value(&value);
     }
     match api::MessageReactionList::decode(bytes) {
         Ok(list) => list
@@ -7066,6 +7184,45 @@ impl MezonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_fields_parse_json_payloads() {
+        let mentions =
+            parse_message_mentions(br#"[{"user_id":"123","username":"an","s":0,"e":5}]"#);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].user_id, 123);
+        assert_eq!(mentions[0].username, "an");
+
+        let refs = parse_message_references(
+            br#"[{"message_ref_id":"42","content":"hi","has_attachment":true,"message_sender_id":"7","mesages_sender_avatar":"http://a/x.png"}]"#,
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].message_ref_id, 42);
+        assert_eq!(refs[0].message_sender_id, 7);
+        assert!(refs[0].has_attachment);
+        assert_eq!(refs[0].message_sender_avatar, "http://a/x.png");
+
+        let reactions = parse_message_reactions(
+            br#"[{"emoji_id":"999","emoji":":x:","count":2,"sender_id":"5","action":false}]"#,
+        );
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].emoji_id, "999");
+        assert_eq!(reactions[0].count, 2);
+
+        let attachments = parse_message_attachments(
+            br#"[{"url":"https://cdn/x.png","filetype":"image/png","width":10,"height":20}]"#,
+        );
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].url, "https://cdn/x.png");
+    }
+
+    #[test]
+    fn message_fields_empty_json_arrays_are_empty_not_warnings() {
+        assert!(parse_message_mentions(b"[]").is_empty());
+        assert!(parse_message_references(b"[]").is_empty());
+        assert!(parse_message_reactions(b"[]").is_empty());
+        assert!(parse_message_attachments(b"[]").is_empty());
+    }
 
     #[test]
     fn poll_content_deserializes_flexible_scalar_and_answer_types() {

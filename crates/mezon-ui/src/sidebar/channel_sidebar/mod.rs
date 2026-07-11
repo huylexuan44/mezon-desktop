@@ -13,6 +13,7 @@ use mezon_store::{
     ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, FAVOR_CATE_ID,
     PERMISSION_MANAGE_CLAN, PermissionStore, Settings, VoiceMember,
 };
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::clan::clan_menu::{build_clan_menu, clan_menu_overlay};
 use crate::components::compositions::channel_row::{channel_type_icon, shows_left_unread_nub};
@@ -423,7 +424,7 @@ impl ChannelSidebar {
 }
 
 impl Render for ChannelSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("ChannelSidebar");
         let theme = cx.theme();
         let items = self.items.clone();
@@ -611,7 +612,13 @@ impl Render for ChannelSidebar {
                         }
                     }))
                     .child(list_element)
-                    .children(skeleton_overlay),
+                    .children(skeleton_overlay)
+                    .custom_scrollbars(
+                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                            .tracked_scroll_handle(&self.list_state),
+                        window,
+                        cx,
+                    ),
             )
             .when_some(
                 menu_overlay,

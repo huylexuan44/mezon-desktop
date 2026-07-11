@@ -7,7 +7,7 @@ use ::util::ResultExt;
 use anyhow::{Context, Result};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND},
+        Foundation::{CloseHandle, GetLastError, HANDLE, HWND, WAIT_FAILED, WAIT_TIMEOUT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -329,13 +329,30 @@ impl DirectXRenderer {
         // mezon vendor edit: pace the CPU against the flip queue so present latency is
         // bounded by SetMaximumFrameLatency(2) instead of DXGI's default deep queue.
         // Bounded timeout keeps a wedged compositor from deadlocking the UI thread.
-        if let Some(waitable) = self
+        let waitable_handle = self
             .resources
             .as_ref()
             .and_then(|resources| resources.frame_latency_waitable.as_ref())
-        {
-            unsafe {
-                WaitForSingleObjectEx(waitable.0, 33, false);
+            .map(|waitable| waitable.0);
+        if let Some(handle) = waitable_handle {
+            let result = unsafe { WaitForSingleObjectEx(handle, 33, false) };
+            if result == WAIT_FAILED {
+                eprintln!(
+                    "[gpui_frame_pacing] frame latency wait failed ({:?}); disabling waitable",
+                    unsafe { GetLastError() }
+                );
+                if let Some(resources) = self.resources.as_mut() {
+                    resources.frame_latency_waitable = None;
+                }
+            } else if result == WAIT_TIMEOUT {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+                let n = TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+                if n < 4 {
+                    eprintln!(
+                        "[gpui_frame_pacing] frame latency wait timed out (occurrence {n}); GPU/compositor is >2 frames behind"
+                    );
+                }
             }
         }
         self.pre_draw(&match background_appearance {
