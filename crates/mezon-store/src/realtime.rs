@@ -179,8 +179,17 @@ impl RealtimeDispatch {
     }
 
     fn dispatch(&mut self, kind: RealtimeKind, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        let started = std::time::Instant::now();
         if let Some(list) = self.handlers.get_mut(&kind) {
             list.retain_mut(|handler| handler(event, cx));
+        }
+        #[cfg(debug_assertions)]
+        {
+            let elapsed = started.elapsed();
+            if elapsed > std::time::Duration::from_millis(8) {
+                tracing::warn!(?kind, ?elapsed, "slow realtime dispatch");
+            }
         }
     }
 

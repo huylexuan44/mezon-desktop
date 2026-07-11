@@ -15,7 +15,7 @@ const OPUS_MAX_FRAME: usize = 5760;
 const MAX_DECODED_FRAMES: usize = OPUS_SAMPLE_RATE as usize * 60 * 15;
 
 pub struct DecodedPcm {
-    pub samples: Vec<f32>,
+    pub samples: std::sync::Arc<[f32]>,
     pub channels: usize,
     pub sample_rate: u32,
 }
@@ -34,8 +34,8 @@ impl DecodedPcm {
     }
 }
 
-pub fn decode_audio(bytes: &[u8]) -> Result<DecodedPcm, AudioError> {
-    let source = Cursor::new(bytes.to_vec());
+pub fn decode_audio(bytes: Vec<u8>) -> Result<DecodedPcm, AudioError> {
+    let source = Cursor::new(bytes);
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
     let probed = symphonia::default::get_probe()
         .format(
@@ -104,7 +104,7 @@ fn decode_opus(
     }
 
     Ok(DecodedPcm {
-        samples,
+        samples: samples.into(),
         channels,
         sample_rate: OPUS_SAMPLE_RATE,
     })
@@ -164,7 +164,7 @@ fn decode_symphonia(
     }
 
     Ok(DecodedPcm {
-        samples,
+        samples: samples.into(),
         channels,
         sample_rate,
     })

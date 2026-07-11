@@ -41,12 +41,12 @@ impl FriendsTab {
         FriendsTab::Block,
     ];
 
-    fn key(self) -> &'static str {
+    fn elem_id(self) -> &'static str {
         match self {
-            FriendsTab::All => "all",
-            FriendsTab::Online => "online",
-            FriendsTab::Pending => "pending",
-            FriendsTab::Block => "block",
+            FriendsTab::All => "friend-tab-all",
+            FriendsTab::Online => "friend-tab-online",
+            FriendsTab::Pending => "friend-tab-pending",
+            FriendsTab::Block => "friend-tab-block",
         }
     }
 
@@ -62,6 +62,7 @@ impl FriendsTab {
 
 struct FriendRow {
     id: UserId,
+    group_name: SharedString,
     label: SharedString,
     username: SharedString,
     avatar_src: SharedString,
@@ -102,6 +103,7 @@ pub struct FriendsPage {
     rows: Vec<FriendRow>,
     activity_rows: Vec<ActivityRow>,
     pending_count: usize,
+    list_header: SharedString,
     list_scroll: UniformListScrollHandle,
     activity_scroll: UniformListScrollHandle,
     avatar_cache: Entity<LruImageCache>,
@@ -199,7 +201,10 @@ impl FriendsPage {
                 this.clear_transient_state(cx);
             }
         }));
-        subs.push(cx.observe(&settings, |_, _, cx| cx.notify()));
+        subs.push(cx.observe(&settings, |this, _, cx| {
+            this.rebuild(cx);
+            cx.notify();
+        }));
 
         FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         ActivityStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
@@ -214,6 +219,7 @@ impl FriendsPage {
             rows: Vec::new(),
             activity_rows: Vec::new(),
             pending_count: 0,
+            list_header: SharedString::default(),
             list_scroll: UniformListScrollHandle::new(),
             activity_scroll: UniformListScrollHandle::new(),
             avatar_cache,
@@ -260,6 +266,12 @@ impl FriendsPage {
             ));
             self.add_input = Some(add_input);
         }
+    }
+
+    fn search_has_text(&self, cx: &App) -> bool {
+        self.search
+            .as_ref()
+            .is_some_and(|s| !s.read(cx).value().is_empty())
     }
 
     fn search_text(&self, cx: &App) -> String {
@@ -315,6 +327,7 @@ impl FriendsPage {
             .into_iter()
             .map(|f| FriendRow {
                 id: f.id,
+                group_name: SharedString::from(format!("friend-row-{}", f.id)),
                 label: SharedString::from(f.label().to_string()),
                 username: SharedString::from(f.username.clone()),
                 avatar_src: SharedString::from(imgproxy::avatar_url(cx, &f.avatar_url)),
@@ -330,6 +343,11 @@ impl FriendsPage {
         self.activity_rows = build_activity_rows(&locale, friends, ActivityStore::global(cx), cx);
 
         self.pending_count = pending;
+        self.list_header = SharedString::from(format!(
+            "{} - {}",
+            mezon_i18n::t(&locale, tab.title_key()).to_uppercase(),
+            self.rows.len()
+        ));
         cx.notify();
     }
 
@@ -641,7 +659,7 @@ impl FriendsPage {
                 .pr_4()
                 .children(FriendsTab::ALL.into_iter().map(|tab| {
                     let is_active = selected == tab && !add_open;
-                    let title = mezon_i18n::t(locale, tab.title_key()).to_string();
+                    let title = mezon_i18n::t(locale, tab.title_key());
                     let show_badge = tab == FriendsTab::Pending && pending != 0;
                     div()
                         .relative()
@@ -650,7 +668,7 @@ impl FriendsPage {
                         .justify_center()
                         .child(
                             div()
-                                .id(SharedString::from(format!("friend-tab-{}", tab.key())))
+                                .id(tab.elem_id())
                                 .px_3()
                                 .py(px(6.))
                                 .rounded_lg()
@@ -717,7 +735,7 @@ impl FriendsPage {
                         cx.notify();
                     }))
             })
-            .child(mezon_i18n::t(locale, "friendsPage.addFriend").to_string());
+            .child(mezon_i18n::t(locale, "friendsPage.addFriend"));
 
         div()
             .flex()
@@ -744,7 +762,7 @@ impl FriendsPage {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.tokens.text_secondary)
                             .child(img("icons/icon-friends.svg").size(px(20.)).flex_none())
-                            .child(mezon_i18n::t(locale, "friendsPage.friends").to_string()),
+                            .child(mezon_i18n::t(locale, "friendsPage.friends")),
                     )
                     .child(
                         div()
@@ -768,15 +786,13 @@ impl FriendsPage {
         if self.add_friend_open {
             main.child(self.render_add_friend(theme, locale, cx))
         } else {
-            main.child(self.render_search(theme, locale, cx))
+            main.child(self.render_search(theme, cx))
                 .child(self.render_list(theme, locale, cx))
         }
     }
 
-    fn render_search(&self, theme: &Theme, locale: &str, cx: &Context<Self>) -> impl IntoElement {
-        let count = self.rows.len();
-        let tab_title = mezon_i18n::t(locale, self.selected_tab.title_key()).to_uppercase();
-        let has_text = !self.search_text(cx).is_empty();
+    fn render_search(&self, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        let has_text = self.search_has_text(cx);
 
         let mut search_field = div()
             .relative()
@@ -842,7 +858,7 @@ impl FriendsPage {
                     .mb_4()
                     .text_size(px(14.))
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child(format!("{tab_title} - {count}")),
+                    .child(self.list_header.clone()),
             )
     }
 
@@ -850,7 +866,7 @@ impl FriendsPage {
         let container = div().flex().flex_1().min_h_0().px_8().pb_4();
 
         if self.rows.is_empty() {
-            let has_text = !self.search_text(cx).is_empty();
+            let has_text = self.search_has_text(cx);
             let key = empty_state_key(self.selected_tab, has_text);
             return container.child(
                 div()
@@ -1140,7 +1156,7 @@ fn render_friend_row(
                 .bg(dot_fill),
         );
 
-    let group_name = SharedString::from(format!("friend-row-{}", id));
+    let group_name = row.group_name.clone();
     let mut name_line = div()
         .flex()
         .items_center()
@@ -1151,7 +1167,7 @@ fn render_friend_row(
     if !row.username.is_empty() {
         name_line = name_line.child(
             div()
-                .id(SharedString::from(format!("friend-username-{}", id)))
+                .id(("friend-username", id.get() as usize))
                 .invisible()
                 .group_hover(group_name.clone(), |s| s.visible())
                 .hover(|s| s.text_color(theme.tokens.text_secondary))
@@ -1187,7 +1203,7 @@ fn render_friend_row(
     let clickable_open_dm = !matches!(state, FriendState::InviteSent | FriendState::InviteReceived);
 
     let inner = div()
-        .id(SharedString::from(format!("friend-open-{}", id)))
+        .id(("friend-open", id.get() as usize))
         .flex()
         .flex_1()
         .min_w_0()
@@ -1308,12 +1324,7 @@ fn render_row_actions(
             .gap_3()
             .flex_shrink_0()
             .child(
-                round_button(
-                    SharedString::from(format!("friend-chat-{}", id)),
-                    IconName::Chat,
-                    theme,
-                )
-                .on_click({
+                round_button(("friend-chat", id.get() as usize), IconName::Chat, theme).on_click({
                     let err =
                         SharedString::from(mezon_i18n::t(locale, "shareContact.card.messageError"));
                     move |_, _window, cx| {
@@ -1323,7 +1334,7 @@ fn render_row_actions(
             )
             .child(
                 round_button(
-                    SharedString::from(format!("friend-more-{}", id)),
+                    ("friend-more", id.get() as usize),
                     IconName::IconEditThreeDot,
                     theme,
                 )
@@ -1345,21 +1356,18 @@ fn render_row_actions(
             .gap_3()
             .flex_shrink_0()
             .child(
-                circle_button(
-                    SharedString::from(format!("friend-cancel-{}", id)),
-                    "✕",
-                    theme,
-                )
-                .on_click(move |_, window, cx| {
-                    open_remove_friend_modal(
-                        id,
-                        label.clone(),
-                        FriendRemovalKind::CancelRequest,
-                        locale_owned.clone(),
-                        window,
-                        cx,
-                    );
-                }),
+                circle_button(("friend-cancel", id.get() as usize), "✕", theme).on_click(
+                    move |_, window, cx| {
+                        open_remove_friend_modal(
+                            id,
+                            label.clone(),
+                            FriendRemovalKind::CancelRequest,
+                            locale_owned.clone(),
+                            window,
+                            cx,
+                        );
+                    },
+                ),
             )
             .into_any_element(),
         FriendState::InviteReceived => div()
@@ -1368,31 +1376,25 @@ fn render_row_actions(
             .gap_3()
             .flex_shrink_0()
             .child(
-                circle_button(
-                    SharedString::from(format!("friend-accept-{}", id)),
-                    "✓",
-                    theme,
-                )
-                .on_click(move |_, _window, cx| {
-                    FriendStore::global(cx).update(cx, |s, cx| s.accept_friend(id, cx));
-                }),
+                circle_button(("friend-accept", id.get() as usize), "✓", theme).on_click(
+                    move |_, _window, cx| {
+                        FriendStore::global(cx).update(cx, |s, cx| s.accept_friend(id, cx));
+                    },
+                ),
             )
             .child(
-                circle_button(
-                    SharedString::from(format!("friend-reject-{}", id)),
-                    "✕",
-                    theme,
-                )
-                .on_click(move |_, window, cx| {
-                    open_remove_friend_modal(
-                        id,
-                        label.clone(),
-                        FriendRemovalKind::RejectRequest,
-                        locale_owned.clone(),
-                        window,
-                        cx,
-                    );
-                }),
+                circle_button(("friend-reject", id.get() as usize), "✕", theme).on_click(
+                    move |_, window, cx| {
+                        open_remove_friend_modal(
+                            id,
+                            label.clone(),
+                            FriendRemovalKind::RejectRequest,
+                            locale_owned.clone(),
+                            window,
+                            cx,
+                        );
+                    },
+                ),
             )
             .into_any_element(),
         FriendState::Blocked => div()
@@ -1402,7 +1404,7 @@ fn render_row_actions(
             .flex_shrink_0()
             .child(
                 div()
-                    .id(SharedString::from(format!("friend-unblock-{}", id)))
+                    .id(("friend-unblock", id.get() as usize))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1423,7 +1425,11 @@ fn render_row_actions(
     }
 }
 
-fn round_button(id: SharedString, icon: IconName, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn round_button(
+    id: impl Into<gpui::ElementId>,
+    icon: IconName,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
@@ -1442,7 +1448,7 @@ fn round_button(id: SharedString, icon: IconName, theme: &Theme) -> gpui::Statef
 }
 
 fn circle_button(
-    id: SharedString,
+    id: impl Into<gpui::ElementId>,
     glyph: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {

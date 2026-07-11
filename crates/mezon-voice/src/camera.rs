@@ -169,7 +169,11 @@ pub fn start_camera(
                     buffer: i420,
                 };
                 source.capture_frame(&frame);
-                frame_store.publish(key, dw, dh, std::mem::take(&mut preview));
+                if let Some(recycled) =
+                    frame_store.publish(key, dw, dh, std::mem::take(&mut preview))
+                {
+                    preview = recycled;
+                }
             }
 
             frame_store.remove(local_camera_key(&identity));

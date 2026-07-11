@@ -39,12 +39,7 @@ impl Render for ActivityPage {
                                 this.settings.update(cx, |s, _| {
                                     s.activity_tracking = !s.activity_tracking;
                                 });
-                                let snapshot = this.settings.read(cx).clone();
-                                cx.background_executor()
-                                    .spawn(async move {
-                                        snapshot.save_sync();
-                                    })
-                                    .detach();
+                                mezon_store::schedule_settings_save(&this.settings, cx);
                                 cx.notify();
                             }),
                         )),

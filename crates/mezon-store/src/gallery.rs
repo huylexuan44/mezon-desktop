@@ -178,14 +178,15 @@ pub fn resolve_attachment_uploader(
         ProfileContext::Clan(clan_id)
     };
     if let Some(profile) = resolve_user_profile(uid, context, cx)
-        && !profile.display_name.is_empty() {
-            let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
-            return UploaderInfo {
-                name: profile.display_name,
-                avatar,
-                avatar_raw,
-            };
-        }
+        && !profile.display_name.is_empty()
+    {
+        let (avatar, avatar_raw) = uploader_urls(&profile.avatar_url, cfg);
+        return UploaderInfo {
+            name: profile.display_name,
+            avatar,
+            avatar_raw,
+        };
+    }
     if let Some(info) = uploader_from_message(channel_id, message_id, cfg, cx) {
         return info;
     }
@@ -353,6 +354,7 @@ pub enum LoadDirection {
 #[derive(Default)]
 struct GalleryChannel {
     attachments: Vec<ChannelAttachment>,
+    ids: std::collections::HashSet<i64>,
     has_more_before: bool,
     has_more_after: bool,
     is_loading: bool,
@@ -526,6 +528,7 @@ impl GalleryStore {
     pub fn reset_channel_attachments(&mut self, channel_id: ChannelId) -> bool {
         if let Some(channel) = self.by_channel.get_mut(&channel_id) {
             channel.attachments.clear();
+            channel.ids.clear();
             channel.date_range = None;
             channel.fetched_at = None;
             channel.is_loading = false;
@@ -591,6 +594,7 @@ impl GalleryStore {
         cx.notify();
 
         let api = self.api.clone();
+        let mapping_cfg = AppConfig::try_global(cx).cloned();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_attachments(
@@ -603,23 +607,40 @@ impl GalleryStore {
                     after,
                 )
                 .await;
+            let mapped_result = match result {
+                Ok(list) => {
+                    let cfg = mapping_cfg.clone();
+                    Ok(cx
+                        .background_executor()
+                        .spawn(async move {
+                            match cfg {
+                                Some(cfg) => list
+                                    .into_iter()
+                                    .map(|a| {
+                                        ChannelAttachment::from_api(a, channel_id, clan_id, &cfg)
+                                    })
+                                    .filter(ChannelAttachment::is_media)
+                                    .collect::<Vec<_>>(),
+                                None => Vec::new(),
+                            }
+                        })
+                        .await)
+                }
+                Err(e) => Err(e),
+            };
             let _ = this.update(cx, |this, cx| {
-                let cfg = AppConfig::try_global(cx);
                 let entry = this.by_channel.entry(channel_id).or_default();
                 entry.is_loading = false;
-                match result {
-                    Ok(list) => {
-                        let mapped: Vec<ChannelAttachment> = match &cfg {
-                            Some(cfg) => list
-                                .into_iter()
-                                .map(|a| ChannelAttachment::from_api(a, channel_id, clan_id, cfg))
-                                .filter(ChannelAttachment::is_media)
-                                .collect(),
-                            None => Vec::new(),
-                        };
+                match mapped_result {
+                    Ok(mapped) => {
                         let fetched = mapped.len();
-                        let added =
-                            merge_attachments(&mut entry.attachments, mapped, reset, direction);
+                        let added = merge_attachments(
+                            &mut entry.attachments,
+                            &mut entry.ids,
+                            mapped,
+                            reset,
+                            direction,
+                        );
                         let full_page = fetched as i32 >= GALLERY_PAGE_SIZE;
                         let progressed = added > 0;
                         if reset {
@@ -691,18 +712,19 @@ fn merge_two_desc_sorted(
 
 fn merge_attachments(
     existing: &mut Vec<ChannelAttachment>,
+    ids: &mut std::collections::HashSet<i64>,
     incoming: Vec<ChannelAttachment>,
     reset: bool,
     direction: LoadDirection,
 ) -> usize {
     if reset {
         existing.clear();
+        ids.clear();
     }
-    let mut seen: std::collections::HashSet<i64> = existing.iter().map(|a| a.id).collect();
     let mut new_items = Vec::new();
     let mut added = 0;
     for att in incoming {
-        if seen.insert(att.id) {
+        if ids.insert(att.id) {
             new_items.push(att);
             added += 1;
         }
@@ -793,8 +815,10 @@ mod tests {
     #[test]
     fn merge_reset_replaces_and_sorts_desc() {
         let mut existing = vec![att(1, 100, "image/png")];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|a| a.id).collect();
         let added = merge_attachments(
             &mut existing,
+            &mut ids,
             vec![att(2, 300, "image/png"), att(3, 200, "image/png")],
             true,
             LoadDirection::Before,
@@ -809,8 +833,10 @@ mod tests {
     #[test]
     fn merge_appends_older_dedup() {
         let mut existing = vec![att(2, 300, "image/png"), att(3, 200, "image/png")];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|a| a.id).collect();
         let added = merge_attachments(
             &mut existing,
+            &mut ids,
             vec![att(3, 200, "image/png"), att(4, 100, "image/png")],
             false,
             LoadDirection::Before,
@@ -825,8 +851,10 @@ mod tests {
     #[test]
     fn merge_prepends_newer_dedup() {
         let mut existing = vec![att(2, 300, "image/png"), att(3, 200, "image/png")];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|a| a.id).collect();
         let added = merge_attachments(
             &mut existing,
+            &mut ids,
             vec![att(2, 300, "image/png"), att(5, 400, "image/png")],
             false,
             LoadDirection::After,
@@ -841,8 +869,10 @@ mod tests {
     #[test]
     fn merge_duplicate_page_returns_zero_before() {
         let mut existing = vec![att(2, 300, "image/png"), att(3, 200, "image/png")];
+        let mut ids: std::collections::HashSet<i64> = existing.iter().map(|a| a.id).collect();
         let added = merge_attachments(
             &mut existing,
+            &mut ids,
             vec![att(2, 300, "image/png"), att(3, 200, "image/png")],
             false,
             LoadDirection::Before,

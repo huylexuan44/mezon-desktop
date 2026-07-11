@@ -93,7 +93,7 @@ impl MicCapture {
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     let rms = compute_rms(data);
                     if let Ok(s) = sender.lock() {
-                        let _ = s.send(rms);
+                        let _ = s.try_send(rms);
                     }
                 },
                 err_fn,

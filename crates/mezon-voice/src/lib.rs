@@ -359,18 +359,29 @@ async fn session_main(
     let mut audio_tracks: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut video_tracks: HashMap<u64, VideoTrackHandle> = HashMap::new();
 
-    let emit =
-        |room: &Room, mic: bool, camera: &Option<CameraSession>, screen: &Option<ScreenSession>| {
-            emit_participants(
-                room,
-                evt_tx,
-                &local_identity,
-                mic,
-                camera.is_some(),
-                screen.is_some(),
-            );
-        };
-    emit(&room, mic_on, &camera_session, &screen_session);
+    let mut last_participants: Vec<VoiceParticipant> = Vec::new();
+    let emit = |room: &Room,
+                mic: bool,
+                camera: &Option<CameraSession>,
+                screen: &Option<ScreenSession>,
+                last: &mut Vec<VoiceParticipant>| {
+        emit_participants(
+            room,
+            evt_tx,
+            &local_identity,
+            mic,
+            camera.is_some(),
+            screen.is_some(),
+            last,
+        );
+    };
+    emit(
+        &room,
+        mic_on,
+        &camera_session,
+        &screen_session,
+        &mut last_participants,
+    );
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let trim_task = runtime::runtime().spawn(async {
@@ -408,7 +419,13 @@ async fn session_main(
                                 video_tracks.insert(key, handle);
                             }
                         }
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     RoomEvent::TrackUnsubscribed { track, participant, .. } => {
                         let key = track_frame_key(participant.identity().as_str(), track.sid().as_str());
@@ -422,7 +439,13 @@ async fn session_main(
                             mixer.remove(key);
                         }
                         frame_store.remove(key);
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     RoomEvent::ConnectionQualityChanged { quality, participant } => {
                         if participant.identity().as_str() == local_identity {
@@ -435,7 +458,13 @@ async fn session_main(
                                 }
                             }
                         }
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     RoomEvent::Reconnecting => {
                         let _ = evt_tx.send(VoiceEvent::Reconnecting);
@@ -457,7 +486,13 @@ async fn session_main(
                     | RoomEvent::ActiveSpeakersChanged { .. }
                     | RoomEvent::ParticipantNameChanged { .. }
                     | RoomEvent::ParticipantsUpdated { .. } => {
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     _ => {}
                 }
@@ -477,7 +512,13 @@ async fn session_main(
                                 publication.mute();
                             }
                         }
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     Ok(Command::SetNoiseSuppression(enabled, level)) => {
                         if let Some(io) = &audio_io {
@@ -510,7 +551,13 @@ async fn session_main(
                             changed = true;
                         }
                         if changed {
-                            emit(&room, mic_on, &camera_session, &screen_session);
+                            emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                         }
                     }
                     Ok(Command::StartScreenShare(pick, share_audio)) => {
@@ -541,7 +588,13 @@ async fn session_main(
                             changed = true;
                         }
                         if changed {
-                            emit(&room, mic_on, &camera_session, &screen_session);
+                            emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                         }
                     }
                     Ok(Command::Disconnect) | Err(_) => {
@@ -571,7 +624,13 @@ async fn session_main(
                     Ok((generation, Ok(session))) if generation == camera_gen => {
                         camera_task = None;
                         camera_session = Some(session);
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     Ok((_, Ok(session))) => {
                         session.stopper.stop();
@@ -594,7 +653,13 @@ async fn session_main(
                     Ok((generation, Ok(session))) if generation == screen_gen => {
                         screen_task = None;
                         screen_session = Some(session);
-                        emit(&room, mic_on, &camera_session, &screen_session);
+                        emit(
+                            &room,
+                            mic_on,
+                            &camera_session,
+                            &screen_session,
+                            &mut last_participants,
+                        );
                     }
                     Ok((_, Ok(session))) => {
                         session.stop(&room).await;
@@ -854,7 +919,11 @@ fn spawn_video(
                     width as usize,
                     height as usize,
                 );
-                convert_store.publish(key, width, height, std::mem::take(&mut bgra));
+                if let Some(recycled) =
+                    convert_store.publish(key, width, height, std::mem::take(&mut bgra))
+                {
+                    bgra = recycled;
+                }
             }
             convert_store.remove(key);
         })
@@ -881,6 +950,7 @@ fn emit_participants(
     local_mic_enabled: bool,
     local_camera_on: bool,
     local_screen_on: bool,
+    last: &mut Vec<VoiceParticipant>,
 ) {
     let mut participants = Vec::new();
 
@@ -911,6 +981,10 @@ fn emit_participants(
         });
     }
 
+    if *last == participants {
+        return;
+    }
+    last.clone_from(&participants);
     let _ = evt_tx.send(VoiceEvent::Participants(participants));
 }
 

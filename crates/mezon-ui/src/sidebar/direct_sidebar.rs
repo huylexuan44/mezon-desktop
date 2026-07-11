@@ -18,6 +18,9 @@ const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 struct DmItem {
     channel_id: ChannelId,
     id: SharedString,
+    row_id: SharedString,
+    group_name: SharedString,
+    close_id: SharedString,
     label: SharedString,
     kind: DirectKind,
     unread: bool,
@@ -30,6 +33,7 @@ pub struct DirectSidebar {
     settings: Entity<Settings>,
     list_scroll: UniformListScrollHandle,
     dm_items: Rc<Vec<DmItem>>,
+    dm_items_fingerprint: u64,
     pending_rebuild: bool,
     suppress_hover: bool,
     last_scroll_at: Option<Instant>,
@@ -43,6 +47,25 @@ fn is_dm_route(cx: &App) -> bool {
     )
 }
 
+fn dm_items_fingerprint(store: &DirectMessageStore) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    fn fold(hash: u64, bytes: &[u8]) -> u64 {
+        bytes
+            .iter()
+            .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
+    }
+    store.channels().iter().fold(FNV_OFFSET, |h, ch| {
+        let h = fold(h, &ch.id.0.to_le_bytes());
+        let h = fold(
+            h,
+            &[ch.kind as u8, u8::from(ch.is_unread()), u8::from(ch.online)],
+        );
+        let h = fold(h, ch.label.as_bytes());
+        fold(h, ch.avatar.as_bytes())
+    })
+}
+
 fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
     Rc::new(
         store
@@ -51,6 +74,9 @@ fn build_dm_items(store: &DirectMessageStore, cx: &App) -> Rc<Vec<DmItem>> {
             .map(|ch| DmItem {
                 channel_id: ch.id,
                 id: SharedString::from(ch.id.to_string()),
+                row_id: SharedString::from(format!("dm-{}", ch.id)),
+                group_name: SharedString::from(format!("dm-row-{}", ch.id)),
+                close_id: SharedString::from(format!("dm-close-{}", ch.id)),
                 label: SharedString::from(ch.label.clone()),
                 kind: ch.kind,
                 unread: ch.is_unread(),
@@ -68,6 +94,11 @@ impl DirectSidebar {
 
         cx.observe(&direct_store, |this, store, cx| {
             if is_dm_route(cx) {
+                let fingerprint = dm_items_fingerprint(store.read(cx));
+                if fingerprint == this.dm_items_fingerprint {
+                    return;
+                }
+                this.dm_items_fingerprint = fingerprint;
                 let items = build_dm_items(store.read(cx), cx);
                 if this.dm_items != items {
                     this.dm_items = items;
@@ -82,6 +113,7 @@ impl DirectSidebar {
             if this.pending_rebuild && is_dm_route(cx) {
                 this.pending_rebuild = false;
                 let store = DirectMessageStore::global(cx);
+                this.dm_items_fingerprint = dm_items_fingerprint(store.read(cx));
                 this.dm_items = build_dm_items(store.read(cx), cx);
             }
             cx.notify();
@@ -89,12 +121,14 @@ impl DirectSidebar {
         .detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
 
+        let dm_items_fingerprint = dm_items_fingerprint(direct_store.read(cx));
         let dm_items = build_dm_items(direct_store.read(cx), cx);
 
         Self {
             settings,
             list_scroll: UniformListScrollHandle::new(),
             dm_items,
+            dm_items_fingerprint,
             pending_rebuild: false,
             suppress_hover: false,
             last_scroll_at: None,
@@ -242,16 +276,23 @@ impl Render for DirectSidebar {
                 .map(|ix| match items.get(ix) {
                     Some(item) => {
                         let selected = active_id == Some(item.channel_id);
-                        DmRow::new(item.id.clone(), item.label.clone(), item.kind)
-                            .selected(selected)
-                            .unread(item.unread)
-                            .online(item.online)
-                            .avatar_src(item.avatar_src.clone())
-                            .avatar_raw(item.avatar_raw.clone())
-                            .suppress_hover(suppress_hover)
-                            .image_cache(image_cache.clone())
-                            .render(&theme)
-                            .into_any_element()
+                        DmRow::with_ids(
+                            item.id.clone(),
+                            item.label.clone(),
+                            item.kind,
+                            item.row_id.clone().into(),
+                            item.group_name.clone(),
+                            item.close_id.clone(),
+                        )
+                        .selected(selected)
+                        .unread(item.unread)
+                        .online(item.online)
+                        .avatar_src(item.avatar_src.clone())
+                        .avatar_raw(item.avatar_raw.clone())
+                        .suppress_hover(suppress_hover)
+                        .image_cache(image_cache.clone())
+                        .render(&theme)
+                        .into_any_element()
                     }
                     None => div().into_any_element(),
                 })

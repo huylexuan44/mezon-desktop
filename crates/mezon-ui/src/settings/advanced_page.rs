@@ -44,12 +44,7 @@ impl Render for AdvancedPage {
                                     this.settings.update(cx, |s, _| {
                                         s.hardware_acceleration = !s.hardware_acceleration;
                                     });
-                                    let snapshot = this.settings.read(cx).clone();
-                                    cx.background_executor()
-                                        .spawn(async move {
-                                            snapshot.save_sync();
-                                        })
-                                        .detach();
+                                    mezon_store::schedule_settings_save(&this.settings, cx);
                                     cx.notify();
                                 })),
                         ),

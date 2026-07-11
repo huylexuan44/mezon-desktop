@@ -16,13 +16,16 @@ use crate::theme::{ActiveTheme, Theme};
 mod clan_row;
 mod direct_unread_list;
 use clan_row::{ClanRow, render_clan_row, render_pill};
-use direct_unread_list::{DirectUnreadListState, build_direct_unread_items};
+use direct_unread_list::{
+    DirectUnreadListState, build_direct_unread_items, direct_unread_fingerprint,
+};
 
 pub struct ClanSidebar {
     clan_list: Entity<ClanList>,
     settings: Entity<Settings>,
     rows: Rc<Vec<ClanRow>>,
     direct_unread: DirectUnreadListState,
+    direct_unread_fingerprint: Option<u64>,
     list_state: ListState,
     dm_active: bool,
     can_go_back: bool,
@@ -46,13 +49,19 @@ impl ClanSidebar {
     ) -> Self {
         let direct_store = DirectMessageStore::global(cx);
         let direct_sub = cx.observe(&direct_store, |this, store, cx| {
+            let fingerprint = direct_unread_fingerprint(store.read(cx));
+            if this.direct_unread_fingerprint == Some(fingerprint) {
+                return;
+            }
+            this.direct_unread_fingerprint = Some(fingerprint);
             let live = build_direct_unread_items(store.read(cx), cx);
             this.direct_unread.sync(live, cx);
         });
 
         let clan_sub = cx.observe(&clan_list, |this, clan_list, cx| {
-            this.sync_rows(clan_list.read(cx), cx);
-            cx.notify();
+            if this.sync_rows(clan_list.read(cx), cx) {
+                cx.notify();
+            }
         });
         let settings_sub = cx.observe(&settings, |this, _, cx| {
             this.sync_chrome(cx);
@@ -97,6 +106,7 @@ impl ClanSidebar {
                 direct_store.read(cx),
                 cx,
             )),
+            direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx))),
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(48.)),
             dm_active: initial_dm_active,
             can_go_back: initial_can_go_back,
@@ -148,7 +158,7 @@ impl ClanSidebar {
         ));
     }
 
-    fn sync_rows(&mut self, clan_list_view: &ClanList, cx: &App) {
+    fn sync_rows(&mut self, clan_list_view: &ClanList, cx: &App) -> bool {
         let rows: Vec<ClanRow> = clan_list_view
             .clans
             .iter()
@@ -181,6 +191,9 @@ impl ClanSidebar {
                 }
             })
             .collect();
+        if *self.rows == rows {
+            return false;
+        }
         let count = rows.len();
         let item_count = count + 1;
         let needs_reset = self.list_state.item_count() != item_count;
@@ -188,6 +201,7 @@ impl ClanSidebar {
         if needs_reset {
             self.list_state.reset(item_count);
         }
+        true
     }
 }
 

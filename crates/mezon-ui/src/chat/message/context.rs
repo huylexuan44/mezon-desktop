@@ -64,7 +64,7 @@ pub struct RowCtx<'a> {
     pub profile_context: Option<ProfileContext>,
     pub settings: Entity<Settings>,
     pub active_videos: &'a HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
-    pub active_audios: &'a HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
+    pub active_audios: &'a indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>,
     pub gif_videos: &'a HashMap<(MessageId, usize), Entity<GifVideoView>>,
     pub video_host: WeakEntity<ChannelMessages>,
     pub now: chrono::DateTime<chrono::Local>,

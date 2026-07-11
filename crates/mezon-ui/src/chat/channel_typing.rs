@@ -52,19 +52,24 @@ impl ChannelTyping {
         let presence = PresenceStore::global(cx);
         let presence = presence.read(cx);
         let users = presence.typing_users(channel_id);
-        let locale = self.settings.read(cx).language.clone();
         match users.len() {
             0 => None,
-            1 => Some(TypingContent::One {
-                name: users.into_iter().next()?,
-                suffix: SharedString::from(
-                    mezon_i18n::t(&locale, "common.isTyping").trim_end_matches(['.', '…']),
-                ),
-            }),
-            _ => Some(TypingContent::Several(SharedString::from(mezon_i18n::t(
-                &locale,
-                "common.severalPeopleTyping",
-            )))),
+            1 => {
+                let locale = &self.settings.read(cx).language;
+                Some(TypingContent::One {
+                    suffix: SharedString::from(
+                        mezon_i18n::t(locale, "common.isTyping").trim_end_matches(['.', '…']),
+                    ),
+                    name: users.into_iter().next()?,
+                })
+            }
+            _ => {
+                let locale = &self.settings.read(cx).language;
+                Some(TypingContent::Several(SharedString::from(mezon_i18n::t(
+                    locale,
+                    "common.severalPeopleTyping",
+                ))))
+            }
         }
     }
 }

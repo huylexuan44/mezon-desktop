@@ -119,6 +119,27 @@ impl DirectUnreadListState {
     }
 }
 
+pub(super) fn direct_unread_fingerprint(store: &DirectMessageStore) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    fn fold(hash: u64, bytes: &[u8]) -> u64 {
+        bytes
+            .iter()
+            .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
+    }
+    store
+        .channels()
+        .iter()
+        .filter(|ch| ch.unread_count > 0)
+        .fold(FNV_OFFSET, |h, ch| {
+            let h = fold(h, &ch.id.0.to_le_bytes());
+            let h = fold(h, &ch.unread_count.to_le_bytes());
+            let h = fold(h, &[ch.kind as u8]);
+            let h = fold(h, ch.label.as_bytes());
+            fold(h, ch.avatar.as_bytes())
+        })
+}
+
 pub(super) fn build_direct_unread_items(
     store: &DirectMessageStore,
     cx: &App,

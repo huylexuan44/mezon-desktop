@@ -8,6 +8,8 @@ use mezon_proto::api;
 use crate::KeyedCache;
 use crate::ids::{ChannelId, ClanId};
 
+const MAX_CACHED_CHANNEL_PERMISSIONS: usize = 64;
+
 pub const PERMISSION_MANAGE_THREAD: &str = "manage-thread";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,7 +52,7 @@ impl ChannelPermissionsStore {
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
         Self {
-            cache: KeyedCache::new(None),
+            cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
             loading: HashSet::new(),
             api,
             _conn_watch: conn_watch,
@@ -103,6 +105,7 @@ impl ChannelPermissionsStore {
             clan_id,
             channel_id,
         };
+        self.cache.touch(&key);
         if self.cache.is_fresh(&key, crate::CACHE_TTL) {
             return;
         }

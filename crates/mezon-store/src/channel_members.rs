@@ -11,6 +11,8 @@ use crate::channel::{ChannelEvent, ChannelList};
 use crate::clan::ClanList;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
+const MAX_CACHED_CHANNELS: usize = 64;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelMember {
     pub user_id: UserId,
@@ -101,7 +103,7 @@ impl ChannelMembersStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            cache: KeyedCache::new(None),
+            cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
             loading: HashMap::new(),
             api,
             _channel_sub: channel_sub,
@@ -181,6 +183,7 @@ impl ChannelMembersStore {
     }
 
     pub fn ensure_loaded(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        self.cache.touch(&channel_id);
         if !self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.fetch(channel_id, cx);
         }

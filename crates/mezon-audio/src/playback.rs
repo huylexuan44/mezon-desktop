@@ -2,8 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::rc::{Rc, Weak};
 
-use rodio::buffer::SamplesBuffer;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::AudioError;
 use crate::decode::DecodedPcm;
@@ -27,13 +28,13 @@ fn shared_sink() -> Result<Rc<MixerDeviceSink>, AudioError> {
 }
 
 struct PcmData {
-    samples: Vec<f32>,
+    samples: Arc<[f32]>,
     channels: NonZeroU16,
     sample_rate: NonZeroU32,
     duration: f64,
 }
 
-fn downmix_to_playable(samples: Vec<f32>, channels: usize) -> (Vec<f32>, u16) {
+fn downmix_to_playable(samples: Arc<[f32]>, channels: usize) -> (Arc<[f32]>, u16) {
     let ch = channels.max(1);
     if ch <= 2 {
         return (samples, ch as u16);
@@ -43,7 +44,50 @@ fn downmix_to_playable(samples: Vec<f32>, channels: usize) -> (Vec<f32>, u16) {
     for frame in samples.chunks_exact(ch) {
         mono.push(frame.iter().sum::<f32>() / ch as f32);
     }
-    (mono, 1)
+    (mono.into(), 1)
+}
+
+struct SharedSamplesSource {
+    samples: Arc<[f32]>,
+    position: usize,
+    channels: NonZeroU16,
+    sample_rate: NonZeroU32,
+    duration: f64,
+}
+
+impl Iterator for SharedSamplesSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let sample = self.samples.get(self.position).copied();
+        if sample.is_some() {
+            self.position += 1;
+        }
+        sample
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.samples.len().saturating_sub(self.position);
+        (remaining, Some(remaining))
+    }
+}
+
+impl Source for SharedSamplesSource {
+    fn current_span_len(&self) -> Option<usize> {
+        Some(self.samples.len().saturating_sub(self.position))
+    }
+
+    fn channels(&self) -> NonZeroU16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> NonZeroU32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs_f64(self.duration))
+    }
 }
 
 pub struct AudioPlayer {
@@ -90,11 +134,13 @@ impl AudioPlayer {
     pub fn play(&self) {
         if let Some(data) = self.data.borrow().as_ref() {
             if self.player.empty() {
-                self.player.append(SamplesBuffer::new(
-                    data.channels,
-                    data.sample_rate,
-                    data.samples.clone(),
-                ));
+                self.player.append(SharedSamplesSource {
+                    samples: Arc::clone(&data.samples),
+                    position: 0,
+                    channels: data.channels,
+                    sample_rate: data.sample_rate,
+                    duration: data.duration,
+                });
             }
             self.started.set(true);
             self.player.play();

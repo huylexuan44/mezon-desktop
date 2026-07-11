@@ -140,12 +140,7 @@ fn language_row(
                 s.language = value.to_string();
                 cx.notify();
             });
-            let snapshot = settings.read(cx).clone();
-            cx.background_executor()
-                .spawn(async move {
-                    snapshot.save_sync();
-                })
-                .detach();
+            mezon_store::schedule_settings_save(&settings, cx);
         })
 }
 

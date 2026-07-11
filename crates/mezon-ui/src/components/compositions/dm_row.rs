@@ -28,10 +28,21 @@ impl DmRow {
         kind: DirectKind,
     ) -> Self {
         let id: SharedString = id.into();
-        let label: SharedString = label.into();
         let elem_id: ElementId = SharedString::from(format!("dm-{}", id)).into();
         let group_name: SharedString = SharedString::from(format!("dm-row-{}", id));
         let close_id: SharedString = SharedString::from(format!("dm-close-{}", id));
+        Self::with_ids(id, label, kind, elem_id, group_name, close_id)
+    }
+
+    pub fn with_ids(
+        id: SharedString,
+        label: impl Into<SharedString>,
+        kind: DirectKind,
+        elem_id: ElementId,
+        group_name: SharedString,
+        close_id: SharedString,
+    ) -> Self {
+        let label: SharedString = label.into();
         Self {
             id,
             label,

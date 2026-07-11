@@ -121,7 +121,12 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
                 break;
             };
             if protect == Some(&victim) {
-                break;
+                if self.order.len() < 2 {
+                    break;
+                }
+                self.order.pop_front();
+                self.order.push_back(victim);
+                continue;
             }
             self.order.pop_front();
             self.entries.remove(&victim);
@@ -210,13 +215,34 @@ mod tests {
     }
 
     #[test]
-    fn protect_prevents_evicting_oldest() {
+    fn protect_keeps_protected_key_but_preserves_hard_bound() {
         let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(2));
         c.insert("a".into(), 1, None);
         c.insert("b".into(), 2, None);
         c.insert("c".into(), 3, Some(&"a".to_string()));
         assert_eq!(c.get("a"), Some(&1));
-        assert_eq!(c.get("b"), Some(&2));
+        assert_eq!(c.get("b"), None);
         assert_eq!(c.get("c"), Some(&3));
+    }
+
+    #[test]
+    fn protect_never_grows_past_max_while_other_victims_exist() {
+        let protected = "keep".to_string();
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(3));
+        c.insert(protected.clone(), 0, None);
+        for i in 1..20 {
+            c.insert(format!("k{i}"), i, Some(&protected));
+            assert!(c.get(&protected).is_some());
+        }
+        assert_eq!(c.get(&protected), Some(&0));
+    }
+
+    #[test]
+    fn protect_may_exceed_max_only_when_no_other_victim() {
+        let mut c: KeyedCache<String, i32> = KeyedCache::new(Some(1));
+        c.insert("a".into(), 1, None);
+        c.insert("b".into(), 2, Some(&"b".to_string()));
+        assert_eq!(c.get("a"), None);
+        assert_eq!(c.get("b"), Some(&2));
     }
 }

@@ -112,6 +112,9 @@ impl ChatArea {
                     MentionInputEvent::SendSticker { url, filename } => {
                         this.send_sticker(url.clone(), filename.clone(), cx)
                     }
+                    MentionInputEvent::SendSound { url, filename } => {
+                        this.send_sound(url.clone(), filename.clone(), cx)
+                    }
                 },
             );
             self._submit_sub = Some(submit_sub);

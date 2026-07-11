@@ -9,6 +9,8 @@ use crate::clan::{ClanEvent, ClanList};
 use crate::ids::{ClanId, RoleId};
 use crate::realtime::RealtimeDispatch;
 
+const MAX_CACHED_CLANS: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
     pub name: String,
@@ -76,7 +78,7 @@ impl RolesStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            cache: KeyedCache::new(None),
+            cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
             loading: std::collections::HashSet::new(),
             api,
             _clan_sub: clan_sub,
@@ -116,6 +118,7 @@ impl RolesStore {
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.cache.touch(&clan_id);
         if !self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
             self.fetch(clan_id, cx);
         }

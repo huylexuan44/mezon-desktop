@@ -591,7 +591,7 @@ impl VoiceStore {
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND) })
+                .spawn(async move { mezon_audio::decode_audio(RAISE_HAND_SOUND.to_vec()) })
                 .await;
             this.update(cx, |this, _| {
                 this.raising_hand_sound_loading = false;
@@ -664,7 +664,7 @@ impl VoiceStore {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(&bytes) })
+                .spawn(async move { mezon_audio::decode_audio(bytes) })
                 .await;
             this.update(cx, |this, cx| {
                 if !this.active_sounds.contains_key(&key) {
@@ -898,7 +898,7 @@ impl VoiceStore {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(&bytes) })
+                .spawn(async move { mezon_audio::decode_audio(bytes) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.previewing_sound() != Some(fetch_url.as_str()) {
@@ -1296,7 +1296,33 @@ impl VoiceStore {
         self.sync_noise_suppression();
 
         let task = cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv_async().await {
+            let mut pending: Option<VoiceEvent> = None;
+            loop {
+                let event = match pending.take() {
+                    Some(event) => event,
+                    None => match events.recv_async().await {
+                        Ok(event) => event,
+                        Err(_) => break,
+                    },
+                };
+                let event = if matches!(event, VoiceEvent::Participants(_)) {
+                    let mut latest = event;
+                    loop {
+                        match events.try_recv() {
+                            Ok(VoiceEvent::Participants(participants)) => {
+                                latest = VoiceEvent::Participants(participants);
+                            }
+                            Ok(other) => {
+                                pending = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    latest
+                } else {
+                    event
+                };
                 if this
                     .update(cx, |this, cx| this.handle_engine_event(event, cx))
                     .is_err()
@@ -1372,6 +1398,9 @@ impl VoiceStore {
                 }
             }
             VoiceEvent::Participants(list) => {
+                if self.participants == list {
+                    return;
+                }
                 self.participants = list;
                 if let Some(local) = self.participants.iter().find(|p| p.is_local) {
                     self.mic_enabled = !local.muted;

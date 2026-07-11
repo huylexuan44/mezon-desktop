@@ -10,7 +10,7 @@ use crate::components::primitives::mention_count_badge;
 use crate::router::{Route, Router};
 use crate::theme::ActiveTheme;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct ClanRow {
     pub(super) id: SharedString,
     pub(super) id_num: ClanId,

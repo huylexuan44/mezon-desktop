@@ -238,19 +238,25 @@ impl MezonClient {
 
         let status = response.status();
 
+        const MAX_AUTH_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
         let mut resp_bytes: Vec<u8> = Vec::new();
         response
             .body_mut()
+            .take(MAX_AUTH_RESPONSE_BYTES + 1)
             .read_to_end(&mut resp_bytes)
             .await
             .with_context(|| format!("Failed to read response body from POST {url}"))?;
+        if resp_bytes.len() as u64 > MAX_AUTH_RESPONSE_BYTES {
+            bail!("Auth response from POST {url} exceeds {MAX_AUTH_RESPONSE_BYTES} bytes");
+        }
 
         if !status.is_success() {
-            bail!(
-                "HTTP {} on POST {url}: {}",
-                status.as_u16(),
-                String::from_utf8_lossy(&resp_bytes).trim()
-            );
+            let preview: String = String::from_utf8_lossy(&resp_bytes)
+                .trim()
+                .chars()
+                .take(300)
+                .collect();
+            bail!("HTTP {} on POST {url}: {}", status.as_u16(), preview);
         }
 
         serde_json::from_slice(&resp_bytes)

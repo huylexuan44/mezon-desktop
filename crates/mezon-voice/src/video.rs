@@ -21,7 +21,7 @@ pub struct VideoFrameStore {
 }
 
 impl VideoFrameStore {
-    pub fn publish(&self, key: u64, width: u32, height: u32, bgra: Vec<u8>) {
+    pub fn publish(&self, key: u64, width: u32, height: u32, bgra: Vec<u8>) -> Option<Vec<u8>> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let frame = Arc::new(VideoFrameData {
             width,
@@ -29,7 +29,8 @@ impl VideoFrameStore {
             bgra,
             seq,
         });
-        self.frames.lock().insert(key, frame);
+        let prev = self.frames.lock().insert(key, frame)?;
+        Arc::try_unwrap(prev).ok().map(|f| f.bgra)
     }
 
     pub fn get(&self, key: u64) -> Option<Arc<VideoFrameData>> {

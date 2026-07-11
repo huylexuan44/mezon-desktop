@@ -254,7 +254,11 @@ pub fn start_screen(
                     pw as usize,
                     ph as usize,
                 );
-                frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf));
+                if let Some(recycled) =
+                    frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf))
+                {
+                    display_buf = recycled;
+                }
             }
 
             frame_store.remove(local_screen_key(&identity));

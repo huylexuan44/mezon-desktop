@@ -46,6 +46,9 @@ pub struct ChatLayout {
     voice_store: Entity<VoiceStore>,
     pending_channel_id: Option<ChannelId>,
     prefetched_voice_channel: Option<ChannelId>,
+    dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
+    inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
+    _voice_frame_pump: Option<Task<()>>,
     show_member_list: bool,
     message_search_expanded: bool,
     show_search_options: bool,
@@ -174,14 +177,19 @@ impl ChatLayout {
 
         let direct_store = DirectMessageStore::global(cx);
 
-        // TODO: break global listener into smaller pieces
-        cx.observe(&direct_store, |_, _, cx| {
-            if matches!(
-                Router::global(cx).read(cx).route(),
-                Route::DirectMessage { .. }
-            ) {
-                cx.notify();
+        cx.observe(&direct_store, |this, store, cx| {
+            let Route::DirectMessage { direct_id, .. } = Router::global(cx).read(cx).route() else {
+                return;
+            };
+            let fingerprint = store
+                .read(cx)
+                .find(direct_id)
+                .map(|dm| (dm.id, dm.kind, dm.label.clone()));
+            if this.dm_view_fingerprint == fingerprint {
+                return;
             }
+            this.dm_view_fingerprint = fingerprint;
+            cx.notify();
         })
         .detach();
 
@@ -307,6 +315,9 @@ impl ChatLayout {
             voice_store,
             pending_channel_id: None,
             prefetched_voice_channel: None,
+            dm_view_fingerprint: None,
+            inbox_context_ids: None,
+            _voice_frame_pump: None,
             show_member_list: true,
             message_search_expanded: false,
             show_search_options: false,
@@ -711,17 +722,15 @@ impl ChatLayout {
         self.inbox_handle.hide(cx);
     }
 
-    fn sync_inbox_context(&self, cx: &mut Context<Self>) {
-        let clan_id = self
-            .clan_list
-            .read(cx)
-            .active_clan_id
-            .map(|id| id.to_string());
-        let channel_id = self
-            .channel_list
-            .read(cx)
-            .active_channel_id
-            .map(|id| id.to_string());
+    fn sync_inbox_context(&mut self, cx: &mut Context<Self>) {
+        let clan = self.clan_list.read(cx).active_clan_id;
+        let channel = self.channel_list.read(cx).active_channel_id;
+        if self.inbox_context_ids == Some((clan, channel)) {
+            return;
+        }
+        self.inbox_context_ids = Some((clan, channel));
+        let clan_id = clan.map(|id| id.to_string());
+        let channel_id = channel.map(|id| id.to_string());
         InboxStore::global(cx).update(cx, |store, cx| {
             store.set_active_context(clan_id, channel_id, cx);
         });
@@ -978,11 +987,26 @@ impl ChatLayout {
     }
 
     fn drive_voice_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const VOICE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
-        if self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video() {
-            window.request_animation_frame();
+        let want_pump =
+            self.is_voice_frame_relevant(cx) && self.voice_store.read(cx).has_active_video();
+        if !want_pump {
+            self._voice_frame_pump = None;
+            return;
         }
+        if self._voice_frame_pump.is_some() {
+            return;
+        }
+        self._voice_frame_pump = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(VOICE_FRAME_INTERVAL).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     fn is_voice_frame_relevant(&self, cx: &Context<Self>) -> bool {
@@ -1434,6 +1458,10 @@ impl ChatLayout {
 
     pub(crate) fn send_sticker(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
         crate::chat::ChatSending::send_sticker(url, filename, &self.auth_state, cx);
+    }
+
+    pub(crate) fn send_sound(&mut self, url: String, filename: String, cx: &mut Context<Self>) {
+        crate::chat::ChatSending::send_sound(url, filename, &self.auth_state, cx);
     }
 
     fn current_dm(&self, cx: &Context<Self>) -> Option<DirectChannel> {

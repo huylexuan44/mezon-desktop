@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::AsyncReadExt as _;
 use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
@@ -1467,8 +1466,11 @@ async fn fetch_rotated_image(
     if !response.status().is_success() {
         anyhow::bail!("rotation fetch failed with status {}", response.status());
     }
-    let mut bytes = Vec::new();
-    response.body_mut().read_to_end(&mut bytes).await?;
+    let bytes = crate::image_cache::read_body_limited(
+        &mut response,
+        crate::image_cache::VIEWER_FETCH_MAX_BYTES,
+    )
+    .await?;
     executor
         .spawn(async move {
             let decoded = image::load_from_memory(&bytes)?;

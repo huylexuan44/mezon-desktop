@@ -40,7 +40,6 @@ const LIST_BOTTOM_PADDING: f32 = 20.;
 const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
-const PAGINATE_THROTTLE: Duration = Duration::from_millis(250);
 const SCROLL_RELIEF_DELAY: Duration = Duration::from_millis(1500);
 const MAX_GIF_VIDEOS: usize = 6;
 const MAX_AUDIO_PLAYERS: usize = 8;
@@ -167,7 +166,7 @@ pub struct ChannelMessages {
     avatar_image_cache: Entity<LruImageCache>,
     small_avatar_image_cache: Entity<LruImageCache>,
     active_videos: HashMap<(MessageId, usize), Entity<VideoPlayerView>>,
-    active_audios: HashMap<(MessageId, usize), Entity<AudioPlayerView>>,
+    active_audios: indexmap::IndexMap<(MessageId, usize), Entity<AudioPlayerView>>,
     gif_videos: HashMap<(MessageId, usize), Entity<GifVideoView>>,
     cached_for_channel: Option<ChannelId>,
     skeleton_phase: SkeletonPhase,
@@ -182,7 +181,9 @@ pub struct ChannelMessages {
     _hover_show_task: Option<Task<()>>,
     _hover_hide_task: Option<Task<()>>,
     scroll_relief_armed: bool,
-    last_paginate: Option<Instant>,
+    paginate_armed_top: bool,
+    paginate_armed_bottom: bool,
+    last_paginate_count: usize,
     last_scroll_at: Option<Instant>,
     at_bottom: bool,
     last_visible_start: usize,
@@ -253,9 +254,10 @@ impl ChannelMessages {
 
         let direct_messages = DirectMessageStore::global(cx);
         let direct_messages_observe = cx.observe(&direct_messages, |this, _, cx| {
-            if MessagesStore::global(cx).read(cx).is_dm() {
-                this.row_memo.borrow_mut().avatars.clear();
+            if !MessagesStore::global(cx).read(cx).is_dm() {
+                return;
             }
+            this.row_memo.borrow_mut().avatars.clear();
             if this.refresh_derived_state(cx) {
                 cx.notify();
             }
@@ -429,11 +431,7 @@ impl ChannelMessages {
                         cx.notify();
                         return;
                     };
-                    let vp_index = _store
-                        .read(cx)
-                        .viewport_messages()
-                        .iter()
-                        .position(|m| m.id == *id);
+                    let vp_index = _store.read(cx).viewport_position(*id);
                     if let Some(vp_index) = vp_index {
                         let at = usize::from(this.header_shown) + vp_index;
                         if at < this.list_state.item_count() {
@@ -548,31 +546,41 @@ impl ChannelMessages {
                     cx.notify();
                 }
 
+                if event.count != this.last_paginate_count {
+                    this.last_paginate_count = event.count;
+                    this.paginate_armed_top = true;
+                    this.paginate_armed_bottom = true;
+                }
+                if !near_top {
+                    this.paginate_armed_top = true;
+                }
+                if !near_bottom {
+                    this.paginate_armed_bottom = true;
+                }
                 if !(near_top || near_bottom) {
                     return;
                 }
-                let now = Instant::now();
-                if this
-                    .last_paginate
-                    .is_some_and(|t| now.duration_since(t) < PAGINATE_THROTTLE)
-                {
-                    return;
-                }
                 let store = MessagesStore::global(cx);
-                tracing::debug!(
-                    near_top,
-                    near_bottom,
-                    start = event.visible_range.start,
-                    end = event.visible_range.end,
-                    count = event.count,
-                    has_more_bottom = store.read(cx).has_more_bottom(),
-                    "timeline pagination trigger"
-                );
-                if near_top {
-                    this.last_paginate = Some(now);
+                if near_top && this.paginate_armed_top {
+                    this.paginate_armed_top = false;
+                    tracing::debug!(
+                        start = event.visible_range.start,
+                        end = event.visible_range.end,
+                        count = event.count,
+                        "timeline pagination trigger: top"
+                    );
                     store.update(cx, |store, cx| store.scroll_reached_top(cx));
-                } else if store.read(cx).has_more_bottom() {
-                    this.last_paginate = Some(now);
+                } else if near_bottom
+                    && this.paginate_armed_bottom
+                    && store.read(cx).has_more_bottom()
+                {
+                    this.paginate_armed_bottom = false;
+                    tracing::debug!(
+                        start = event.visible_range.start,
+                        end = event.visible_range.end,
+                        count = event.count,
+                        "timeline pagination trigger: bottom"
+                    );
                     store.update(cx, |store, cx| store.scroll_reached_bottom(cx));
                 }
             });
@@ -632,7 +640,7 @@ impl ChannelMessages {
             avatar_image_cache,
             small_avatar_image_cache,
             active_videos: HashMap::new(),
-            active_audios: HashMap::new(),
+            active_audios: indexmap::IndexMap::new(),
             gif_videos: HashMap::new(),
             cached_for_channel: None,
             skeleton_phase: SkeletonPhase::Hidden,
@@ -647,7 +655,9 @@ impl ChannelMessages {
             _hover_show_task: None,
             _hover_hide_task: None,
             scroll_relief_armed: false,
-            last_paginate: None,
+            paginate_armed_top: true,
+            paginate_armed_bottom: true,
+            last_paginate_count: 0,
             last_scroll_at: None,
             at_bottom: true,
             last_visible_start: 0,
@@ -775,7 +785,7 @@ impl ChannelMessages {
             move |this, _input, event: &MentionInputEvent, window, cx| match event {
                 MentionInputEvent::Submit => this.save_edit(window, cx),
                 MentionInputEvent::Cancel => this.cancel_edit(cx),
-                MentionInputEvent::SendSticker { .. } => {}
+                MentionInputEvent::SendSticker { .. } | MentionInputEvent::SendSound { .. } => {}
             },
         ));
         self.edit_input = Some((message_id, input));
@@ -837,9 +847,7 @@ impl ChannelMessages {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
             store
-                .messages()
-                .iter()
-                .find(|m| m.id == message_id)
+                .viewport_message_by_id(message_id)
                 .map(|m| (m.sender_id.clone(), m.code == MessageCode::Poll))
         };
         self.context_menu_forward_all = match sender_and_poll {
@@ -966,10 +974,10 @@ impl ChannelMessages {
         if self.active_audios.contains_key(&key) {
             return;
         }
-        if self.active_audios.len() >= MAX_AUDIO_PLAYERS
-            && let Some(evicted) = self.active_audios.keys().next().copied()
-        {
-            self.active_audios.remove(&evicted);
+        while self.active_audios.len() >= MAX_AUDIO_PLAYERS {
+            if self.active_audios.shift_remove_index(0).is_none() {
+                break;
+            }
         }
         let view = cx.new(|cx| AudioPlayerView::new(activation, cx));
         self.active_audios.insert(key, view);
@@ -1721,11 +1729,7 @@ impl Render for ChannelMessages {
             .when_some(self.context_menu_target, |el, (message_id, position)| {
                 let store = MessagesStore::global(cx);
                 let store_ref = store.read(cx);
-                let Some(target_msg) = store_ref
-                    .viewport_messages()
-                    .iter()
-                    .find(|m| m.id == message_id)
-                else {
+                let Some(target_msg) = store_ref.viewport_message_by_id(message_id) else {
                     return el;
                 };
                 let menu = message_context_menu::build(

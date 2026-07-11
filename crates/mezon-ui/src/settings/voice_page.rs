@@ -56,12 +56,7 @@ impl VoicePage {
                 mic_settings.update(cx, |s, _| {
                     s.mic_volume = value.end();
                 });
-                let snapshot = mic_settings.read(cx).clone();
-                cx.background_executor()
-                    .spawn(async move {
-                        snapshot.save_sync();
-                    })
-                    .detach();
+                mezon_store::schedule_settings_save(&mic_settings, cx);
             },
         ));
 
@@ -73,12 +68,7 @@ impl VoicePage {
                 speaker_settings.update(cx, |s, _| {
                     s.speaker_volume = value.end();
                 });
-                let snapshot = speaker_settings.read(cx).clone();
-                cx.background_executor()
-                    .spawn(async move {
-                        snapshot.save_sync();
-                    })
-                    .detach();
+                mezon_store::schedule_settings_save(&speaker_settings, cx);
             },
         ));
 
@@ -544,12 +534,7 @@ impl VoicePage {
         settings.update(cx, |s, _| {
             s.input_device_id = Some(id);
         });
-        let snapshot = settings.read(cx).clone();
-        cx.background_executor()
-            .spawn(async move {
-                snapshot.save_sync();
-            })
-            .detach();
+        mezon_store::schedule_settings_save(&settings, cx);
     }
 
     fn select_output_device(
@@ -563,12 +548,7 @@ impl VoicePage {
         settings.update(cx, |s, _| {
             s.output_device_id = Some(id);
         });
-        let snapshot = settings.read(cx).clone();
-        cx.background_executor()
-            .spawn(async move {
-                snapshot.save_sync();
-            })
-            .detach();
+        mezon_store::schedule_settings_save(&settings, cx);
     }
 
     fn stop_mic_test(&mut self, cx: &mut Context<Self>) {
@@ -596,7 +576,7 @@ impl VoicePage {
                 }
             };
 
-            let (tx, rx) = flume::unbounded();
+            let (tx, rx) = flume::bounded(8);
 
             let capture_result = AudioStore::try_global(cx)
                 .and_then(|store| store.read(cx).mic_capture_factory.clone())
@@ -612,16 +592,26 @@ impl VoicePage {
 
                     let this = cx.weak_entity();
                     let task = cx.spawn(async move |_handle: WeakEntity<VoicePage>, cx| {
+                        const MIC_LEVEL_FRAME: std::time::Duration =
+                            std::time::Duration::from_millis(33);
+                        const MIC_LEVEL_EPSILON: f32 = 0.004;
                         while let Ok(level) = rx.recv_async().await {
+                            let mut latest = level;
+                            while let Ok(next) = rx.try_recv() {
+                                latest = next;
+                            }
                             if this
                                 .update(cx, |this, cx| {
-                                    this.mic_level = level;
-                                    cx.notify();
+                                    if (this.mic_level - latest).abs() >= MIC_LEVEL_EPSILON {
+                                        this.mic_level = latest;
+                                        cx.notify();
+                                    }
                                 })
                                 .is_err()
                             {
                                 break;
                             }
+                            cx.background_executor().timer(MIC_LEVEL_FRAME).await;
                         }
                     });
                     self._test_task = Some(task);

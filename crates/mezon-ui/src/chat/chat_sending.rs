@@ -44,4 +44,14 @@ impl ChatSending {
             store.send_sticker(url, filename, uid, uname, cx);
         });
     }
+
+    pub fn send_sound(url: String, filename: String, auth_state: &Entity<AuthState>, cx: &mut App) {
+        if url.is_empty() {
+            return;
+        }
+        let (uid, uname) = Self::current_user(auth_state, cx);
+        MessagesStore::global(cx).update(cx, |store, cx| {
+            store.send_sound(url, filename, uid, uname, cx);
+        });
+    }
 }

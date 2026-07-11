@@ -23,6 +23,7 @@ pub struct Emoji {
     pub src: String,
     pub category: String,
     pub clan_id: String,
+    pub clan_logo: String,
 }
 
 #[derive(Debug, Clone)]
@@ -147,16 +148,26 @@ impl EmojiStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api.list_emojis_by_user_id().await;
+            let mapped = match result {
+                Ok(emojis) => Ok(cx
+                    .background_executor()
+                    .spawn(async move {
+                        emojis
+                            .into_iter()
+                            .filter_map(emoji_from_proto)
+                            .collect::<Vec<_>>()
+                    })
+                    .await),
+                Err(e) => Err(e),
+            };
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
-                match result {
+                match mapped {
                     Ok(emojis) => {
                         this.by_id.clear();
                         this.order.clear();
-                        for proto in emojis {
-                            if let Some(emoji) = emoji_from_proto(proto) {
-                                this.insert(emoji);
-                            }
+                        for emoji in emojis {
+                            this.insert(emoji);
                         }
                         this.freshness.mark_fetched();
                         tracing::info!("EmojiStore: fetched {} emojis", this.order.len());
@@ -364,6 +375,7 @@ fn emoji_from_proto(e: api::ClanEmoji) -> Option<Emoji> {
         src: e.src,
         category,
         clan_id: e.clan_id.to_string(),
+        clan_logo: e.logo,
     })
 }
 
@@ -382,6 +394,7 @@ fn emoji_from_event(e: &realtime::EventEmoji) -> Option<Emoji> {
         src: e.source.clone(),
         category,
         clan_id: e.clan_id.to_string(),
+        clan_logo: e.logo.clone(),
     })
 }
 
@@ -426,6 +439,7 @@ mod tests {
             src: String::new(),
             category: category.into(),
             clan_id: clan_id.into(),
+            clan_logo: String::new(),
         }
     }
 

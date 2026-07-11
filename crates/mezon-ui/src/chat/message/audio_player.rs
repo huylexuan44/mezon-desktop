@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use futures::AsyncReadExt as _;
 use gpui::{
     App, ClickEvent, Context, ElementId, Rgba, SharedString, Task, Window, div, prelude::*, px,
 };
@@ -9,6 +8,7 @@ use mezon_store::PlatformStore;
 
 use crate::components::primitives::{Icon, IconName, Sizable, Size, Spinner};
 
+const AUDIO_FETCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 const PILL_BG: Rgba = Rgba {
@@ -92,8 +92,9 @@ impl AudioPlayerView {
                 if !response.status().is_success() {
                     anyhow::bail!("audio fetch status {}", response.status());
                 }
-                let mut body = Vec::new();
-                response.body_mut().read_to_end(&mut body).await?;
+                let body =
+                    crate::image_cache::read_body_limited(&mut response, AUDIO_FETCH_MAX_BYTES)
+                        .await?;
                 anyhow::Ok(body)
             };
             let bytes = match fetch.await {
@@ -109,7 +110,7 @@ impl AudioPlayerView {
             };
             let decoded = cx
                 .background_executor()
-                .spawn(async move { mezon_audio::decode_audio(&bytes) })
+                .spawn(async move { mezon_audio::decode_audio(bytes) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 match decoded {
