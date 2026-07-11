@@ -76,6 +76,7 @@ struct DirectWriteState {
     fonts: Vec<FontInfo>,
     font_to_font_id: HashMap<Font, FontId>,
     font_info_cache: HashMap<usize, FontId>,
+    text_format_cache: HashMap<(usize, u32), IDWriteTextFormat1>,
     layout_line_scratch: Vec<u16>,
 }
 
@@ -212,6 +213,7 @@ impl DirectWriteTextSystem {
                 custom_font_collection,
                 fonts: Vec::new(),
                 font_to_font_id: HashMap::default(),
+            text_format_cache: HashMap::default(),
                 font_info_cache: HashMap::default(),
                 layout_line_scratch: Vec::new(),
             }),
@@ -533,23 +535,34 @@ impl DirectWriteState {
             let mut utf16_offset = 0u32;
             let text_layout = {
                 let first_run = &font_runs[0];
+                let format_key = (first_run.font_id.0, font_size.as_f32().to_bits());
+                let format = if let Some(format) = self.text_format_cache.get(&format_key) {
+                    format.clone()
+                } else {
+                    let font_info = &self.fonts[first_run.font_id.0];
+                    let collection = &font_info.font_collection;
+                    let format: IDWriteTextFormat1 = components
+                        .factory
+                        .CreateTextFormat(
+                            &font_info.font_family_h,
+                            collection,
+                            font_info.font_face.GetWeight(),
+                            font_info.font_face.GetStyle(),
+                            DWRITE_FONT_STRETCH_NORMAL,
+                            font_size.as_f32(),
+                            &components.locale,
+                        )?
+                        .cast()?;
+                    if let Some(ref fallbacks) = font_info.fallbacks {
+                        format.SetFontFallback(fallbacks)?;
+                    }
+                    if self.text_format_cache.len() >= 64 {
+                        self.text_format_cache.clear();
+                    }
+                    self.text_format_cache.insert(format_key, format.clone());
+                    format
+                };
                 let font_info = &self.fonts[first_run.font_id.0];
-                let collection = &font_info.font_collection;
-                let format: IDWriteTextFormat1 = components
-                    .factory
-                    .CreateTextFormat(
-                        &font_info.font_family_h,
-                        collection,
-                        font_info.font_face.GetWeight(),
-                        font_info.font_face.GetStyle(),
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        font_size.as_f32(),
-                        &components.locale,
-                    )?
-                    .cast()?;
-                if let Some(ref fallbacks) = font_info.fallbacks {
-                    format.SetFontFallback(fallbacks)?;
-                }
 
                 let layout = components.factory.CreateTextLayout(
                     text_wide,

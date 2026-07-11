@@ -148,21 +148,14 @@ impl EmojiStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api.list_emojis_by_user_id().await;
-            let mapped = match result {
-                Ok(emojis) => Ok(cx
-                    .background_executor()
-                    .spawn(async move {
-                        emojis
-                            .into_iter()
-                            .filter_map(emoji_from_proto)
-                            .collect::<Vec<_>>()
-                    })
-                    .await),
-                Err(e) => Err(e),
-            };
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
-                match mapped {
+                match result.map(|emojis| {
+                    emojis
+                        .into_iter()
+                        .filter_map(emoji_from_proto)
+                        .collect::<Vec<_>>()
+                }) {
                     Ok(emojis) => {
                         this.by_id.clear();
                         this.order.clear();

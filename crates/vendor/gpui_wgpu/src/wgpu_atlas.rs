@@ -127,6 +127,25 @@ impl PlatformAtlas for WgpuAtlas {
         }
     }
 
+    fn replace(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        {
+            let mut lock = self.0.lock();
+            if let Some(tile) = lock.tiles_by_key.get(key).copied()
+                && tile.bounds.size == size
+            {
+                lock.upload_texture(tile.texture_id, tile.bounds, bytes);
+                return Ok(());
+            }
+        }
+        self.remove(key);
+        Ok(())
+    }
+
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 

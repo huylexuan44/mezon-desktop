@@ -19,6 +19,27 @@ pub(crate) fn queue_atlas_drop(cx: &mut App, image: Arc<RenderImage>) {
     cx.default_global::<PendingAtlasDrops>().0.push(image);
 }
 
+#[derive(Default)]
+struct PendingAtlasReplaces(Vec<Arc<RenderImage>>);
+impl Global for PendingAtlasReplaces {}
+
+#[cfg_attr(target_os = "macos", expect(dead_code))]
+pub(crate) fn queue_atlas_replace(cx: &mut App, image: Arc<RenderImage>) {
+    let pending = &mut cx.default_global::<PendingAtlasReplaces>().0;
+    if let Some(existing) = pending.iter_mut().find(|queued| queued.id == image.id) {
+        *existing = image;
+    } else {
+        pending.push(image);
+    }
+}
+
+pub fn flush_atlas_replaces(window: &mut Window, cx: &mut App) {
+    let pending = std::mem::take(&mut cx.default_global::<PendingAtlasReplaces>().0);
+    for image in pending {
+        window.update_render_image(&image).ok();
+    }
+}
+
 const RELIEF_FLUSH_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn flush_atlas_drops(window: &mut Window, cx: &mut App) {
@@ -334,7 +355,14 @@ struct CacheEntry {
     /// The sweep epoch in which this entry was last requested.
     touched_epoch: u64,
     last_used: Instant,
+    /// When a transient load failure was first observed. Oversized-image
+    /// rejections (`bytes == Some(0)`) are deterministic and never retried;
+    /// transient failures are retried once per [`NEGATIVE_CACHE_RETRY_TTL`]
+    /// while the image keeps being requested.
+    failed_at: Option<Instant>,
 }
+
+const NEGATIVE_CACHE_RETRY_TTL: Duration = Duration::from_secs(15);
 
 /// Sum of the decoded byte size across all frames of an image.
 fn image_bytes(image: &RenderImage) -> u64 {
@@ -662,8 +690,10 @@ impl LruImageCache {
     }
 
     /// Evict least-recently-used entries until both the item-count and
-    /// byte budgets are satisfied. The most-recently-used entry (back of the
-    /// map) is never evicted, so the image requested this frame stays resident.
+    /// byte budgets are satisfied. The victim is the entry with the oldest
+    /// `last_used` timestamp (map order no longer tracks recency); the final
+    /// remaining entry is never evicted, so the image requested this frame
+    /// stays resident.
     fn lru_index(&self) -> Option<usize> {
         self.cache
             .values()
@@ -700,6 +730,28 @@ impl LruImageCache {
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let hash = hash(resource);
+
+        if self.cache.contains_key(&hash) {
+            let retry_failed = {
+                let entry = self.cache.get_mut(&hash).expect("checked contains_key");
+                let transient_failure =
+                    entry.bytes.is_none() && matches!(entry.item.get(), Some(Err(_)));
+                if transient_failure {
+                    match entry.failed_at {
+                        Some(failed_at) => failed_at.elapsed() >= NEGATIVE_CACHE_RETRY_TTL,
+                        None => {
+                            entry.failed_at = Some(Instant::now());
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            };
+            if retry_failed {
+                self.cache.shift_remove(&hash);
+            }
+        }
 
         if self.cache.contains_key(&hash) {
             self.metrics.hits.fetch_add(1, Ordering::Relaxed);
@@ -792,6 +844,7 @@ impl LruImageCache {
                 bytes: None,
                 touched_epoch: self.epoch,
                 last_used: Instant::now(),
+                failed_at: None,
             },
         );
         self.evict_to_budget(window, cx);
@@ -1109,6 +1162,23 @@ fn decode_static_image(
     Ok(image::load_from_memory_with_format(bytes, format)?)
 }
 
+const MAX_DECODE_PIXELS: u64 = 80_000_000;
+
+fn reject_oversized_canvas(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Result<(), ImageCacheError> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    reader.set_format(format);
+    let (width, height) = reader.into_dimensions()?;
+    if width as u64 * height as u64 > MAX_DECODE_PIXELS {
+        return Err(ImageCacheError::Asset(
+            format!("image dimensions too large to decode: {width}x{height}").into(),
+        ));
+    }
+    Ok(())
+}
+
 fn decode_message_image(
     bytes: &[u8],
     animation_max_px: u32,
@@ -1117,23 +1187,37 @@ fn decode_message_image(
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     use image::AnimationDecoder as _;
     let format = image::guess_format(bytes)?;
+    reject_oversized_canvas(bytes, format)?;
     let frames = match format {
         image::ImageFormat::Gif => {
             let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
-            downscaled_animation_frames(
+            match downscaled_animation_frames(
                 decoder.into_frames(),
                 animation_max_px,
                 animation_byte_budget,
-            )?
+            ) {
+                Ok(frames) => frames,
+                Err(_) => {
+                    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+                    first_frame_fallback(decoder, static_max_px)?
+                }
+            }
         }
         image::ImageFormat::WebP => {
             let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
             if decoder.has_animation() {
-                downscaled_animation_frames(
+                match downscaled_animation_frames(
                     decoder.into_frames(),
                     animation_max_px,
                     animation_byte_budget,
-                )?
+                ) {
+                    Ok(frames) => frames,
+                    Err(_) => {
+                        let decoder =
+                            image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+                        first_frame_fallback(decoder, static_max_px)?
+                    }
+                }
             } else {
                 vec![downscaled_static_frame(
                     decode_static_image(bytes, format, static_max_px)?,
@@ -1147,6 +1231,24 @@ fn decode_message_image(
         )],
     };
     Ok(Arc::new(RenderImage::new(frames)))
+}
+
+fn first_frame_fallback<'a, D>(
+    decoder: D,
+    static_max_px: u32,
+) -> Result<Vec<image::Frame>, ImageCacheError>
+where
+    D: image::AnimationDecoder<'a>,
+{
+    let frame = decoder
+        .into_frames()
+        .next()
+        .ok_or_else(|| ImageCacheError::Asset("animation has no frames".into()))??;
+    let downscaled = downscaled_static_frame(
+        image::DynamicImage::ImageRgba8(frame.into_buffer()),
+        static_max_px,
+    );
+    Ok(vec![downscaled])
 }
 
 fn message_path_maybe_animated(path: &std::path::Path) -> bool {

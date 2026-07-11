@@ -75,7 +75,10 @@ pub struct Arena {
     valid: Rc<Cell<bool>>,
     current_chunk_index: usize,
     chunk_size: NonZeroUsize,
+    low_use_clears: u32,
 }
+
+const ARENA_SHRINK_AFTER_CLEARS: u32 = 600;
 
 impl Drop for Arena {
     fn drop(&mut self) {
@@ -92,6 +95,7 @@ impl Arena {
             valid: Rc::new(Cell::new(true)),
             current_chunk_index: 0,
             chunk_size,
+            low_use_clears: 0,
         }
     }
 
@@ -105,6 +109,19 @@ impl Arena {
         self.elements.clear();
         for chunk_index in 0..=self.current_chunk_index {
             self.chunks[chunk_index].reset();
+        }
+        // mezon vendor edit: the arena grew to its all-time high-water mark and never
+        // released chunks. After a sustained run of frames using less than half the
+        // retained chunks, drop the unused tail (keeping 2x headroom over actual use).
+        let used_chunks = self.current_chunk_index + 1;
+        if self.chunks.len() > used_chunks * 2 {
+            self.low_use_clears += 1;
+            if self.low_use_clears >= ARENA_SHRINK_AFTER_CLEARS {
+                self.chunks.truncate(used_chunks * 2);
+                self.low_use_clears = 0;
+            }
+        } else {
+            self.low_use_clears = 0;
         }
         self.current_chunk_index = 0;
     }

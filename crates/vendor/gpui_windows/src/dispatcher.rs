@@ -63,11 +63,30 @@ impl WindowsDispatcher {
     }
 
     fn dispatch_on_threadpool_after(&self, runnable: RunnableVariant, duration: Duration) {
+        // mezon vendor edit: hold 1ms system timer resolution while a short timer is
+        // pending, else 30Hz media pumps quantize to the ~15.6ms tick (fire at 31-47ms).
+        // Scoped to short timers so long TTL timers don't pin 1ms resolution forever.
+        // The guard restores resolution on every path: handler completion, handler
+        // panic (unwind drop), and CreateTimer failure (handler never runs, closure
+        // dropped with the moved guard).
+        struct TimerResolutionRestore;
+        impl Drop for TimerResolutionRestore {
+            fn drop(&mut self) {
+                unsafe { timeEndPeriod(1) };
+            }
+        }
+        const HIGH_RES_THRESHOLD: Duration = Duration::from_millis(100);
+        let resolution_guard = (duration < HIGH_RES_THRESHOLD).then(|| {
+            unsafe { timeBeginPeriod(1) };
+            TimerResolutionRestore
+        });
         let handler = {
             let mut task_wrapper = Some(runnable);
+            let mut resolution_guard = resolution_guard;
             TimerElapsedHandler::new(move |_| {
                 let runnable = task_wrapper.take().unwrap();
                 Self::execute_runnable(runnable);
+                resolution_guard.take();
                 Ok(())
             })
         };

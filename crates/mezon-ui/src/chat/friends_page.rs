@@ -108,6 +108,7 @@ pub struct FriendsPage {
     activity_scroll: UniformListScrollHandle,
     avatar_cache: Entity<LruImageCache>,
     open_menu: Option<(UserId, Point<Pixels>)>,
+    cached_locale: SharedString,
     _subs: Vec<Subscription>,
 }
 
@@ -201,14 +202,19 @@ impl FriendsPage {
                 this.clear_transient_state(cx);
             }
         }));
-        subs.push(cx.observe(&settings, |this, _, cx| {
-            this.rebuild(cx);
-            cx.notify();
+        subs.push(cx.observe(&settings, |this, settings, cx| {
+            let locale = SharedString::from(settings.read(cx).language.clone());
+            if locale != this.cached_locale {
+                this.cached_locale = locale;
+                this.rebuild(cx);
+                cx.notify();
+            }
         }));
 
         FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
         ActivityStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
 
+        let initial_locale = settings.read(cx).language.clone();
         let mut this = Self {
             settings,
             selected_tab: FriendsTab::All,
@@ -224,6 +230,7 @@ impl FriendsPage {
             activity_scroll: UniformListScrollHandle::new(),
             avatar_cache,
             open_menu: None,
+            cached_locale: SharedString::from(initial_locale),
             _subs: subs,
         };
         this.rebuild(cx);

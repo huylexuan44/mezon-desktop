@@ -76,6 +76,8 @@ pub struct VideoActivation {
 #[derive(Default)]
 struct SharedPlayback {
     frame: Option<VideoFrame>,
+    #[cfg(not(target_os = "macos"))]
+    stream_image_id: Option<gpui::ImageId>,
     current_time: f64,
     duration: f64,
     playing: bool,
@@ -198,6 +200,7 @@ impl VideoPlayerView {
             playing = false;
         }
         let new_frame = if playing { player.copy_frame() } else { None };
+        let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, window));
         let previous = {
             let mut shared = self.shared.borrow_mut();
             shared.failed = failed;
@@ -207,7 +210,7 @@ impl VideoPlayerView {
             shared.muted = muted;
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
-        Self::release_frame(previous, Some(window), cx);
+        Self::release_stale_frame(previous, &self.shared, window, cx);
         self.refresh_time_label(playing, current_time, duration);
         if was_playing && !playing {
             cx.notify();
@@ -411,6 +414,64 @@ impl VideoPlayerView {
             "f" if !self.theater => self.open_fullscreen(window, cx),
             "escape" if self.theater => self.exit_theater(cx),
             _ => {}
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn adopt_frame(
+        _shared: &Rc<RefCell<SharedPlayback>>,
+        frame: VideoFrame,
+        _window: &mut Window,
+    ) -> VideoFrame {
+        frame
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn adopt_frame(
+        shared: &Rc<RefCell<SharedPlayback>>,
+        frame: VideoFrame,
+        window: &mut Window,
+    ) -> VideoFrame {
+        let stream_id = shared.borrow().stream_image_id;
+        match stream_id {
+            None => {
+                shared.borrow_mut().stream_image_id = Some(frame.id);
+                frame
+            }
+            Some(id) => match std::sync::Arc::try_unwrap(frame) {
+                Ok(image) => {
+                    let rebranded = std::sync::Arc::new(image.with_id(id));
+                    window.update_render_image(&rebranded).ok();
+                    rebranded
+                }
+                Err(still_shared) => {
+                    shared.borrow_mut().stream_image_id = Some(still_shared.id);
+                    still_shared
+                }
+            },
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn release_stale_frame(
+        _previous: Option<VideoFrame>,
+        _shared: &Rc<RefCell<SharedPlayback>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn release_stale_frame(
+        previous: Option<VideoFrame>,
+        shared: &Rc<RefCell<SharedPlayback>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = previous
+            && shared.borrow().stream_image_id != Some(previous.id)
+        {
+            cx.drop_image(previous, Some(window));
         }
     }
 

@@ -144,7 +144,7 @@ impl GifStore {
     }
 
     fn new(cx: &mut Context<Self>) -> Self {
-        let mut store = Self {
+        Self {
             categories: Vec::new(),
             featured: Vec::new(),
             search_results: Vec::new(),
@@ -154,9 +154,7 @@ impl GifStore {
             search_generation: 0,
             config: TenorConfig::from_app(cx),
             _base_task: None,
-        };
-        store.fetch_base(cx);
-        store
+        }
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
@@ -220,10 +218,11 @@ impl GifStore {
                     return;
                 }
                 this.searching = false;
-                if let Some(results) = results {
-                    this.search_results = results;
-                    cx.emit(GifEvent::Changed);
+                match results {
+                    Some(results) => this.search_results = results,
+                    None => this.search_results.clear(),
                 }
+                cx.emit(GifEvent::Changed);
                 cx.notify();
             });
         })

@@ -253,6 +253,8 @@ struct ImgState {
     frame_index: usize,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
+    next_frame_due: Option<Instant>,
+    next_frame_wakeup: Option<Task<()>>,
 }
 
 /// The image layout state between frames
@@ -291,6 +293,8 @@ impl Element for Img {
                     frame_index: 0,
                     last_frame_time: None,
                     started_loading: None,
+                    next_frame_due: None,
+                    next_frame_wakeup: None,
                 })
             });
 
@@ -379,7 +383,50 @@ impl Element for Img {
                                 && data.frame_count() > 1
                                 && window.is_window_active()
                             {
-                                window.request_animation_frame();
+                                // mezon vendor edit: an animating img used to request an
+                                // animation frame on EVERY layout, redrawing its owning
+                                // view at display refresh rate regardless of the image's
+                                // own frame delays. Schedule a wakeup for the actual next
+                                // frame deadline instead; fall back to RAF when the next
+                                // frame is (nearly) due.
+                                match state
+                                    .as_ref()
+                                    .and_then(|state| state.last_frame_time)
+                                    .map(|last| last + Duration::from(data.delay(frame_index)))
+                                {
+                                    Some(due_at)
+                                        if due_at
+                                            .checked_duration_since(Instant::now())
+                                            .is_some_and(|remaining| {
+                                                remaining > Duration::from_millis(2)
+                                            }) =>
+                                    {
+                                        if let Some(state) = &mut state
+                                            && state.next_frame_due != Some(due_at)
+                                        {
+                                            state.next_frame_due = Some(due_at);
+                                            let current_view = window.current_view();
+                                            state.next_frame_wakeup =
+                                                Some(window.spawn(cx, async move |cx| {
+                                                    let remaining = due_at
+                                                        .saturating_duration_since(Instant::now());
+                                                    cx.background_executor()
+                                                        .timer(remaining)
+                                                        .await;
+                                                    cx.update(move |_, cx| {
+                                                        cx.notify(current_view);
+                                                    })
+                                                    .ok();
+                                                }));
+                                        }
+                                    }
+                                    _ => {
+                                        if let Some(state) = &mut state {
+                                            state.next_frame_due = None;
+                                        }
+                                        window.request_animation_frame();
+                                    }
+                                }
                             }
                         }
                         Some(_err) => {

@@ -188,6 +188,7 @@ impl ClanSidebar {
                     badge_count: clan.badge_count,
                     has_unread: clan.has_unread,
                     muted: clan.muted,
+                    active: clan_list_view.is_active_clan(clan.id),
                 }
             })
             .collect();

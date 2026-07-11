@@ -137,29 +137,22 @@ impl StickerStore {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api.list_stickers_by_user_id().await;
-            let mapped = match result {
-                Ok(stickers) => Ok(cx
-                    .background_executor()
-                    .spawn(async move {
-                        let mut sounds = Vec::new();
-                        let mut mapped_stickers = Vec::new();
-                        for proto in stickers {
-                            if proto.media_type == AUDIO_MEDIA_TYPE {
-                                if let Some(sound) = sound_from_proto(proto) {
-                                    sounds.push(sound);
-                                }
-                            } else if let Some(sticker) = sticker_from_proto(proto) {
-                                mapped_stickers.push(sticker);
-                            }
-                        }
-                        (mapped_stickers, sounds)
-                    })
-                    .await),
-                Err(e) => Err(e),
-            };
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
-                match mapped {
+                match result.map(|stickers| {
+                    let mut sounds = Vec::new();
+                    let mut mapped_stickers = Vec::new();
+                    for proto in stickers {
+                        if proto.media_type == AUDIO_MEDIA_TYPE {
+                            if let Some(sound) = sound_from_proto(proto) {
+                                sounds.push(sound);
+                            }
+                        } else if let Some(sticker) = sticker_from_proto(proto) {
+                            mapped_stickers.push(sticker);
+                        }
+                    }
+                    (mapped_stickers, sounds)
+                }) {
                     Ok((mapped_stickers, sounds)) => {
                         this.by_id.clear();
                         this.order.clear();

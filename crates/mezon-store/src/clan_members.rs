@@ -12,8 +12,6 @@ use crate::clan::{ClanEvent, ClanList};
 use crate::presence::PresenceStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
-const MAX_CACHED_CLANS: usize = 16;
-
 const ONLINE_FETCH_LIMIT: i32 = 500;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -132,7 +130,11 @@ impl ClanMembersStore {
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
 
         Self {
-            cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
+            cache: // Unbounded on purpose: BadgeService::is_mention reads member(clan_id, uid)
+        // role_ids for EVERY incoming message in EVERY clan through an immutable
+        // read that cannot refresh recency — bounding this cache evicts background
+        // clans and silently kills their role-mention badges (>N clans).
+        KeyedCache::new(None),
             loading: HashSet::new(),
             api,
             _clan_sub: clan_sub,

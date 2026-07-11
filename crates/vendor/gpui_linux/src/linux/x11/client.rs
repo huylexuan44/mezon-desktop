@@ -614,6 +614,35 @@ impl X11Client {
                                 }
                                 last_keymap_change_event = Some(event);
                             }
+                            // mezon vendor edit: coalesce runs of XI2 motion events with
+                            // the same physical source/window/valuator mask. XI2 scroll
+                            // valuators are absolute accumulators, so a run only needs its
+                            // FIRST event (establishes the per-source baseline when scroll
+                            // state is fresh) and its LATEST event (carries the cumulative
+                            // value); intermediate events are redundant. Keyed by sourceid
+                            // because scroll state lookup uses sourceid — two physical
+                            // devices sharing a master must never merge.
+                            Event::XinputMotion(motion) => {
+                                if let Some(release_event) = last_key_release.take() {
+                                    events.push(release_event);
+                                }
+                                let same_run = |event: &Event| {
+                                    matches!(
+                                        event,
+                                        Event::XinputMotion(prev)
+                                            if prev.sourceid == motion.sourceid
+                                                && prev.event == motion.event
+                                                && prev.valuator_mask == motion.valuator_mask
+                                    )
+                                };
+                                let len = events.len();
+                                if len >= 2 && same_run(&events[len - 1]) && same_run(&events[len - 2])
+                                {
+                                    events[len - 1] = Event::XinputMotion(motion);
+                                } else {
+                                    events.push(Event::XinputMotion(motion));
+                                }
+                            }
                             _ => {
                                 if let Some(release_event) = last_key_release.take() {
                                     events.push(release_event);

@@ -103,6 +103,28 @@ impl PlatformAtlas for DirectXAtlas {
         }
     }
 
+    fn replace(
+        &self,
+        key: &AtlasKey,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        {
+            let lock = self.0.lock();
+            if let Some(tile) = lock.tiles_by_key.get(key)
+                && tile.bounds.size == size
+            {
+                let texture = lock
+                    .texture(tile.texture_id)
+                    .ok_or_else(|| anyhow::anyhow!("texture missing for replace"))?;
+                texture.upload(&lock.device_context, tile.bounds, bytes);
+                return Ok(());
+            }
+        }
+        self.remove(key);
+        Ok(())
+    }
+
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 

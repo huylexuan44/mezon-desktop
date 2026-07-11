@@ -56,13 +56,20 @@ pub(crate) unsafe fn new_renderer(
 pub(crate) struct InstanceBufferPool {
     buffer_size: usize,
     buffers: Vec<metal::Buffer>,
+    peak_since_check: usize,
+    frames_since_check: u32,
 }
+
+const MIN_INSTANCE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+const SHRINK_CHECK_FRAMES: u32 = 600;
 
 impl Default for InstanceBufferPool {
     fn default() -> Self {
         Self {
-            buffer_size: 2 * 1024 * 1024,
+            buffer_size: MIN_INSTANCE_BUFFER_SIZE,
             buffers: Vec::new(),
+            peak_since_check: 0,
+            frames_since_check: 0,
         }
     }
 }
@@ -104,6 +111,23 @@ impl InstanceBufferPool {
     pub(crate) fn release(&mut self, buffer: InstanceBuffer) {
         if buffer.size == self.buffer_size {
             self.buffers.push(buffer.metal_buffer)
+        }
+    }
+
+    // mezon vendor edit: the pool doubled on overflow (up to 256MB) and NEVER shrank,
+    // so one huge frame pinned ~3x that size for the app lifetime. After a sustained
+    // window of frames whose peak usage fits in a quarter of the current size, halve it.
+    pub(crate) fn record_frame_usage(&mut self, used: usize) {
+        self.peak_since_check = self.peak_since_check.max(used);
+        self.frames_since_check += 1;
+        if self.frames_since_check >= SHRINK_CHECK_FRAMES {
+            let halved = (self.buffer_size / 2).max(MIN_INSTANCE_BUFFER_SIZE);
+            if halved < self.buffer_size && self.peak_since_check <= halved / 2 {
+                self.buffer_size = halved;
+                self.buffers.clear();
+            }
+            self.frames_since_check = 0;
+            self.peak_since_check = 0;
         }
     }
 }
@@ -1000,6 +1024,10 @@ impl MetalRenderer {
                 length: instance_offset as NSUInteger,
             });
         }
+
+        self.instance_buffer_pool
+            .lock()
+            .record_frame_usage(instance_offset);
 
         Ok(command_buffer.to_owned())
     }

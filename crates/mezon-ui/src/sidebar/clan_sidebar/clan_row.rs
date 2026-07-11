@@ -22,6 +22,7 @@ pub(super) struct ClanRow {
     pub(super) badge_count: u32,
     pub(super) has_unread: bool,
     pub(super) muted: bool,
+    pub active: bool,
 }
 
 fn on_clan_click(
@@ -91,7 +92,7 @@ pub(super) fn render_clan_row(
 
     let clan_id = clan.id.clone();
     let prefetch_clan_id = clan.id_num;
-    let is_active = clan_list_handle.read(cx).is_active_clan(clan.id_num) && !dm_active;
+    let is_active = clan.active && !dm_active;
     let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && clan.badge_count > 0 && !clan.muted;
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
     let badge_count = clan.badge_count;

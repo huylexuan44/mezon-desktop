@@ -137,6 +137,7 @@ const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 struct SettingsSaver {
     task: Option<gpui::Task<()>>,
     dirty: bool,
+    entity_id: Option<gpui::EntityId>,
 }
 impl gpui::Global for SettingsSaver {}
 
@@ -146,6 +147,11 @@ impl gpui::Global for SettingsSaver {}
 /// and the snapshot is taken at write time so the latest state always wins.
 pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::App) {
     let saver = cx.default_global::<SettingsSaver>();
+    debug_assert!(
+        saver.entity_id.is_none_or(|id| id == settings.entity_id()),
+        "schedule_settings_save called with a second Settings entity; the in-flight saver only snapshots the first"
+    );
+    saver.entity_id = Some(settings.entity_id());
     saver.dirty = true;
     if saver.task.is_some() {
         return;

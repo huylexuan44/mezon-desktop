@@ -630,6 +630,7 @@ struct ScrollbarState<T: ScrollableHandle = ScrollHandle> {
     style: ScrollbarStyle,
     mouse_in_parent: bool,
     last_prepaint_state: Option<ScrollbarPrepaintState>,
+    hide_deadline: Option<Instant>,
     _auto_hide_task: Option<Task<()>>,
 }
 
@@ -657,6 +658,7 @@ impl<T: ScrollableHandle> ScrollbarState<T> {
             show_state: VisibilityState::from_behavior(show_behavior),
             mouse_in_parent: true,
             last_prepaint_state: None,
+            hide_deadline: None,
             _auto_hide_task: None,
         }
     }
@@ -670,19 +672,39 @@ impl<T: ScrollableHandle> ScrollbarState<T> {
     }
 
     /// Schedules a scrollbar auto hide if no auto hide is currently in progress yet.
+    /// mezon vendor edit: the hide timer is deadline-based — `show_scrollbars` used to
+    /// cancel + respawn this task every frame during active scroll (one executor task
+    /// allocation per frame); now it only pushes `hide_deadline` forward and the single
+    /// task re-sleeps until the final deadline is reached.
     fn schedule_auto_hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.visible() && self.show_behavior == ShowBehavior::Autohide {
+            self.hide_deadline = Some(Instant::now() + SCROLLBAR_HIDE_DELAY_INTERVAL);
+        }
         if self._auto_hide_task.is_none() {
             self._auto_hide_task = (self.visible() && self.show_behavior == ShowBehavior::Autohide)
                 .then(|| {
                     cx.spawn_in(window, async move |scrollbar_state, cx| {
-                        cx.background_executor()
-                            .timer(SCROLLBAR_HIDE_DELAY_INTERVAL)
-                            .await;
+                        loop {
+                            let Ok(remaining) = scrollbar_state.read_with(cx, |state, _| {
+                                state.hide_deadline.and_then(|deadline| {
+                                    deadline.checked_duration_since(Instant::now())
+                                })
+                            }) else {
+                                return;
+                            };
+                            match remaining {
+                                Some(remaining) => {
+                                    cx.background_executor().timer(remaining).await
+                                }
+                                None => break,
+                            }
+                        }
                         scrollbar_state
                             .update(cx, |state, cx| {
                                 if state.thumb_state == ThumbState::Inactive {
                                     state.set_visibility(VisibilityState::for_autohide(), cx);
                                 }
+                                state.hide_deadline = None;
                                 state._auto_hide_task.take();
                             })
                             .log_err();
@@ -694,7 +716,6 @@ impl<T: ScrollableHandle> ScrollbarState<T> {
     fn show_scrollbars(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let visibility = self.show_state.toggle_visible(self.show_behavior);
         self.set_visibility(visibility, cx);
-        self._auto_hide_task.take();
         self.schedule_auto_hide(window, cx);
     }
 
@@ -802,6 +823,7 @@ impl<T: ScrollableHandle> ScrollbarState<T> {
                 self.schedule_auto_hide(window, cx);
             } else {
                 self.set_visibility(self.show_state.toggle_visible(self.show_behavior), cx);
+                self.hide_deadline = None;
                 self._auto_hide_task.take();
             }
             self.thumb_state = state;

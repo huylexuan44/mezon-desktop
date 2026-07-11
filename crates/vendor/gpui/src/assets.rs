@@ -54,6 +54,16 @@ impl PartialEq for RenderImage {
     }
 }
 
+impl RenderImage {
+    /// mezon vendor edit: rebrand this image with an existing [`ImageId`] so a
+    /// streaming producer (video/GIF pump) can reuse ONE atlas tile across frames
+    /// via [`Window::update_render_image`] instead of allocate/upload/remove per tick.
+    pub fn with_id(mut self, id: ImageId) -> Self {
+        self.id = id;
+        self
+    }
+}
+
 impl Eq for RenderImage {}
 
 impl RenderImage {

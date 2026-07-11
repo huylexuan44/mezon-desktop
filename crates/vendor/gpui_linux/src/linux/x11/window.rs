@@ -722,7 +722,12 @@ impl X11WindowState {
                     // If the window appearance changes, then the renderer will get updated
                     // too
                     transparent: false,
-                    preferred_present_mode: None,
+                    // mezon vendor edit: match Wayland (window.rs:351). With None the
+                    // renderer falls back to blocking Fifo — get_current_texture() can
+                    // stall the single calloop thread (which also drains X11 input) for
+                    // a full vsync. Mailbox is filtered against surface caps and still
+                    // falls back to Fifo when unsupported.
+                    preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
                 };
                 WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
             };

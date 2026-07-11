@@ -646,6 +646,7 @@ impl Drop for ThreadTimings {
 }
 
 #[doc(hidden)]
+#[cfg(feature = "profiler")]
 pub fn update_running_task(spawned: SpawnTime, location: &'static std::panic::Location<'_>) {
     THREAD_TIMINGS.with(|timings| {
         timings.lock().update_running_task(spawned, location);
@@ -653,12 +654,23 @@ pub fn update_running_task(spawned: SpawnTime, location: &'static std::panic::Lo
 }
 
 #[doc(hidden)]
+#[cfg(not(feature = "profiler"))]
+#[inline(always)]
+pub fn update_running_task(_spawned: SpawnTime, _location: &'static std::panic::Location<'_>) {}
+
+#[doc(hidden)]
+#[cfg(feature = "profiler")]
 pub fn save_task_timing() {
     let yielded_at = YieldTime(Instant::now());
     THREAD_TIMINGS.with(|timings| {
         timings.lock().save_task_timing(yielded_at);
     });
 }
+
+#[doc(hidden)]
+#[cfg(not(feature = "profiler"))]
+#[inline(always)]
+pub fn save_task_timing() {}
 
 #[doc(hidden)]
 pub fn get_current_thread_task_timings(include_running: TasksIncluded) -> ThreadTaskTimings {

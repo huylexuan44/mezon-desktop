@@ -144,6 +144,8 @@ pub struct WgpuRenderer {
     path_globals_offset: u64,
     gamma_offset: u64,
     instance_buffer_capacity: u64,
+    instance_peak_since_check: u64,
+    instance_frames_since_check: u32,
     max_buffer_size: u64,
     storage_buffer_alignment: u64,
     rendering_params: RenderingParameters,
@@ -474,6 +476,8 @@ impl WgpuRenderer {
             path_globals_offset,
             gamma_offset,
             instance_buffer_capacity: initial_instance_buffer_capacity,
+            instance_peak_since_check: 0,
+            instance_frames_since_check: 0,
             max_buffer_size,
             storage_buffer_alignment,
             rendering_params,
@@ -1331,8 +1335,35 @@ impl WgpuRenderer {
                 .queue
                 .submit(std::iter::once(encoder.finish()));
             frame.present();
+            self.maybe_shrink_instance_buffer(instance_offset);
             return true;
         }
+    }
+
+    // mezon vendor edit: mirror of the growth path — after a sustained window of
+    // frames whose usage fits in a quarter of the capacity, halve the buffer back
+    // (2MiB floor) instead of pinning the all-time peak forever.
+    fn maybe_shrink_instance_buffer(&mut self, used: u64) {
+        const MIN_INSTANCE_BUFFER_CAPACITY: u64 = 2 * 1024 * 1024;
+        const SHRINK_CHECK_FRAMES: u32 = 600;
+        self.instance_peak_since_check = self.instance_peak_since_check.max(used);
+        self.instance_frames_since_check += 1;
+        if self.instance_frames_since_check < SHRINK_CHECK_FRAMES {
+            return;
+        }
+        let halved = (self.instance_buffer_capacity / 2).max(MIN_INSTANCE_BUFFER_CAPACITY);
+        if halved < self.instance_buffer_capacity && self.instance_peak_since_check <= halved / 2 {
+            let resources = self.resources_mut();
+            resources.instance_buffer = resources.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("instance_buffer"),
+                size: halved,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.instance_buffer_capacity = halved;
+        }
+        self.instance_peak_since_check = 0;
+        self.instance_frames_since_check = 0;
     }
 
     fn draw_quads(

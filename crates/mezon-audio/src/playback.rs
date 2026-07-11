@@ -74,7 +74,11 @@ impl Iterator for SharedSamplesSource {
 
 impl Source for SharedSamplesSource {
     fn current_span_len(&self) -> Option<usize> {
-        Some(self.samples.len().saturating_sub(self.position))
+        if self.position >= self.samples.len() {
+            Some(0)
+        } else {
+            Some(self.samples.len())
+        }
     }
 
     fn channels(&self) -> NonZeroU16 {
@@ -87,6 +91,14 @@ impl Source for SharedSamplesSource {
 
     fn total_duration(&self) -> Option<Duration> {
         Some(Duration::from_secs_f64(self.duration))
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        let channels = self.channels.get() as usize;
+        let frame = (pos.as_secs_f64() * self.sample_rate.get() as f64) as usize;
+        let sample = (frame * channels).min(self.samples.len());
+        self.position = sample - sample % channels;
+        Ok(())
     }
 }
 

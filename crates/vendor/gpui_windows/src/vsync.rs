@@ -8,6 +8,7 @@ use util::ResultExt;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo},
+    Media::{timeBeginPeriod, timeEndPeriod},
     System::Performance::QueryPerformanceFrequency,
 };
 
@@ -50,7 +51,12 @@ impl VSyncProvider {
         // but it shouldn't happen often.
         if !wait_succeeded || elapsed < VSYNC_INTERVAL_THRESHOLD {
             log::trace!("VSyncProvider::wait_for_vsync() took less time than expected");
+            // mezon vendor edit: plain Sleep() quantizes to the ~15.6ms system tick and
+            // overshoots (a hitch on the first frame after idle). Raise resolution to
+            // 1ms around this fallback sleep so scroll-resume frames land on time.
+            unsafe { timeBeginPeriod(1) };
             std::thread::sleep(self.interval);
+            unsafe { timeEndPeriod(1) };
         }
     }
 }

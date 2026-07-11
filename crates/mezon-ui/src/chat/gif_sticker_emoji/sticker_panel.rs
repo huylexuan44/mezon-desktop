@@ -184,7 +184,14 @@ impl StickerPanel {
 
     fn sync_list(&mut self) {
         if self.list_dirty || self.list_state.item_count() != self.rows.len() {
+            let scroll = self.list_state.logical_scroll_top();
             self.list_state.reset(self.rows.len());
+            if !self.rows.is_empty() && scroll.item_ix > 0 {
+                self.list_state.scroll_to(gpui::ListOffset {
+                    item_ix: scroll.item_ix.min(self.rows.len() - 1),
+                    offset_in_item: scroll.offset_in_item,
+                });
+            }
             self.list_dirty = false;
         }
     }

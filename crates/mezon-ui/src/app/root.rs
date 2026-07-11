@@ -196,6 +196,7 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!("RootView");
         crate::image_cache::flush_atlas_drops(window, cx);
+        crate::image_cache::flush_atlas_replaces(window, cx);
         let locale = self.cached_locale.as_str();
         let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
         let theme = cx.theme();

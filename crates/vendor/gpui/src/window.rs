@@ -2722,7 +2722,7 @@ impl Window {
             handle,
             // Try moving window invalidator into the Window
             self.invalidator.clone(),
-            &entities,
+            entities.set(),
         );
         let mut entities_ref = cx.entities.accessed_entities.get_mut();
         mem::swap(&mut entities, entities_ref.deref_mut());
@@ -4129,6 +4129,27 @@ impl Window {
             };
 
             self.sprite_atlas.remove(&params.clone().into());
+        }
+
+        Ok(())
+    }
+
+    /// mezon vendor edit: push fresh bytes for a streaming image (video/GIF frame)
+    /// whose [`ImageId`] is stable across frames. Backends that support it write the
+    /// existing atlas tile in place; others drop the tile so the next paint re-creates
+    /// it — either way the per-tick allocate/upload/remove churn of a fresh image id
+    /// is avoided.
+    pub fn update_render_image(&mut self, data: &Arc<RenderImage>) -> Result<()> {
+        for frame_index in 0..data.frame_count() {
+            let params = RenderImageParams {
+                image_id: data.id,
+                frame_index,
+            };
+            let bytes = data
+                .as_bytes(frame_index)
+                .context("invalid frame index in update_render_image")?;
+            self.sprite_atlas
+                .replace(&params.into(), data.size(frame_index), bytes)?;
         }
 
         Ok(())

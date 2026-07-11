@@ -184,6 +184,10 @@ pub struct ChannelMessages {
     paginate_armed_top: bool,
     paginate_armed_bottom: bool,
     last_paginate_count: usize,
+    last_paginate_edges: (
+        Option<mezon_store::MessageId>,
+        Option<mezon_store::MessageId>,
+    ),
     last_scroll_at: Option<Instant>,
     at_bottom: bool,
     last_visible_start: usize,
@@ -546,8 +550,16 @@ impl ChannelMessages {
                     cx.notify();
                 }
 
-                if event.count != this.last_paginate_count {
+                let edges = {
+                    let messages = MessagesStore::global(cx).read(cx).messages();
+                    (
+                        messages.first().map(|m| m.id),
+                        messages.last().map(|m| m.id),
+                    )
+                };
+                if event.count != this.last_paginate_count || edges != this.last_paginate_edges {
                     this.last_paginate_count = event.count;
+                    this.last_paginate_edges = edges;
                     this.paginate_armed_top = true;
                     this.paginate_armed_bottom = true;
                 }
@@ -658,6 +670,7 @@ impl ChannelMessages {
             paginate_armed_top: true,
             paginate_armed_bottom: true,
             last_paginate_count: 0,
+            last_paginate_edges: (None, None),
             last_scroll_at: None,
             at_bottom: true,
             last_visible_start: 0,

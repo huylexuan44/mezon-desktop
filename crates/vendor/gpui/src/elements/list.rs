@@ -73,6 +73,7 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
+    measured_items_scratch: VecDeque<ListItem>,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -325,6 +326,7 @@ impl ListState {
             measuring_behavior: ListMeasuringBehavior::default(),
             pending_scroll: None,
             follow_state: FollowState::default(),
+            measured_items_scratch: VecDeque::new(),
         })));
         this.splice(0..0, item_count);
         this
@@ -983,7 +985,8 @@ impl StateInner {
         cx: &mut App,
     ) -> LayoutItemsResponse {
         let old_items = self.items.clone();
-        let mut measured_items = VecDeque::new();
+        let mut measured_items = std::mem::take(&mut self.measured_items_scratch);
+        measured_items.clear();
         let mut item_layouts = VecDeque::new();
         let mut rendered_height = padding.top;
         let mut max_item_width = px(0.);
@@ -1149,7 +1152,8 @@ impl StateInner {
         let measured_range = cursor.start().0..(cursor.start().0 + measured_items.len());
         let mut cursor = old_items.cursor::<Count>(());
         let mut new_items = cursor.slice(&Count(measured_range.start), Bias::Right);
-        new_items.extend(measured_items, ());
+        new_items.extend(measured_items.drain(..), ());
+        self.measured_items_scratch = measured_items;
         cursor.seek(&Count(measured_range.end), Bias::Right);
         new_items.append(cursor.suffix(), ());
         self.items = new_items;

@@ -705,27 +705,26 @@ impl MentionInput {
         if all_in_place {
             return;
         }
-        let (edit_start, removed, inserted) = single_edit_region(&self.last_content, content);
-        let edit_old_end = edit_start + removed;
+        let (_, removed, inserted) = single_edit_region(&self.last_content, content);
         let delta = inserted as isize - removed as isize;
+        self.committed.sort_by_key(|token| (token.start, token.end));
+        let mut min_next = 0usize;
         let mut reanchored = false;
         self.committed.retain_mut(|token| {
-            if token.end <= edit_start {
-                return content.get(token.start..token.end) == Some(token.display.as_str());
+            for start in [token.start, token.start.wrapping_add_signed(delta)] {
+                if start < min_next {
+                    continue;
+                }
+                let end = start + token.display.len();
+                if content.get(start..end) == Some(token.display.as_str()) {
+                    reanchored |= token.start != start;
+                    token.start = start;
+                    token.end = end;
+                    min_next = end;
+                    return true;
+                }
             }
-            if token.start < edit_old_end {
-                return false;
-            }
-            let start = token.start.wrapping_add_signed(delta);
-            let end = start + token.display.len();
-            if content.get(start..end) == Some(token.display.as_str()) {
-                token.start = start;
-                token.end = end;
-                reanchored = true;
-                true
-            } else {
-                false
-            }
+            false
         });
         if reanchored || self.committed.len() != before {
             self.sync_ranges(cx);

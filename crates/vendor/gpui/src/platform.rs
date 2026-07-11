@@ -1072,6 +1072,16 @@ pub trait PlatformAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
+
+    /// mezon vendor edit: upload fresh bytes into the tile already keyed by `key`
+    /// (streaming video/GIF frames). The default drops the tile so the next paint
+    /// re-creates it with the new bytes; backends that can write in place without a
+    /// GPU hazard override this to skip the allocate/remove churn entirely.
+    fn replace(&self, key: &AtlasKey, size: Size<DevicePixels>, bytes: &[u8]) -> Result<()> {
+        let _ = (size, bytes);
+        self.remove(key);
+        Ok(())
+    }
 }
 
 #[doc(hidden)]

@@ -36,11 +36,59 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    shrink_state: SceneShrinkState,
+}
+
+/// mezon vendor edit: the per-frame primitive vecs only ever `clear()`, so one spike
+/// frame pinned their peak capacity for the app lifetime. Track high-water marks over
+/// a long window and shrink capacity back to 2x the observed peak.
+#[derive(Default)]
+struct SceneShrinkState {
+    frames: u32,
+    high_water: [usize; 9],
+}
+
+const SCENE_SHRINK_CHECK_FRAMES: u32 = 600;
+
+fn shrink_to_high_water<T>(vec: &mut Vec<T>, high_water: usize) {
+    let keep = high_water.max(64).saturating_mul(2);
+    if vec.capacity() > keep {
+        vec.shrink_to(keep);
+    }
 }
 
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        let state = &mut self.shrink_state;
+        let lens = [
+            self.paint_operations.len(),
+            self.shadows.len(),
+            self.quads.len(),
+            self.paths.len(),
+            self.underlines.len(),
+            self.monochrome_sprites.len(),
+            self.subpixel_sprites.len(),
+            self.polychrome_sprites.len(),
+            self.surfaces.len(),
+        ];
+        for (high_water, len) in state.high_water.iter_mut().zip(lens) {
+            *high_water = (*high_water).max(len);
+        }
+        state.frames += 1;
+        if state.frames >= SCENE_SHRINK_CHECK_FRAMES {
+            let high_water = state.high_water;
+            shrink_to_high_water(&mut self.paint_operations, high_water[0]);
+            shrink_to_high_water(&mut self.shadows, high_water[1]);
+            shrink_to_high_water(&mut self.quads, high_water[2]);
+            shrink_to_high_water(&mut self.paths, high_water[3]);
+            shrink_to_high_water(&mut self.underlines, high_water[4]);
+            shrink_to_high_water(&mut self.monochrome_sprites, high_water[5]);
+            shrink_to_high_water(&mut self.subpixel_sprites, high_water[6]);
+            shrink_to_high_water(&mut self.polychrome_sprites, high_water[7]);
+            shrink_to_high_water(&mut self.surfaces, high_water[8]);
+            self.shrink_state = SceneShrinkState::default();
+        }
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();

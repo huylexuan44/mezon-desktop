@@ -947,10 +947,16 @@ impl WindowsPlatformInner {
                     let peek_msg = |msg: &mut _, msg_kind| unsafe {
                         PeekMessageW(msg, None, 0, 0, PM_REMOVE | msg_kind).as_bool()
                     };
-                    // We need to process a paint message here as otherwise we will re-enter `run_foreground_task` before painting if we have work remaining.
+                    // We need to process paint messages here as otherwise we will re-enter `run_foreground_task` before painting if we have work remaining.
                     // The reason for this is that windows prefers custom application message processing over system messages.
-                    if peek_msg(&mut msg, PM_QS_PAINT) {
+                    // mezon vendor edit: drain pending paints (was a single `if`) so every
+                    // dirty window paints once per task batch instead of one window per
+                    // 10ms; capped so a pathological number of dirty windows cannot
+                    // starve the input drain below.
+                    let mut drained_paints = 0;
+                    while drained_paints < 8 && peek_msg(&mut msg, PM_QS_PAINT) {
                         process_message(&msg);
+                        drained_paints += 1;
                     }
                     while peek_msg(&mut msg, PM_QS_INPUT) {
                         process_message(&msg);

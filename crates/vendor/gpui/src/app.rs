@@ -984,13 +984,14 @@ impl App {
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let accessed_entities_start = self.entities.accessed_entities.get_mut().clone();
+        let watermark = self.entities.accessed_entities.get_mut().watermark();
         let result = callback(self);
         let entities_accessed_in_callback = self
             .entities
             .accessed_entities
             .get_mut()
-            .difference(&accessed_entities_start)
+            .since(watermark)
+            .iter()
             .copied()
             .collect::<FxHashSet<EntityId>>();
         (result, entities_accessed_in_callback)

@@ -1000,9 +1000,21 @@ impl ChatLayout {
             return;
         }
         self._voice_frame_pump = Some(cx.spawn(async move |this, cx| {
+            let mut last_seq = 0u64;
             loop {
                 cx.background_executor().timer(VOICE_FRAME_INTERVAL).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let stepped = this.update(cx, |_, cx| {
+                    let seq = VoiceStore::global(cx)
+                        .read(cx)
+                        .frame_store()
+                        .map(|store| store.publish_seq())
+                        .unwrap_or(0);
+                    if seq != last_seq {
+                        last_seq = seq;
+                        cx.notify();
+                    }
+                });
+                if stepped.is_err() {
                     break;
                 }
             }
