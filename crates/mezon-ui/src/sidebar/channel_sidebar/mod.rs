@@ -91,7 +91,7 @@ impl ChannelSidebar {
     ) -> Self {
         let channel_list_handle = channel_list.clone();
 
-        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.));
+        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(32.)).measure_all();
         let weak = cx.weak_entity();
         list_state.set_scroll_handler(move |_event, _window, cx| {
             weak.update(cx, |this, cx| {

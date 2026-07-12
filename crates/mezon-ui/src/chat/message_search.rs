@@ -1964,8 +1964,16 @@ pub fn init(cx: &mut App) {
         gpui::KeyBinding::new("secondary-f", OpenMessageSearch, None),
         gpui::KeyBinding::new("ctrl-f", OpenMessageSearch, None),
         gpui::KeyBinding::new("escape", ::menu::Cancel, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new("up", SelectPrevSearchOption, None),
-        gpui::KeyBinding::new("down", SelectNextSearchOption, None),
+        gpui::KeyBinding::new(
+            "up",
+            SelectPrevSearchOption,
+            Some(SEARCH_DROPDOWN_KEY_CONTEXT),
+        ),
+        gpui::KeyBinding::new(
+            "down",
+            SelectNextSearchOption,
+            Some(SEARCH_DROPDOWN_KEY_CONTEXT),
+        ),
     ]);
     cx.on_action(|_: &OpenMessageSearch, cx: &mut App| {
         let Some(window_handle) =

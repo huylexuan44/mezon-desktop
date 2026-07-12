@@ -10,12 +10,17 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
+    Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
     Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{
+    cell::RefCell,
+    ops::Range,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use sum_tree::{Bias, Dimensions, SumTree};
 
 type RenderItemFn = dyn FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static;
@@ -59,6 +64,125 @@ impl std::fmt::Debug for ListState {
     }
 }
 
+// Mezon vendor extension: Chromium-style, time-based smoothing for discrete
+// wheel lines. Precise pixel input remains direct. Re-apply on GPUI snapshot bumps.
+const WHEEL_SCROLL_BEZIER_X1: f32 = 0.42;
+const WHEEL_SCROLL_BEZIER_X2: f32 = 0.58;
+const WHEEL_SCROLL_MIN_DELTA: f32 = 120.;
+const WHEEL_SCROLL_MAX_DELTA: f32 = 480.;
+const WHEEL_SCROLL_MIN_DURATION: f32 = 0.1;
+const WHEEL_SCROLL_MAX_DURATION: f32 = 0.2;
+
+#[derive(Clone, Copy, Debug)]
+struct WheelScrollAnimation {
+    start: f32,
+    target: f32,
+    started_at: Instant,
+    duration: Duration,
+    initial_slope: f32,
+}
+
+impl WheelScrollAnimation {
+    fn new(
+        start: f32,
+        target: f32,
+        initial_velocity: f32,
+        started_at: Instant,
+        duration: Duration,
+    ) -> Self {
+        let delta = target - start;
+        let initial_slope = if delta.abs() <= f32::EPSILON {
+            0.
+        } else {
+            let slope = initial_velocity * duration.as_secs_f32() / delta;
+            if slope.is_finite() && slope > 0. {
+                slope.min(1. / WHEEL_SCROLL_BEZIER_X1)
+            } else {
+                0.
+            }
+        };
+        Self {
+            start,
+            target,
+            started_at,
+            duration,
+            initial_slope,
+        }
+    }
+
+    fn sample(self, now: Instant) -> (f32, f32, bool) {
+        let duration = self.duration.as_secs_f32();
+        let elapsed = now.saturating_duration_since(self.started_at).as_secs_f32();
+        if elapsed >= duration {
+            return (self.target, 0., true);
+        }
+
+        let progress = (elapsed / duration).clamp(0., 1.);
+        let parameter = solve_wheel_scroll_bezier(progress);
+        let y1 = WHEEL_SCROLL_BEZIER_X1 * self.initial_slope;
+        let eased = wheel_cubic_bezier_coordinate(parameter, y1, 1.);
+        let delta = self.target - self.start;
+        let position = self.start + delta * eased;
+        let dx = wheel_cubic_bezier_derivative(
+            parameter,
+            WHEEL_SCROLL_BEZIER_X1,
+            WHEEL_SCROLL_BEZIER_X2,
+        );
+        let dy = wheel_cubic_bezier_derivative(parameter, y1, 1.);
+        let velocity = if dx.abs() <= f32::EPSILON {
+            0.
+        } else {
+            delta * (dy / dx) / duration
+        };
+        (position, velocity, false)
+    }
+}
+
+fn wheel_scroll_duration(delta: Pixels) -> Duration {
+    let progress = ((delta.abs().as_f32() - WHEEL_SCROLL_MIN_DELTA)
+        / (WHEEL_SCROLL_MAX_DELTA - WHEEL_SCROLL_MIN_DELTA))
+        .clamp(0., 1.);
+    Duration::from_secs_f32(
+        WHEEL_SCROLL_MAX_DURATION
+            + (WHEEL_SCROLL_MIN_DURATION - WHEEL_SCROLL_MAX_DURATION) * progress,
+    )
+}
+
+fn wheel_cubic_bezier_coordinate(t: f32, p1: f32, p2: f32) -> f32 {
+    let inverse = 1. - t;
+    3. * inverse * inverse * t * p1 + 3. * inverse * t * t * p2 + t * t * t
+}
+
+fn wheel_cubic_bezier_derivative(t: f32, p1: f32, p2: f32) -> f32 {
+    let inverse = 1. - t;
+    3. * inverse * inverse * p1
+        + 6. * inverse * t * (p2 - p1)
+        + 3. * t * t * (1. - p2)
+}
+
+fn solve_wheel_scroll_bezier(progress: f32) -> f32 {
+    if progress <= 0. || progress >= 1. {
+        return progress.clamp(0., 1.);
+    }
+
+    let mut lower = 0.;
+    let mut upper = 1.;
+    for _ in 0..12 {
+        let parameter = (lower + upper) * 0.5;
+        let x = wheel_cubic_bezier_coordinate(
+            parameter,
+            WHEEL_SCROLL_BEZIER_X1,
+            WHEEL_SCROLL_BEZIER_X2,
+        );
+        if x < progress {
+            lower = parameter;
+        } else {
+            upper = parameter;
+        }
+    }
+    (lower + upper) * 0.5
+}
+
 struct StateInner {
     last_layout_bounds: Option<Bounds<Pixels>>,
     last_padding: Option<Edges<Pixels>>,
@@ -66,6 +190,11 @@ struct StateInner {
     logical_scroll_top: Option<ListOffset>,
     alignment: ListAlignment,
     overdraw: Pixels,
+    leading_overdraw: Pixels,
+    trailing_overdraw: Pixels,
+    adaptive_overdraw_max: Option<Pixels>,
+    last_scroll_input_at: Option<Instant>,
+    scroll_velocity_y: f32,
     reset: bool,
     #[allow(clippy::type_complexity)]
     scroll_handler: Option<Box<dyn FnMut(&ListScrollEvent, &mut Window, &mut App)>>,
@@ -74,6 +203,103 @@ struct StateInner {
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
     measured_items_scratch: VecDeque<ListItem>,
+    smooth_line_scroll: bool,
+    wheel_scroll_animation: Option<WheelScrollAnimation>,
+    wheel_frame_scheduled: bool,
+    wheel_scroll_handler_pending: bool,
+}
+
+fn start_smooth_wheel_scroll(
+    list_state: &ListState,
+    delta: Pixels,
+    current_view: EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if delta == px(0.) {
+        return;
+    }
+
+    let now = Instant::now();
+    let should_schedule = {
+        let state = &mut *list_state.0.borrow_mut();
+        state.update_adaptive_overdraw(delta, now);
+        let current = state.scrollbar_offset().as_f32();
+        let previous = state.wheel_scroll_animation;
+        let base = previous.map_or(current, |animation| animation.target);
+        let target = (base + delta.as_f32()).clamp(-state.max_scroll_offset().as_f32(), 0.);
+        if (target - base).abs() <= f32::EPSILON {
+            return;
+        }
+        if previous.is_none() {
+            state.wheel_scroll_handler_pending = true;
+        }
+
+        let (start, velocity) = previous.map_or((current, 0.), |animation| {
+            let (position, velocity, _) = animation.sample(now);
+            (position, velocity)
+        });
+        state.wheel_scroll_animation = Some(WheelScrollAnimation::new(
+            start,
+            target,
+            velocity,
+            now,
+            wheel_scroll_duration(delta),
+        ));
+        if state.wheel_frame_scheduled {
+            false
+        } else {
+            state.wheel_frame_scheduled = true;
+            true
+        }
+    };
+
+    cx.notify(current_view);
+    if should_schedule {
+        schedule_smooth_wheel_frame(list_state.clone(), current_view, window);
+    }
+}
+
+fn schedule_smooth_wheel_frame(
+    list_state: ListState,
+    current_view: EntityId,
+    window: &mut Window,
+) {
+    window.on_next_frame(move |window, cx| {
+        let continue_animation = {
+            let state = &mut *list_state.0.borrow_mut();
+            state.wheel_frame_scheduled = false;
+            let Some(animation) = state.wheel_scroll_animation else {
+                return;
+            };
+
+            let (position, _, finished) = animation.sample(Instant::now());
+            let pixel_delta = px(position) - state.scrollbar_offset();
+            let scroll_top = state.logical_scroll_top();
+            let height = state.last_layout_bounds.unwrap_or_default().size.height;
+            if finished {
+                state.wheel_scroll_animation = None;
+            } else {
+                state.wheel_frame_scheduled = true;
+            }
+            let dispatch_scroll_handler = state.wheel_scroll_handler_pending || finished;
+            state.wheel_scroll_handler_pending = false;
+            state.scroll(
+                &scroll_top,
+                height,
+                point(px(0.), pixel_delta),
+                current_view,
+                window,
+                cx,
+                dispatch_scroll_handler,
+            );
+            !finished
+        };
+
+        if continue_animation {
+            schedule_smooth_wheel_frame(list_state, current_view, window);
+        }
+    });
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -320,6 +546,11 @@ impl ListState {
             logical_scroll_top: None,
             alignment,
             overdraw,
+            leading_overdraw: overdraw,
+            trailing_overdraw: overdraw,
+            adaptive_overdraw_max: None,
+            last_scroll_input_at: None,
+            scroll_velocity_y: 0.,
             scroll_handler: None,
             reset: false,
             scrollbar_drag_start_height: None,
@@ -327,6 +558,10 @@ impl ListState {
             pending_scroll: None,
             follow_state: FollowState::default(),
             measured_items_scratch: VecDeque::new(),
+            smooth_line_scroll: false,
+            wheel_scroll_animation: None,
+            wheel_frame_scheduled: false,
+            wheel_scroll_handler_pending: false,
         })));
         this.splice(0..0, item_count);
         this
@@ -340,6 +575,35 @@ impl ListState {
         self
     }
 
+    /// Smooth discrete line-based mouse-wheel input while leaving precise
+    /// pixel input (trackpads and high-resolution touch devices) direct.
+    pub fn smooth_line_scroll(self) -> Self {
+        self.0.borrow_mut().smooth_line_scroll = true;
+        self
+    }
+
+    /// Measure farther in the current scroll direction based on recent input
+    /// velocity, without painting those offscreen rows.
+    pub fn adaptive_overdraw(self, max_overdraw: Pixels) -> Self {
+        let mut state = self.0.borrow_mut();
+        state.adaptive_overdraw_max = Some(max_overdraw.max(state.overdraw));
+        drop(state);
+        self
+    }
+
+    /// Hint the direction and magnitude of a programmatic scroll so adaptive
+    /// overdraw can prepare rows before the target enters the viewport.
+    pub fn prepare_scroll(&self, delta: Pixels) {
+        self.0
+            .borrow_mut()
+            .update_adaptive_overdraw(delta, Instant::now());
+    }
+
+    /// Returns whether a discrete mouse-wheel animation is active.
+    pub fn is_smooth_wheel_scrolling(&self) -> bool {
+        self.0.borrow().wheel_scroll_animation.is_some()
+    }
+
     /// Reset this instantiation of the list state.
     ///
     /// Note that this will cause scroll events to be dropped until the next paint.
@@ -351,6 +615,13 @@ impl ListState {
             state.logical_scroll_top = None;
             state.pending_scroll = None;
             state.scrollbar_drag_start_height = None;
+            state.wheel_scroll_animation = None;
+            state.wheel_frame_scheduled = false;
+            state.wheel_scroll_handler_pending = false;
+            state.leading_overdraw = state.overdraw;
+            state.trailing_overdraw = state.overdraw;
+            state.last_scroll_input_at = None;
+            state.scroll_velocity_y = 0.;
             state.items.summary().count
         };
 
@@ -533,6 +804,8 @@ impl ListState {
 
         let current_offset = self.logical_scroll_top();
         let state = &mut *self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        state.wheel_scroll_handler_pending = false;
 
         if distance < px(0.) {
             state.follow_state.stop_following();
@@ -566,6 +839,8 @@ impl ListState {
     /// growing (e.g. during streaming).
     pub fn scroll_to_end(&self) {
         let state = &mut *self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        state.wheel_scroll_handler_pending = false;
         let item_count = state.items.summary().count;
         state.pending_scroll = None;
         state.logical_scroll_top = Some(ListOffset {
@@ -610,6 +885,8 @@ impl ListState {
     /// Scroll the list to the given offset
     pub fn scroll_to(&self, mut scroll_top: ListOffset) {
         let state = &mut *self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        state.wheel_scroll_handler_pending = false;
         let item_count = state.items.summary().count;
         if scroll_top.item_ix >= item_count {
             scroll_top.item_ix = item_count;
@@ -693,6 +970,8 @@ impl ListState {
     /// as items in the overdraw get measured, and help offset scroll position changes accordingly.
     pub fn scrollbar_drag_started(&self) {
         let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        state.wheel_scroll_handler_pending = false;
         state.scrollbar_drag_start_height = Some(state.items.summary().height);
     }
 
@@ -715,7 +994,10 @@ impl ListState {
 
     /// Set the offset from the scrollbar
     pub fn set_offset_from_scrollbar(&self, point: Point<Pixels>) {
-        self.0.borrow_mut().set_offset_from_scrollbar(point);
+        let mut state = self.0.borrow_mut();
+        state.wheel_scroll_animation = None;
+        state.wheel_scroll_handler_pending = false;
+        state.set_offset_from_scrollbar(point);
     }
 
     /// Returns the maximum scroll offset according to the items we have measured.
@@ -731,19 +1013,7 @@ impl ListState {
     /// how far the content has scrolled.
     pub fn scroll_px_offset_for_scrollbar(&self) -> Point<Pixels> {
         let state = &self.0.borrow();
-
-        if state.logical_scroll_top.is_none() && state.alignment == ListAlignment::Bottom {
-            return Point::new(px(0.), -state.max_scroll_offset());
-        }
-
-        let logical_scroll_top = state.logical_scroll_top();
-
-        let mut cursor = state.items.cursor::<ListItemSummary>(());
-        let summary: ListItemSummary =
-            cursor.summary(&Count(logical_scroll_top.item_ix), Bias::Right);
-        let offset = summary.height + logical_scroll_top.offset_in_item;
-
-        Point::new(px(0.), -offset)
+        Point::new(px(0.), state.scrollbar_offset())
     }
 
     /// Return the bounds of the viewport in pixels.
@@ -793,6 +1063,65 @@ impl ListState {
 }
 
 impl StateInner {
+    fn decay_adaptive_overdraw(&mut self, now: Instant) {
+        const ADAPTIVE_OVERDRAW_IDLE_RESET: Duration = Duration::from_millis(250);
+        if self.last_scroll_input_at.is_some_and(|last| {
+            now.saturating_duration_since(last) >= ADAPTIVE_OVERDRAW_IDLE_RESET
+        }) {
+            self.leading_overdraw = self.overdraw;
+            self.trailing_overdraw = self.overdraw;
+            self.last_scroll_input_at = None;
+            self.scroll_velocity_y = 0.;
+        }
+    }
+
+    fn update_adaptive_overdraw(&mut self, delta: Pixels, now: Instant) {
+        let Some(max_overdraw) = self.adaptive_overdraw_max else {
+            return;
+        };
+        if delta == px(0.) {
+            return;
+        }
+
+        // Chromium's GPU skewport predicts roughly 200 ms ahead. Use the
+        // same horizon for GPUI row measurement, plus a small symmetric
+        // "soon" border. This changes measurement only; offscreen rows are
+        // still not painted.
+        const LOOKAHEAD_SECONDS: f32 = 0.2;
+        const VELOCITY_EMA_NEW_WEIGHT: f32 = 0.35;
+        const SOON_BORDER_VIEWPORT_FRACTION: f32 = 0.15;
+
+        let elapsed = self
+            .last_scroll_input_at
+            .map_or(LOOKAHEAD_SECONDS, |last| {
+                now.saturating_duration_since(last)
+                    .as_secs_f32()
+                    .clamp(1. / 240., 0.25)
+            });
+        let instantaneous_velocity = delta.as_f32() / elapsed;
+        self.scroll_velocity_y = if self.scroll_velocity_y.signum()
+            == instantaneous_velocity.signum()
+        {
+            self.scroll_velocity_y * (1. - VELOCITY_EMA_NEW_WEIGHT)
+                + instantaneous_velocity * VELOCITY_EMA_NEW_WEIGHT
+        } else {
+            instantaneous_velocity
+        };
+        self.last_scroll_input_at = Some(now);
+
+        let viewport = self.last_layout_bounds.unwrap_or_default().size.height;
+        let predicted = px(self.scroll_velocity_y.abs() * LOOKAHEAD_SECONDS)
+            + viewport * SOON_BORDER_VIEWPORT_FRACTION;
+        let directional = predicted.max(self.overdraw).min(max_overdraw);
+        if delta < px(0.) {
+            self.leading_overdraw = self.overdraw;
+            self.trailing_overdraw = directional;
+        } else {
+            self.leading_overdraw = directional;
+            self.trailing_overdraw = self.overdraw;
+        }
+    }
+
     /// Re-anchor a pending scroll adjustment from a remeasure onto a newly set
     /// scroll position, so it clamps to the remeasured item's new height on
     /// the next layout instead of reverting the scroll.
@@ -834,6 +1163,18 @@ impl StateInner {
         (height - bounds.size.height).max(px(0.))
     }
 
+    fn scrollbar_offset(&self) -> Pixels {
+        if self.logical_scroll_top.is_none() && self.alignment == ListAlignment::Bottom {
+            return -self.max_scroll_offset();
+        }
+
+        let logical_scroll_top = self.logical_scroll_top();
+        let mut cursor = self.items.cursor::<ListItemSummary>(());
+        let summary: ListItemSummary =
+            cursor.summary(&Count(logical_scroll_top.item_ix), Bias::Right);
+        -(summary.height + logical_scroll_top.offset_in_item)
+    }
+
     fn visible_range(
         items: &SumTree<ListItem>,
         height: Pixels,
@@ -854,6 +1195,7 @@ impl StateInner {
         current_view: EntityId,
         window: &mut Window,
         cx: &mut App,
+        dispatch_scroll_handler: bool,
     ) {
         // Drop scroll events after a reset, since we can't calculate
         // the new logical scroll top without the item heights
@@ -890,8 +1232,9 @@ impl StateInner {
             self.follow_state.stop_following();
         }
 
-        if let Some(handler) = self.scroll_handler.as_mut() {
-            let visible_range = Self::visible_range(&self.items, height, scroll_top);
+        let current_scroll_top = self.logical_scroll_top();
+        if dispatch_scroll_handler && let Some(handler) = self.scroll_handler.as_mut() {
+            let visible_range = Self::visible_range(&self.items, height, &current_scroll_top);
             handler(
                 &ListScrollEvent {
                     visible_range,
@@ -984,6 +1327,7 @@ impl StateInner {
         window: &mut Window,
         cx: &mut App,
     ) -> LayoutItemsResponse {
+        self.decay_adaptive_overdraw(Instant::now());
         let old_items = self.items.clone();
         let mut measured_items = std::mem::take(&mut self.measured_items_scratch);
         measured_items.clear();
@@ -1015,7 +1359,7 @@ impl StateInner {
         cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
         for (ix, item) in cursor.by_ref().enumerate() {
             let visible_height = rendered_height - scroll_top.offset_in_item;
-            if visible_height >= available_height + self.overdraw {
+            if visible_height >= available_height + self.trailing_overdraw {
                 break;
             }
 
@@ -1129,7 +1473,7 @@ impl StateInner {
 
         // Measure items in the leading overdraw
         let mut leading_overdraw = scroll_top.offset_in_item;
-        while leading_overdraw < self.overdraw {
+        while leading_overdraw < self.leading_overdraw {
             cursor.prev();
             if let Some(item) = cursor.item() {
                 let size = if let ListItem::Measured { size, .. } = item {
@@ -1393,7 +1737,7 @@ impl Element for List {
                     } else {
                         // If we don't have the last layout bounds (first render),
                         // we might just use the overdraw value as the available height to layout enough items.
-                        state.overdraw
+                        state.leading_overdraw.max(state.trailing_overdraw)
                     };
                     let padding = style.padding.to_pixels(
                         state.last_layout_bounds.unwrap_or_default().size.into(),
@@ -1521,7 +1865,6 @@ impl Element for List {
         let height = bounds.size.height;
         let scroll_top = prepaint.layout.scroll_top;
         let hitbox_id = prepaint.hitbox.id;
-        let mut accumulated_scroll_delta = ScrollDelta::default();
         // Mezon rows (messages, channels, clans) are substantially taller than
         // Zed's text rows. Keep line-wheel behavior at the existing 3x tuning,
         // while giving high-resolution wheels/trackpads a smaller boost. The
@@ -1532,23 +1875,40 @@ impl Element for List {
         const MEZON_PRECISE_SCROLL_SENSITIVITY: f32 = 1.5;
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
-                accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                let sensitivity = if accumulated_scroll_delta.precise() {
+                let precise = event.delta.precise();
+                let sensitivity = if precise {
                     MEZON_PRECISE_SCROLL_SENSITIVITY
                 } else {
                     MEZON_LINE_SCROLL_SENSITIVITY
                 };
-                let pixel_delta = accumulated_scroll_delta
+                let pixel_delta = event
+                    .delta
                     .pixel_delta(px(20.))
                     .map(|delta| delta * sensitivity);
-                list_state.0.borrow_mut().scroll(
-                    &scroll_top,
-                    height,
-                    pixel_delta,
-                    current_view,
-                    window,
-                    cx,
-                )
+                let smooth_line_scroll = list_state.0.borrow().smooth_line_scroll;
+                if !precise && smooth_line_scroll {
+                    start_smooth_wheel_scroll(
+                        &list_state,
+                        pixel_delta.y,
+                        current_view,
+                        window,
+                        cx,
+                    );
+                } else {
+                    let state = &mut *list_state.0.borrow_mut();
+                    state.update_adaptive_overdraw(pixel_delta.y, Instant::now());
+                    state.wheel_scroll_animation = None;
+                    state.wheel_scroll_handler_pending = false;
+                    state.scroll(
+                        &scroll_top,
+                        height,
+                        pixel_delta,
+                        current_view,
+                        window,
+                        cx,
+                        true,
+                    );
+                }
             }
         });
     }

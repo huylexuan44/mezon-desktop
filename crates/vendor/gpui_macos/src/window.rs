@@ -2085,6 +2085,14 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
 
             drop(lock);
 
+            // mezon vendor edit: only route non-printing keys (arrows/escape/etc.) through the
+            // IME when a text input handler is actually active. Without this, a window with no
+            // text input (e.g. the image viewer) has its arrow keys swallowed by the input
+            // context (handleEvent returns YES without doCommandBySelector) so they never reach
+            // on_key_down. Text inputs always set an input handler, so IME composition is
+            // unaffected. Re-apply on vendored gpui snapshot bump.
+            let has_input_handler = window_state.as_ref().lock().input_handler.is_some();
+
             let is_composing =
                 with_input_handler(this, |input_handler| input_handler.marked_text_range())
                     .flatten()
@@ -2120,9 +2128,25 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 })
                 .unwrap_or(false);
 
+            #[cfg(debug_assertions)]
+            if matches!(
+                key_down_event.keystroke.key.as_str(),
+                "up" | "down" | "left" | "right" | "escape"
+            ) {
+                eprintln!(
+                    "[gpui_key] {:?} equiv={} has_ih={} composing={} ime_printable={}",
+                    key_down_event.keystroke.key,
+                    key_equivalent,
+                    has_input_handler,
+                    is_composing,
+                    is_ime_printable_key
+                );
+            }
+
             if is_composing
                 || is_ime_printable_key
-                || (key_down_event.keystroke.key_char.is_none()
+                || (has_input_handler
+                    && key_down_event.keystroke.key_char.is_none()
                     && !key_down_event.keystroke.modifiers.control
                     && !key_down_event.keystroke.modifiers.function
                     && !key_down_event.keystroke.modifiers.platform)

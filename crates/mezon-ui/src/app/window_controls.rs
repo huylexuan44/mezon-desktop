@@ -74,6 +74,23 @@ pub fn window_title_options() -> TitlebarOptions {
     }
 }
 
+pub fn viewer_title_options() -> TitlebarOptions {
+    #[cfg(target_os = "macos")]
+    {
+        use gpui::{point, px};
+
+        TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(13.), px(9.))),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window_title_options()
+    }
+}
+
 pub fn main_window_decorations() -> Option<WindowDecorations> {
     #[cfg(target_os = "linux")]
     {

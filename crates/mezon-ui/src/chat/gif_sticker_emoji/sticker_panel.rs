@@ -5,6 +5,7 @@ use gpui::{
     SharedString, Subscription, Window, div, img, list, prelude::*, px,
 };
 use mezon_store::{ClanList, StickerEvent, StickerStore};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::{
@@ -206,8 +207,8 @@ impl StickerPanel {
 }
 
 impl Render for StickerPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
         let entity = cx.entity();
         let show_rail = !self.searching() && !self.categories.is_empty();
 
@@ -241,7 +242,7 @@ impl Render for StickerPanel {
                 } else {
                     btn.hover(|s| s.bg(theme.bg_hover))
                 };
-                btn = btn.child(category_logo(theme, &cat.logo, &cat.name, 28.));
+                btn = btn.child(category_logo(&theme, &cat.logo, &cat.name, 28.));
                 let key = cat.key.clone();
                 let btn = btn.on_click(move |_, _, cx| {
                     ent.update(cx, |this, cx| {
@@ -295,6 +296,12 @@ impl Render for StickerPanel {
                 .h_full()
                 .px_2()
                 .child(list)
+                .custom_scrollbars(
+                    Scrollbars::always_visible(ScrollAxes::Vertical)
+                        .tracked_scroll_handle(&self.list_state),
+                    window,
+                    cx,
+                )
                 .into_any_element()
         };
 

@@ -5,11 +5,10 @@ use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
     App, AppContext, BackgroundExecutor, Bounds, Context, Corners, Entity, FocusHandle, Focusable,
-    FontWeight, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
-    Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString,
-    SharedUri, Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, canvas, div, img, point, prelude::*, px, relative, size,
-    uniform_list,
+    ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels,
+    Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString, SharedUri,
+    Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -18,7 +17,7 @@ use mezon_store::{
 
 use crate::app::main_window::{activate_main_window, main_window_bounds};
 use crate::app::title_bar::TitleBar;
-use crate::app::window_controls::{self, APP_NAME};
+use crate::app::window_controls;
 use crate::chat::message::{VideoActivation, VideoFullscreenMode, VideoLayout, VideoPlayerView};
 use crate::components::primitives::{Avatar, Icon, IconName, Spinner};
 use crate::components::primitives::{ContextMenu, context_menu_at};
@@ -145,7 +144,7 @@ fn spawn_image_viewer_window(
         kind: WindowKind::Normal,
         focus: true,
         show: true,
-        titlebar: Some(window_controls::window_title_options()),
+        titlebar: Some(window_controls::viewer_title_options()),
         window_decorations: window_controls::main_window_decorations(),
         ..Default::default()
     };
@@ -751,6 +750,8 @@ impl ImageViewer {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        eprintln!("[image_viewer] key_down: {:?}", event.keystroke.key);
         match event.keystroke.key.as_str() {
             "escape" => {
                 if self.context_menu.take().is_some() {
@@ -887,6 +888,14 @@ impl Render for ImageViewer {
             .bg(theme.bg_tertiary)
             .text_color(theme.text_primary)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    if !this.focus_handle.is_focused(window) {
+                        window.focus(&this.focus_handle, cx);
+                    }
+                }),
+            )
             .when(window_controls::HAS_CUSTOM_TITLE_BAR, |el| {
                 el.child(self.title_bar.clone())
             })
@@ -919,21 +928,7 @@ impl Render for ImageViewer {
 
 impl ImageViewer {
     fn render_app_title_strip(&self, theme: &Theme) -> impl IntoElement {
-        div()
-            .flex_shrink_0()
-            .h_8()
-            .w_full()
-            .flex()
-            .items_center()
-            .bg(theme.title_bar_bg)
-            .child(
-                div()
-                    .px_3()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_secondary)
-                    .child(APP_NAME),
-            )
+        div().flex_shrink_0().h_8().w_full().bg(theme.title_bar_bg)
     }
 
     fn render_channel_header(&self, theme: &Theme) -> impl IntoElement {

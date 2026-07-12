@@ -4,9 +4,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, Context, DismissEvent, Entity, Focusable, ListAlignment,
-    ListState, Pixels, Point, SharedString, Subscription, Task, Window, anchored, deferred, div,
-    ease_in_out, list, prelude::*, px,
+    Anchor, Animation, AnimationExt as _, Context, DismissEvent, Entity, FocusHandle, Focusable,
+    KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point,
+    SharedString, Subscription, Task, Window, anchored, deferred, div, ease_in_out, list,
+    prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -35,8 +36,15 @@ use crate::image_cache::{
 use crate::theme::{ActiveTheme, Theme};
 
 const LOAD_MORE_ITEM_THRESHOLD: usize = 12;
-const LIST_OVERDRAW: f32 = 1024.;
+// Keep a modest symmetric measurement skirt, then grow only the active scroll
+// direction up to Zed's 2048px conversation-list budget.
+const LIST_BASE_OVERDRAW: f32 = 768.;
+const LIST_MAX_OVERDRAW: f32 = 2048.;
 const LIST_BOTTOM_PADDING: f32 = 20.;
+const KEY_SCROLL_DURATION: Duration = Duration::from_millis(150);
+const KEY_SCROLL_BEZIER_X1: f32 = 0.42;
+const KEY_SCROLL_BEZIER_X2: f32 = 0.58;
+const SCROLL_CACHE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
 const SCROLL_HOVER_RELEASE_MS: u64 = 150;
 const HOVER_SHOW_DELAY_MS: u64 = 200;
 const HOVER_HIDE_DELAY_MS: u64 = 100;
@@ -159,8 +167,149 @@ fn skeleton_transition(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct KeyboardScrollAnimation {
+    start: f32,
+    target: f32,
+    started_at: Instant,
+    initial_slope: f32,
+}
+
+impl KeyboardScrollAnimation {
+    fn new(start: f32, target: f32, initial_velocity: f32, started_at: Instant) -> Self {
+        let delta = target - start;
+        let duration = KEY_SCROLL_DURATION.as_secs_f32();
+        let initial_slope = if delta.abs() <= f32::EPSILON {
+            0.
+        } else {
+            let slope = initial_velocity * duration / delta;
+            if slope.is_finite() && slope > 0. {
+                // Keeping y1 in [0, 1] makes the retargeted curve monotonic.
+                // Opposite-direction velocity is intentionally discarded so a
+                // quick direction reversal remains responsive.
+                slope.min(1. / KEY_SCROLL_BEZIER_X1)
+            } else {
+                0.
+            }
+        };
+        Self {
+            start,
+            target,
+            started_at,
+            initial_slope,
+        }
+    }
+
+    fn sample(self, now: Instant) -> (f32, f32, bool) {
+        let duration = KEY_SCROLL_DURATION.as_secs_f32();
+        let elapsed = now.saturating_duration_since(self.started_at).as_secs_f32();
+        if elapsed >= duration {
+            return (self.target, 0., true);
+        }
+
+        let progress = (elapsed / duration).clamp(0., 1.);
+        let parameter = solve_keyboard_scroll_bezier(progress);
+        let y1 = KEY_SCROLL_BEZIER_X1 * self.initial_slope;
+        let eased = cubic_bezier_coordinate(parameter, y1, 1.);
+        let delta = self.target - self.start;
+        let position = self.start + delta * eased;
+
+        let dx = cubic_bezier_derivative(parameter, KEY_SCROLL_BEZIER_X1, KEY_SCROLL_BEZIER_X2);
+        let dy = cubic_bezier_derivative(parameter, y1, 1.);
+        let velocity = if dx.abs() <= f32::EPSILON {
+            0.
+        } else {
+            delta * (dy / dx) / duration
+        };
+        (position, velocity, false)
+    }
+}
+
+fn cubic_bezier_coordinate(t: f32, p1: f32, p2: f32) -> f32 {
+    let inverse = 1. - t;
+    3. * inverse * inverse * t * p1 + 3. * inverse * t * t * p2 + t * t * t
+}
+
+fn cubic_bezier_derivative(t: f32, p1: f32, p2: f32) -> f32 {
+    let inverse = 1. - t;
+    3. * inverse * inverse * p1 + 6. * inverse * t * (p2 - p1) + 3. * t * t * (1. - p2)
+}
+
+fn solve_keyboard_scroll_bezier(progress: f32) -> f32 {
+    if progress <= 0. || progress >= 1. {
+        return progress.clamp(0., 1.);
+    }
+
+    // The x control points are monotonic, so a small fixed bisection is
+    // deterministic and accurate enough for sub-pixel scrolling.
+    let mut lower = 0.;
+    let mut upper = 1.;
+    for _ in 0..12 {
+        let parameter = (lower + upper) * 0.5;
+        let x = cubic_bezier_coordinate(parameter, KEY_SCROLL_BEZIER_X1, KEY_SCROLL_BEZIER_X2);
+        if x < progress {
+            lower = parameter;
+        } else {
+            upper = parameter;
+        }
+    }
+    (lower + upper) * 0.5
+}
+
+#[cfg(test)]
+mod keyboard_scroll_animation_tests {
+    use super::*;
+
+    #[test]
+    fn curve_is_time_based_and_finishes_at_constant_duration() {
+        let started_at = Instant::now();
+        let animation = KeyboardScrollAnimation::new(0., 48., 0., started_at);
+
+        let (midpoint, midpoint_velocity, midpoint_finished) =
+            animation.sample(started_at + KEY_SCROLL_DURATION / 2);
+        assert!((midpoint - 24.).abs() < 0.05);
+        assert!(midpoint_velocity > 0.);
+        assert!(!midpoint_finished);
+
+        let (end, end_velocity, end_finished) = animation.sample(started_at + KEY_SCROLL_DURATION);
+        assert_eq!(end, 48.);
+        assert_eq!(end_velocity, 0.);
+        assert!(end_finished);
+    }
+
+    #[test]
+    fn same_direction_retarget_preserves_position_and_velocity() {
+        let started_at = Instant::now();
+        let animation = KeyboardScrollAnimation::new(0., 48., 0., started_at);
+        let retargeted_at = started_at + Duration::from_millis(60);
+        let (position, velocity, _) = animation.sample(retargeted_at);
+
+        let retargeted = KeyboardScrollAnimation::new(position, 96., velocity, retargeted_at);
+        let (new_position, new_velocity, finished) = retargeted.sample(retargeted_at);
+
+        assert!((new_position - position).abs() < 0.01);
+        assert!((new_velocity - velocity).abs() < 0.1);
+        assert!(!finished);
+    }
+
+    #[test]
+    fn direction_reversal_does_not_continue_with_stale_velocity() {
+        let started_at = Instant::now();
+        let animation = KeyboardScrollAnimation::new(0., 48., 0., started_at);
+        let retargeted_at = started_at + Duration::from_millis(60);
+        let (position, velocity, _) = animation.sample(retargeted_at);
+        assert!(velocity > 0.);
+
+        let reversed = KeyboardScrollAnimation::new(position, -48., velocity, retargeted_at);
+        let (_, reversed_velocity, _) = reversed.sample(retargeted_at);
+        assert_eq!(reversed_velocity, 0.);
+    }
+}
+
 pub struct ChannelMessages {
     pub(crate) list_state: ListState,
+    focus_handle: FocusHandle,
+    keyboard_scroll: Option<KeyboardScrollAnimation>,
     settings: Entity<Settings>,
     image_cache: Entity<LruImageCache>,
     avatar_image_cache: Entity<LruImageCache>,
@@ -226,6 +375,7 @@ pub struct ChannelMessages {
     _emoji_observe: Subscription,
     gif_reconcile_fingerprint: Option<(Option<ChannelId>, usize, usize)>,
     last_gif_reconcile: Option<Instant>,
+    last_image_cache_sweep: Option<Instant>,
     row_memo: Rc<RefCell<RowMemo>>,
     row_memo_day: Option<chrono::NaiveDate>,
 }
@@ -487,7 +637,9 @@ impl ChannelMessages {
         })
         .detach();
 
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_OVERDRAW));
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(LIST_BASE_OVERDRAW))
+            .adaptive_overdraw(px(LIST_MAX_OVERDRAW))
+            .smooth_line_scroll();
         let timeline = cx.weak_entity();
         list_state.set_scroll_handler(move |event, _window, cx| {
             let near_top = event.visible_range.start < LOAD_MORE_ITEM_THRESHOLD
@@ -497,6 +649,11 @@ impl ChannelMessages {
             let at_bottom = event.visible_range.end + LOAD_MORE_ITEM_THRESHOLD >= event.count;
             let visible_start = event.visible_range.start;
             let _ = timeline.update(cx, |this, cx| {
+                // Direct wheel/trackpad input must take ownership from an in-flight
+                // keyboard scroll animation. Otherwise the next RAF moves the list
+                // back toward the stale keyboard target and makes wheel deltas feel
+                // shorter than they actually are.
+                this.keyboard_scroll = None;
                 let range_moved = this.last_visible_start != visible_start;
                 this.at_bottom = at_bottom;
                 this.last_visible_start = visible_start;
@@ -647,6 +804,8 @@ impl ChannelMessages {
         });
         Self {
             list_state,
+            focus_handle: cx.focus_handle(),
+            keyboard_scroll: None,
             settings,
             image_cache,
             avatar_image_cache,
@@ -709,6 +868,7 @@ impl ChannelMessages {
             _emoji_observe: emoji_observe,
             gif_reconcile_fingerprint: None,
             last_gif_reconcile: None,
+            last_image_cache_sweep: None,
             row_memo: Rc::new(RefCell::new(RowMemo::default())),
             row_memo_day: None,
         }
@@ -1552,6 +1712,96 @@ impl ChannelMessages {
     }
 }
 
+impl ChannelMessages {
+    fn scroll_messages_by(&mut self, delta: Pixels, cx: &mut Context<Self>) {
+        self.list_state.prepare_scroll(delta);
+        let now = Instant::now();
+        let current = self.list_state.scroll_px_offset_for_scrollbar().y.as_f32();
+        let max = self.list_state.max_offset_for_scrollbar().y.as_f32();
+        let previous = self.keyboard_scroll;
+        let base = previous.map_or(current, |animation| animation.target);
+        let target = (base + delta.as_f32()).clamp(-max, 0.);
+
+        // Repeated input at a boundary must not restart and prolong the curve.
+        if (target - base).abs() <= f32::EPSILON {
+            return;
+        }
+
+        let (start, velocity) = previous.map_or((current, 0.), |animation| {
+            let (position, velocity, _) = animation.sample(now);
+            (position, velocity)
+        });
+        self.keyboard_scroll = Some(KeyboardScrollAnimation::new(start, target, velocity, now));
+        cx.notify();
+    }
+
+    fn drive_scroll_anim(&mut self, window: &mut Window) {
+        if self.list_state.is_scrollbar_dragging() || self.list_state.is_smooth_wheel_scrolling() {
+            self.keyboard_scroll = None;
+            return;
+        }
+        let Some(animation) = self.keyboard_scroll else {
+            return;
+        };
+
+        let (position, _, finished) = animation.sample(Instant::now());
+        self.list_state
+            .set_offset_from_scrollbar(Point::new(px(0.), px(position)));
+        if finished {
+            self.keyboard_scroll = None;
+        } else {
+            window.request_animation_frame();
+        }
+    }
+
+    fn on_messages_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let step = window.line_height() * 3.;
+        let page = self.list_state.viewport_bounds().size.height * 0.9;
+        let handled = match event.keystroke.key.as_str() {
+            "up" => {
+                self.scroll_messages_by(step, cx);
+                true
+            }
+            "down" => {
+                self.scroll_messages_by(-step, cx);
+                true
+            }
+            "pageup" => {
+                self.scroll_messages_by(page, cx);
+                true
+            }
+            "pagedown" => {
+                self.scroll_messages_by(-page, cx);
+                true
+            }
+            "home" => {
+                self.keyboard_scroll = None;
+                self.list_state.scroll_to(gpui::ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+                true
+            }
+            "end" => {
+                self.keyboard_scroll = None;
+                self.list_state.scroll_to_end();
+                cx.notify();
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            cx.stop_propagation();
+        }
+    }
+}
+
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::trace_render!(
@@ -1559,12 +1809,24 @@ impl Render for ChannelMessages {
             MessagesStore::global(cx).read(cx).active_channel_id()
         );
         self.clear_image_cache_if_channel_changed(window, cx);
-        self.image_cache
-            .update(cx, |cache, cx| cache.sweep(window, cx));
-        cx.defer_in(window, |this, window, cx| {
-            this.apply_gif_reconcile(window, cx)
-        });
         self.sync_render_identity(cx);
+        self.drive_scroll_anim(window);
+        let scroll_animating =
+            self.keyboard_scroll.is_some() || self.list_state.is_smooth_wheel_scrolling();
+        if !scroll_animating
+            || self
+                .last_image_cache_sweep
+                .is_none_or(|at| at.elapsed() >= SCROLL_CACHE_SWEEP_INTERVAL)
+        {
+            self.image_cache
+                .update(cx, |cache, cx| cache.sweep(window, cx));
+            self.last_image_cache_sweep = Some(Instant::now());
+        }
+        if !scroll_animating {
+            cx.defer_in(window, |this, window, cx| {
+                this.apply_gif_reconcile(window, cx)
+            });
+        }
 
         let store = MessagesStore::global(cx);
         let active_clan = ClanList::global(cx).read(cx).active_clan_id;
@@ -1639,6 +1901,12 @@ impl Render for ChannelMessages {
                 .rev()
                 .map(|m| m.id),
         );
+        let key_listener = cx.listener(Self::on_messages_key);
+        let focus_on_click = cx.listener(|this, _: &MouseDownEvent, window, cx| {
+            if !this.focus_handle.is_focused(window) {
+                window.focus(&this.focus_handle, cx);
+            }
+        });
         let scroll_down_fab = self.scroll_down_fab(show_scroll_down, unread_count, cx);
 
         div()
@@ -1646,6 +1914,9 @@ impl Render for ChannelMessages {
             .relative()
             .overflow_hidden()
             .image_cache(self.image_cache.clone())
+            .track_focus(&self.focus_handle)
+            .on_key_down(key_listener)
+            .on_mouse_down(MouseButton::Left, focus_on_click)
             .child(
                 list(list_state, move |ix, _window, cx| {
                     if header_shown && ix == 0 {

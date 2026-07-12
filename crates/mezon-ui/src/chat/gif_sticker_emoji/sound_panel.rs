@@ -5,6 +5,7 @@ use gpui::{
     Subscription, UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{StickerEvent, StickerStore, VoiceStore};
+use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::{
@@ -187,8 +188,8 @@ impl SoundPanel {
 }
 
 impl Render for SoundPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
         let entity = cx.entity();
         let show_rail = !self.searching() && !self.categories.is_empty();
 
@@ -315,6 +316,12 @@ impl Render for SoundPanel {
                 .h_full()
                 .px_2()
                 .child(list)
+                .custom_scrollbars(
+                    Scrollbars::always_visible(ScrollAxes::Vertical)
+                        .tracked_scroll_handle(&self.scroll),
+                    window,
+                    cx,
+                )
                 .into_any_element()
         };
 
@@ -439,6 +446,7 @@ fn render_sound_cell(
         theme.tokens.text_secondary.into()
     };
     div()
+        .id(sound.row_id.clone())
         .flex_1()
         .min_w_0()
         .h(px(40.))
