@@ -24,6 +24,7 @@ const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_sec
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const DEFAULT_TLS_PORT: u16 = 443;
+const HARDCODED_SOCKET_PORT: u16 = 4433;
 
 /// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
 /// connection but refused the handshake) is treated as a dead session; an unreachable server must
@@ -442,11 +443,16 @@ fn promote_connecting_to_authenticated(auth_state: &Entity<AuthState>, cx: &mut 
 }
 
 pub(crate) fn resolve_tcp_port(session: &Session, default_port: Option<u16>) -> u16 {
-    session
+    let port = session
         .tcp_port
         .or(session.ws_port)
         .or(default_port)
-        .unwrap_or(DEFAULT_TLS_PORT)
+        .unwrap_or(DEFAULT_TLS_PORT);
+    if port == DEFAULT_TLS_PORT {
+        HARDCODED_SOCKET_PORT
+    } else {
+        port
+    }
 }
 
 /// Restore a stored session from the OS keychain.
@@ -507,8 +513,17 @@ mod tests {
     fn resolve_tcp_port_falls_back_to_tls_default_when_unset() {
         assert_eq!(
             resolve_tcp_port(&Session::default(), None),
-            DEFAULT_TLS_PORT
+            HARDCODED_SOCKET_PORT
         );
+    }
+
+    #[test]
+    fn resolve_tcp_port_remaps_implicit_tls_port_to_hardcoded_socket_port() {
+        let s = Session {
+            ws_port: Some(DEFAULT_TLS_PORT),
+            ..Default::default()
+        };
+        assert_eq!(resolve_tcp_port(&s, None), HARDCODED_SOCKET_PORT);
     }
 
     #[test]
