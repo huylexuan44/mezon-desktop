@@ -24,7 +24,7 @@ const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_sec
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
 const DEFAULT_TLS_PORT: u16 = 443;
-const HARDCODED_SOCKET_PORT: u16 = 4433;
+const HARDCODED_SOCKET_PORT: u16 = 4443;
 
 /// Result of a single reconnect attempt. Only a rejected credential (the server accepted the TCP
 /// connection but refused the handshake) is treated as a dead session; an unreachable server must
