@@ -449,9 +449,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                                         .detach();
                                     cx.update(|cx| {
                                         auth.update(cx, |state, cx| {
-                                            *state = AuthState::Connecting(session);
+                                            *state = AuthState::Connecting(session.clone());
                                             cx.notify();
                                         });
+                                        if !session.id_token.is_empty() {
+                                            mezon_store::WalletStore::global(cx).update(
+                                                cx,
+                                                |wallet, cx| {
+                                                    wallet
+                                                        .fetch_zk_proofs_after_login(&session, cx);
+                                                },
+                                            );
+                                        }
                                         mezon_ui::router::replace(
                                             cx,
                                             mezon_ui::router::Route::Chat,

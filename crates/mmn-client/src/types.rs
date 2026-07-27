@@ -12,7 +12,7 @@ pub const TX_TYPE_USER_CONTENT: u8 = 2;
 
 pub const DECIMALS: u32 = 6;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EphemeralKeyPair {
     pub private_key: String,
     pub public_key: String,

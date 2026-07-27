@@ -11,16 +11,19 @@ use mmn_client::{
     generate_ephemeral_key_pair, scale_amount_to_decimals,
 };
 
+use mezon_client::Session;
+
 use crate::AuthState;
 use crate::config::{AppConfig, INDEXER_CHAIN_ID};
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::wallet_persist::{self, PersistedWalletState};
 
 const DECIMALS: u32 = 6;
 const GIVE_COFFEE_AMOUNT: i64 = 10_000;
 
 static BANK_SOUND: &[u8] = include_bytes!("../assets/audio/bankSound.mp3");
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WalletDetail {
     pub address: String,
     pub balance: String,
@@ -189,27 +192,70 @@ impl WalletStore {
     }
 
     fn sync_from_auth(&mut self, cx: &mut Context<Self>) {
-        let snapshot = {
-            match self.auth_state.read(cx) {
-                AuthState::Authenticated(session) => {
-                    Some(Some((session.id_token.clone(), session.user_id.clone())))
-                }
-                AuthState::NotAuthenticated => Some(None),
-                _ => None,
+        let user_id = match self.auth_state.read(cx) {
+            AuthState::NotAuthenticated => {
+                self.reset(cx);
+                return;
             }
+            AuthState::Authenticated(session) | AuthState::Connecting(session) => {
+                session.user_id.clone()
+            }
+            _ => return,
         };
-        match snapshot {
-            Some(Some((jwt, user_id))) => self.enable_wallet(jwt, user_id, cx),
-            Some(None) => self.reset(cx),
-            None => {}
-        }
+        self.try_restore_persisted(&user_id, cx);
     }
 
-    fn enable_wallet(&mut self, jwt: String, user_id: String, cx: &mut Context<Self>) {
+    fn try_restore_persisted(&mut self, user_id: &str, cx: &mut Context<Self>) {
+        if user_id.is_empty() {
+            return;
+        }
+        if self.is_enabled && self.enabled_user.as_deref() == Some(user_id) {
+            return;
+        }
+        let Some(stored) = wallet_persist::load_wallet() else {
+            return;
+        };
+        if stored.user_id != user_id {
+            return;
+        }
+        if !stored.is_enabled {
+            return;
+        }
+        let (Some(zk_proofs), Some(ephemeral)) = (stored.zk_proofs, stored.ephemeral) else {
+            return;
+        };
+        self.wallet = stored.wallet;
+        self.zk_proofs = Some(zk_proofs);
+        self.ephemeral = Some(ephemeral);
+        self.is_enabled = true;
+        self.enabled_user = Some(user_id.to_string());
+        cx.notify();
+    }
+
+    pub fn fetch_zk_proofs_after_login(&mut self, session: &Session, cx: &mut Context<Self>) {
+        if session.id_token.is_empty() || session.user_id.is_empty() {
+            return;
+        }
+        self.enable_wallet(session.id_token.clone(), session.user_id.clone(), true, cx);
+    }
+
+    pub fn enable_wallet_for_current_user(&mut self, cx: &mut Context<Self>) {
+        let Some((jwt, user_id)) = self
+            .auth_state
+            .read(cx)
+            .session_credentials()
+            .filter(|(jwt, uid)| !jwt.is_empty() && !uid.is_empty())
+        else {
+            return;
+        };
+        self.enable_wallet(jwt, user_id, false, cx);
+    }
+
+    fn enable_wallet(&mut self, jwt: String, user_id: String, force: bool, cx: &mut Context<Self>) {
         if jwt.is_empty() || user_id.is_empty() {
             return;
         }
-        if self.is_enabled && self.enabled_user.as_deref() == Some(user_id.as_str()) {
+        if !force && self.is_enabled && self.enabled_user.as_deref() == Some(user_id.as_str()) {
             return;
         }
         if self.enabling_user.as_deref() == Some(user_id.as_str()) {
@@ -257,13 +303,14 @@ impl WalletStore {
                 this.ephemeral = Some(ephemeral);
                 this.zk_proofs = Some(zk_proofs);
                 this.is_enabled = true;
-                this.enabled_user = Some(user_id);
+                this.enabled_user = Some(user_id.clone());
                 if let Some(account) = account {
                     this.wallet = Some(WalletDetail {
                         address: account.address,
                         balance: account.balance,
                     });
                 }
+                this.persist_wallet_state();
                 cx.emit(WalletEvent::Enabled);
                 cx.notify();
             })
@@ -571,7 +618,32 @@ impl WalletStore {
         self.reset_generation
     }
 
-    fn reset(&mut self, cx: &mut Context<Self>) {
+    fn persist_wallet_state(&self) {
+        let Some(user_id) = self.enabled_user.clone() else {
+            return;
+        };
+        if !self.is_enabled {
+            return;
+        }
+        let state = PersistedWalletState {
+            user_id,
+            is_enabled: self.is_enabled,
+            wallet: self.wallet.clone(),
+            zk_proofs: self.zk_proofs.clone(),
+            ephemeral: self.ephemeral.clone(),
+        };
+        if let Err(error) = wallet_persist::save_wallet(&state) {
+            tracing::warn!(%error, "wallet: failed to persist wallet state");
+        }
+    }
+
+    fn clear_persisted_wallet() {
+        if let Err(error) = wallet_persist::clear_wallet() {
+            tracing::warn!(%error, "wallet: failed to clear persisted wallet state");
+        }
+    }
+
+    pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         if !self.is_enabled
             && self.wallet.is_none()
             && self.zk_proofs.is_none()
@@ -590,6 +662,7 @@ impl WalletStore {
         self.is_enabled = false;
         self.pending_give_coffee = false;
         self.enabled_user = None;
+        Self::clear_persisted_wallet();
         cx.notify();
     }
 }

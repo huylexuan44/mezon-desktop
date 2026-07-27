@@ -48,6 +48,7 @@ pub mod user_profile;
 pub mod users_by_user;
 pub mod voice;
 pub mod wallet;
+mod wallet_persist;
 pub mod webhook;
 
 use anyhow::{Context, Result};
@@ -474,4 +475,19 @@ pub enum AuthState {
     Connecting(Session),
     /// Token received, transport connected, and session is valid.
     Authenticated(Session),
+}
+
+impl AuthState {
+    pub fn session_credentials(&self) -> Option<(String, String)> {
+        match self {
+            Self::Authenticated(session) | Self::Connecting(session) => {
+                if session.id_token.is_empty() || session.user_id.is_empty() {
+                    None
+                } else {
+                    Some((session.id_token.clone(), session.user_id.clone()))
+                }
+            }
+            _ => None,
+        }
+    }
 }
