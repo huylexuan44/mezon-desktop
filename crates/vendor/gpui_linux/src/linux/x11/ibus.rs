@@ -36,9 +36,11 @@ const IBUS_CAP_FOCUS: u32 = 1 << 3;
 const CALL_TIMEOUT: Duration = Duration::from_millis(500);
 // The worker must always answer a key before the UI thread stops waiting for it:
 // if the UI gave up first it would type the raw key while the engine was still
-// composing it, mixing raw keystrokes into the text.
-const KEY_CALL_TIMEOUT: Duration = Duration::from_millis(400);
-pub(crate) const KEY_REPLY_TIMEOUT: Duration = Duration::from_millis(700);
+// composing it, mixing raw keystrokes into the text. The budget is generous
+// because engines load dictionaries lazily and the first keystroke of a session
+// can be far slower than the rest.
+const KEY_CALL_TIMEOUT: Duration = Duration::from_millis(800);
+pub(crate) const KEY_REPLY_TIMEOUT: Duration = Duration::from_millis(1000);
 
 pub(crate) enum IbusRequest {
     Key {
@@ -192,6 +194,11 @@ pub(crate) fn ibus_address() -> Option<String> {
     None
 }
 
+/// Letters and digits an input method would normally consume while composing.
+fn is_composable_key(keyval: u32) -> bool {
+    matches!(keyval, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
+}
+
 fn ibus_text_string(value: &zvariant::Value) -> Option<String> {
     let mut value = value;
     while let zvariant::Value::Value(inner) = value {
@@ -275,6 +282,14 @@ async fn with_timeout<T>(
     }
 }
 
+/// A call that timed out is recoverable — the engine is just slow, and killing
+/// the connection over it would send every following keystroke through as raw
+/// text. Only a dead connection is fatal.
+enum CallError {
+    TimedOut,
+    Fatal(anyhow::Error),
+}
+
 /// Await a method reply while still draining signals, so preedit/commit events
 /// never back up behind an in-flight call and stall the connection.
 async fn pump_call(
@@ -283,12 +298,12 @@ async fn pump_call(
     context_path: &OwnedObjectPath,
     sink: &IbusEventSink,
     timeout: Duration,
-) -> anyhow::Result<zbus::Message> {
+) -> Result<zbus::Message, CallError> {
     let mut call = std::pin::pin!(futures::FutureExt::fuse(call));
     let mut timer = std::pin::pin!(futures::FutureExt::fuse(smol::Timer::after(timeout)));
     loop {
         futures::select! {
-            reply = call => return Ok(reply?),
+            reply = call => return reply.map_err(|error| CallError::Fatal(error.into())),
             message = stream.next() => match message {
                 Some(Ok(message)) => {
                     if let Some(event) = event_from_message(&message, context_path) {
@@ -296,9 +311,11 @@ async fn pump_call(
                     }
                 }
                 Some(Err(_)) => {}
-                None => anyhow::bail!("ibus connection closed"),
+                None => {
+                    return Err(CallError::Fatal(anyhow::anyhow!("ibus connection closed")));
+                }
             },
-            _ = timer => anyhow::bail!("ibus call timed out"),
+            _ = timer => return Err(CallError::TimedOut),
         }
     }
 }
@@ -310,7 +327,7 @@ async fn context_call(
     body: &(impl zbus::export::serde::ser::Serialize + zvariant::DynamicType),
     stream: &mut futures::stream::Fuse<zbus::MessageStream>,
     sink: &IbusEventSink,
-) -> anyhow::Result<()> {
+) -> Result<(), CallError> {
     pump_call(
         connection.call_method(
             Some("org.freedesktop.IBus"),
@@ -376,7 +393,7 @@ async fn run_ibus(
     .await?;
     let context_path: OwnedObjectPath = reply.body().deserialize()?;
 
-    context_call(
+    if let Err(CallError::Fatal(error)) = context_call(
         &connection,
         &context_path,
         "SetCapabilities",
@@ -384,7 +401,10 @@ async fn run_ibus(
         &mut stream,
         &sink,
     )
-    .await?;
+    .await
+    {
+        return Err(error);
+    }
 
     eprintln!("[ibus] connected; input context {}", context_path.as_str());
 
@@ -393,6 +413,8 @@ async fn run_ibus(
         Signal(zbus::Message),
         Closed,
     }
+
+    let mut unhandled_keys = 0u8;
 
     loop {
         // The stream borrow must end before a request is served, so the request
@@ -442,9 +464,23 @@ async fn run_ibus(
                 )
                 .await;
                 drain_ready_signals(&mut stream, &context_path, &sink);
-                match call.and_then(|reply| Ok(reply.body().deserialize::<bool>()?)) {
-                    Ok(handled) => {
+                match call {
+                    Ok(message) => {
+                        let handled = message.body().deserialize::<bool>().unwrap_or(false);
+                        if !handled && is_composable_key(keyval) && unhandled_keys < 5 {
+                            unhandled_keys += 1;
+                            eprintln!(
+                                "[ibus] engine did not take keyval {keyval:#x}; typing it as plain text"
+                            );
+                        }
                         let _ = reply.send(handled);
+                        Ok(())
+                    }
+                    Err(CallError::TimedOut) => {
+                        // Let the key through as plain text this once; the engine
+                        // is alive, so the next keystroke can still compose.
+                        eprintln!("[ibus] engine did not answer keyval {keyval:#x} in time");
+                        let _ = reply.send(false);
                         Ok(())
                     }
                     Err(error) => {
@@ -491,8 +527,12 @@ async fn run_ibus(
             }
         };
 
-        if let Err(error) = result {
-            anyhow::bail!("ibus request failed: {error}");
+        match result {
+            Ok(()) => {}
+            Err(CallError::TimedOut) => {
+                eprintln!("[ibus] a request timed out; keeping the connection");
+            }
+            Err(CallError::Fatal(error)) => anyhow::bail!("ibus request failed: {error}"),
         }
     }
 }
