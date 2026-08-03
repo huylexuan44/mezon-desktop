@@ -5924,7 +5924,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5956,7 +5956,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "flume",
@@ -5971,7 +5971,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5993,7 +5993,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6009,7 +6009,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6044,14 +6044,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6072,7 +6072,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -6098,7 +6098,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
@@ -6109,7 +6109,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6139,7 +6139,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-stream"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "flume",
@@ -6157,7 +6157,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-theme"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "gpui",
  "theme",
@@ -6165,7 +6165,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6207,7 +6207,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6225,7 +6225,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -6247,7 +6247,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "block",
@@ -6276,7 +6276,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-webview"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "gtk",
@@ -6289,7 +6289,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6353,7 +6353,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "0.1.31"
+version = "2.0.0"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -13205,8 +13205,6 @@ dependencies = [
 [[package]]
 name = "zbus"
 version = "5.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eee682d202a77e4a9f3b2c2bdf48a7b28af5c08c34ddf66f98c93e5e39464285"
 dependencies = [
  "async-broadcast",
  "async-executor",

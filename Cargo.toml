@@ -59,7 +59,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.31"
+version = "2.0.0"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -370,6 +370,7 @@ cbindgen              = "0.28.0"
 [patch.crates-io]
 gpui = { path = "crates/vendor/gpui" }
 libspa = { path = "crates/vendor/libspa" }
+zbus = { path = "crates/vendor/zbus" }
 
 [patch."https://github.com/zed-industries/scap"]
 zed-scap = { path = "crates/vendor/zed-scap" }

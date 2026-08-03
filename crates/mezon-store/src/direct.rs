@@ -11,6 +11,8 @@ use crate::Freshness;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::users_by_user::UsersByUserStore;
 
+const STREAM_MODE_GROUP: i32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectKind {
     Dm,
@@ -742,8 +744,20 @@ impl DirectMessageStore {
                 if channel_type != 2 && channel_type != 3 {
                     return;
                 }
-                let api_ch = direct_from_channel_desc(desc);
-                if !self.channels.push_new(direct_from_api(api_ch)) {
+                let mut api_ch = direct_from_channel_desc(desc);
+                if e.create_time_seconds > 0 {
+                    api_ch.last_sent_timestamp = i64::from(e.create_time_seconds);
+                }
+                let mut channel = direct_from_api(api_ch);
+                let self_id = crate::badge::BadgeService::try_global(cx)
+                    .and_then(|badge| badge.read(cx).current_user_id(cx));
+                enrich_direct_from_event_users(&mut channel, &e.users, self_id);
+                let inserted = self.channels.push_new(channel);
+                tracing::info!(
+                    "user_channel_added: direct channel {} inserted={inserted}",
+                    desc.channel_id
+                );
+                if !inserted {
                     return;
                 }
                 cx.emit(DirectEvent::Changed { channel_id: None });
@@ -764,11 +778,11 @@ impl DirectMessageStore {
         let Some(channel) = self.channels.find_mut(channel_id) else {
             return false;
         };
-        if ts > 0 {
+        if ts > channel.last_sent_timestamp {
             channel.last_sent_timestamp = ts;
         }
         if from_me {
-            if ts > 0 {
+            if ts > channel.last_seen_timestamp {
                 channel.last_seen_timestamp = ts;
             }
         } else if increment_unread {
@@ -776,6 +790,28 @@ impl DirectMessageStore {
         }
         self.channels.resort_after_bump(channel_id);
         self.schedule_changed_notify(channel_id, cx);
+        true
+    }
+
+    /// Mirrors mezon-react's `addDirectByMessageWS`: a DM/group message arriving for a
+    /// conversation not in the list (stranger DM, first message ever) synthesizes the entry
+    /// from the message itself so the conversation shows up immediately. The next full fetch
+    /// replaces it with the server record.
+    pub fn insert_from_message(
+        &mut self,
+        m: &mezon_proto::api::ChannelMessage,
+        from_me: bool,
+        increment_unread: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self
+            .channels
+            .push_new(direct_from_message(m, from_me, increment_unread))
+        {
+            return false;
+        }
+        cx.emit(DirectEvent::Changed { channel_id: None });
+        cx.notify();
         true
     }
 
@@ -790,6 +826,21 @@ impl DirectMessageStore {
         });
         cx.notify();
         true
+    }
+
+    pub fn mark_as_read(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        if channel_id.is_zero() {
+            return;
+        }
+        self.note_read(channel_id, cx);
+        let api = self.api.clone();
+        let id = channel_id.get();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = api.mark_as_read(id, 0, 0).await {
+                tracing::error!("mark dm as read failed for channel {id}: {e}");
+            }
+        })
+        .detach();
     }
 
     fn schedule_changed_notify(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -1006,6 +1057,96 @@ fn group_desc_payload(
     (label, avatar)
 }
 
+fn enrich_direct_from_event_users(
+    channel: &mut DirectChannel,
+    users: &[mezon_proto::realtime::UserProfileRedis],
+    self_id: Option<UserId>,
+) {
+    let others: Vec<&mezon_proto::realtime::UserProfileRedis> = users
+        .iter()
+        .filter(|u| u.user_id != 0)
+        .filter(|u| self_id.is_none_or(|me| UserId(u.user_id) != me))
+        .collect();
+    let others_label = others
+        .iter()
+        .map(|u| {
+            if u.display_name.is_empty() {
+                u.username.clone()
+            } else {
+                u.display_name.clone()
+            }
+        })
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match channel.kind {
+        DirectKind::Dm => {
+            if !others_label.is_empty() {
+                channel.label = others_label;
+            }
+            if let Some(peer) = others.first() {
+                channel.peer_user_id = Some(UserId(peer.user_id));
+                channel.peer_username = peer.username.clone();
+                if !peer.avatar.is_empty() {
+                    channel.avatar = peer.avatar.clone();
+                }
+                channel.online = channel.online || peer.online;
+            }
+        }
+        DirectKind::Group => {
+            if channel.label.is_empty() {
+                channel.label = others_label;
+            }
+        }
+    }
+    if channel.member_count == 0 {
+        channel.member_count = users.len() as u32;
+    }
+}
+
+fn direct_from_message(
+    m: &mezon_proto::api::ChannelMessage,
+    from_me: bool,
+    increment_unread: bool,
+) -> DirectChannel {
+    let kind = if m.mode == STREAM_MODE_GROUP {
+        DirectKind::Group
+    } else {
+        DirectKind::Dm
+    };
+    let label = if !m.display_name.is_empty() {
+        m.display_name.clone()
+    } else {
+        m.username.clone()
+    };
+    let ts = if m.create_time_seconds > 0 {
+        i64::from(m.create_time_seconds)
+    } else {
+        0
+    };
+    let (peer_user_id, peer_username) = match kind {
+        DirectKind::Dm => (
+            (m.sender_id != 0).then_some(UserId(m.sender_id)),
+            m.username.clone(),
+        ),
+        DirectKind::Group => (None, String::new()),
+    };
+    DirectChannel {
+        id: ChannelId(m.channel_id),
+        label,
+        kind,
+        avatar: m.avatar.clone(),
+        peer_user_id,
+        peer_username,
+        creator_id: (m.sender_id != 0).then_some(UserId(m.sender_id)),
+        online: true,
+        member_count: 0,
+        unread_count: u32::from(increment_unread),
+        last_sent_timestamp: ts,
+        last_seen_timestamp: if from_me { ts } else { ts.saturating_sub(1) },
+    }
+}
+
 fn direct_from_api(c: ApiDirectChannel) -> DirectChannel {
     let kind = DirectKind::from_raw(c.channel_type);
     let (avatar, peer_user_id, peer_username, online) = match kind {
@@ -1125,6 +1266,127 @@ mod tests {
     fn direct_from_api_zero_creator_is_none() {
         let api = api_dm(1, "Group", 2);
         assert_eq!(direct_from_api(api).creator_id, None);
+    }
+
+    fn incoming_dm_message() -> mezon_proto::api::ChannelMessage {
+        mezon_proto::api::ChannelMessage {
+            channel_id: 77,
+            sender_id: 42,
+            username: "stranger".into(),
+            display_name: "Stranger Danger".into(),
+            avatar: "stranger.png".into(),
+            mode: 4,
+            create_time_seconds: 1000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stranger_dm_message_synthesizes_unread_conversation() {
+        let dm = direct_from_message(&incoming_dm_message(), false, true);
+        assert_eq!(dm.id, ChannelId(77));
+        assert_eq!(dm.kind, DirectKind::Dm);
+        assert_eq!(dm.label, "Stranger Danger");
+        assert_eq!(dm.avatar, "stranger.png");
+        assert_eq!(dm.peer_user_id, Some(UserId(42)));
+        assert_eq!(dm.peer_username, "stranger");
+        assert_eq!(dm.unread_count, 1);
+        assert_eq!(dm.last_sent_timestamp, 1000);
+        assert!(dm.is_unread());
+    }
+
+    #[test]
+    fn own_message_synthesizes_seen_conversation() {
+        let dm = direct_from_message(&incoming_dm_message(), true, false);
+        assert_eq!(dm.unread_count, 0);
+        assert_eq!(dm.last_seen_timestamp, dm.last_sent_timestamp);
+        assert!(!dm.is_unread());
+    }
+
+    #[test]
+    fn user_channel_added_dm_label_overrides_server_garbage() {
+        let mut channel = DirectChannel {
+            id: ChannelId(9),
+            label: "dev.mezon".into(),
+            kind: DirectKind::Dm,
+            avatar: String::new(),
+            peer_user_id: Some(UserId(999)),
+            peer_username: "wrong".into(),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 0,
+            last_sent_timestamp: 100,
+            last_seen_timestamp: 0,
+        };
+        let users = vec![
+            mezon_proto::realtime::UserProfileRedis {
+                user_id: 1,
+                username: "me".into(),
+                ..Default::default()
+            },
+            mezon_proto::realtime::UserProfileRedis {
+                user_id: 2,
+                username: "potinoc605".into(),
+                ..Default::default()
+            },
+        ];
+        enrich_direct_from_event_users(&mut channel, &users, Some(UserId(1)));
+        assert_eq!(channel.label, "potinoc605");
+        assert_eq!(channel.peer_user_id, Some(UserId(2)));
+        assert_eq!(channel.peer_username, "potinoc605");
+    }
+
+    #[test]
+    fn user_channel_added_enriches_blank_dm_from_event_users() {
+        let mut channel = DirectChannel {
+            id: ChannelId(9),
+            label: String::new(),
+            kind: DirectKind::Dm,
+            avatar: String::new(),
+            peer_user_id: None,
+            peer_username: String::new(),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 0,
+            last_sent_timestamp: 100,
+            last_seen_timestamp: 0,
+        };
+        let users = vec![
+            mezon_proto::realtime::UserProfileRedis {
+                user_id: 1,
+                username: "me".into(),
+                display_name: "Me".into(),
+                ..Default::default()
+            },
+            mezon_proto::realtime::UserProfileRedis {
+                user_id: 2,
+                username: "newbie".into(),
+                display_name: "New Bie".into(),
+                avatar: "newbie.png".into(),
+                online: true,
+                ..Default::default()
+            },
+        ];
+        enrich_direct_from_event_users(&mut channel, &users, Some(UserId(1)));
+        assert_eq!(channel.label, "New Bie");
+        assert_eq!(channel.peer_user_id, Some(UserId(2)));
+        assert_eq!(channel.peer_username, "newbie");
+        assert_eq!(channel.avatar, "newbie.png");
+        assert!(channel.online);
+        assert_eq!(channel.member_count, 2);
+    }
+
+    #[test]
+    fn group_message_synthesizes_group_conversation() {
+        let mut m = incoming_dm_message();
+        m.mode = 3;
+        m.display_name = String::new();
+        let dm = direct_from_message(&m, false, true);
+        assert_eq!(dm.kind, DirectKind::Group);
+        assert_eq!(dm.label, "stranger");
+        assert_eq!(dm.peer_user_id, None);
     }
 
     #[test]

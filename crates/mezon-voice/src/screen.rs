@@ -29,7 +29,7 @@ use crate::video::i420_to_bgra_into;
 use crate::video::nv12_full_to_i420;
 use crate::video::{VideoFrameStore, local_screen_key};
 
-const CAPTURE_FPS: u32 = 15;
+const CAPTURE_FPS: u32 = 30;
 #[cfg(not(target_os = "macos"))]
 const PREVIEW_MAX_WIDTH: u32 = 1280;
 #[cfg(not(target_os = "macos"))]
@@ -515,16 +515,19 @@ fn downscale_bgra_into(
         }
         return;
     }
+    let col_offsets: Vec<usize> = (0..dst_width)
+        .map(|x| x * src_width / dst_width * 4)
+        .collect();
     for y in 0..dst_height {
         let sy = y * src_height / dst_height;
         let s_row = sy * row_stride;
         let d_row = y * dst_row_bytes;
-        for x in 0..dst_width {
-            let sx = x * src_width / dst_width;
-            let s = s_row + sx * 4;
-            let d = d_row + x * 4;
-            if s + 4 <= src.len() && d + 4 <= dst.len() {
-                dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
+        let Some(dst_row) = dst.get_mut(d_row..d_row + dst_row_bytes) else {
+            continue;
+        };
+        for (d_px, &s_off) in dst_row.chunks_exact_mut(4).zip(&col_offsets) {
+            if let Some(s_px) = src.get(s_row + s_off..s_row + s_off + 4) {
+                d_px.copy_from_slice(s_px);
             }
         }
     }

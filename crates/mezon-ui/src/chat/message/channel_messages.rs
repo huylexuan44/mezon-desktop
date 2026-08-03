@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
-    DispatchPhase, Element, ElementId, Entity, FocusHandle, Focusable, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId, ListAlignment, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred, div, ease_in_out, list,
-    prelude::*, px,
+    DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, SharedString, Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred,
+    div, ease_in_out, list, prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -1173,6 +1173,11 @@ mod scroll_idle_tests {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMessagesEvent {
+    EditClosed,
+}
+
 pub struct ChannelMessages {
     pub(crate) list_state: ListState,
     focus_handle: FocusHandle,
@@ -2306,6 +2311,45 @@ impl ChannelMessages {
         cx.notify();
     }
 
+    fn last_editable_own_message(&self, cx: &App) -> Option<(MessageId, usize)> {
+        let me = self.cached_current_user_id.as_ref();
+        if me.is_empty() {
+            return None;
+        }
+        let last_editable = |messages: &[Message]| {
+            messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, m)| message_context_menu::message_is_editable(m, me))
+                .map(|(pos, m)| (m.id, pos))
+        };
+        if self.is_topic_box {
+            last_editable(&self.topic_messages)
+        } else {
+            last_editable(MessagesStore::global(cx).read(cx).viewport_messages())
+        }
+    }
+
+    fn row_is_offscreen(&self, pos: usize) -> bool {
+        let ix = usize::from(self.header_shown) + pos;
+        self.list_state.item_is_above_viewport(ix) == Some(true)
+            || self.list_state.item_is_below_viewport(ix) == Some(true)
+    }
+
+    pub(crate) fn edit_last_own_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.edit_input.is_some() {
+            return;
+        }
+        let Some((message_id, pos)) = self.last_editable_own_message(cx) else {
+            return;
+        };
+        if !self.is_topic_box && self.row_is_offscreen(pos) {
+            self.pending_jump = Some(message_id);
+        }
+        self.begin_edit(message_id, window, cx);
+    }
+
     /// Enter inline-edit mode for a message (Discord-style: in the row, not the composer).
     pub(crate) fn begin_edit(
         &mut self,
@@ -2352,7 +2396,8 @@ impl ChannelMessages {
                 MentionInputEvent::Cancel => this.cancel_edit(cx),
                 MentionInputEvent::SendSticker { .. }
                 | MentionInputEvent::SendGif { .. }
-                | MentionInputEvent::SendSound { .. } => {}
+                | MentionInputEvent::SendSound { .. }
+                | MentionInputEvent::EditLastMessage => {}
             },
         ));
         self.edit_input = Some((message_id, input));
@@ -2364,6 +2409,7 @@ impl ChannelMessages {
         self.edit_input = None;
         self._edit_input_sub = None;
         MessagesStore::global(cx).update(cx, |store, cx| store.cancel_edit(cx));
+        cx.emit(ChannelMessagesEvent::EditClosed);
         cx.notify();
     }
 
@@ -2391,6 +2437,7 @@ impl ChannelMessages {
 
         if original.as_deref() == Some(text.as_str()) {
             store.update(cx, |store, cx| store.cancel_edit(cx));
+            cx.emit(ChannelMessagesEvent::EditClosed);
             cx.notify();
             return;
         }
@@ -2398,6 +2445,7 @@ impl ChannelMessages {
         store.update(cx, |store, cx| {
             store.edit_message(message_id, text, content_tokens, cx)
         });
+        cx.emit(ChannelMessagesEvent::EditClosed);
         cx.notify();
     }
 
@@ -4276,6 +4324,8 @@ impl ChannelMessages {
             .into_any_element()
     }
 }
+
+impl EventEmitter<ChannelMessagesEvent> for ChannelMessages {}
 
 impl Render for ChannelMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

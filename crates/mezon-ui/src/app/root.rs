@@ -388,11 +388,7 @@ impl Render for RootView {
 }
 
 fn render_title_bar(title_bar: Entity<TitleBar>) -> AnyView {
-    let view = AnyView::from(title_bar);
-    #[cfg(not(target_os = "windows"))]
-    return view.cached(StyleRefinement::default().w_full().h_8());
-    #[cfg(target_os = "windows")]
-    view
+    AnyView::from(title_bar).cached(StyleRefinement::default().w_full().h_8())
 }
 
 fn cached_fill(view: impl Into<AnyView>) -> gpui::AnyElement {

@@ -168,7 +168,8 @@ fn clipped_image(
         .rounded_full()
         .overflow_hidden()
         .child(
-            img(src)
+            img(src.clone())
+                .id(("avatar-image", gpui::hash(&src)))
                 .size(size)
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover)

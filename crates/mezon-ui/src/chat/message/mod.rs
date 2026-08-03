@@ -37,7 +37,7 @@ mod transaction_history_modal;
 mod user_row;
 mod video_player;
 
-pub use channel_messages::ChannelMessages;
+pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::open_message_link;
 pub(crate) use content::{heading_line_height, heading_size};
 pub(crate) use content::{

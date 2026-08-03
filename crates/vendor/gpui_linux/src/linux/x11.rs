@@ -2,6 +2,7 @@ mod client;
 mod clipboard;
 mod display;
 mod event;
+mod ibus;
 mod window;
 mod xim_handler;
 

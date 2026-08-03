@@ -125,7 +125,10 @@ impl NotificationPushStore {
             let mut rx = api.spawn_gotify_stream(ws_base, token);
             while let Some(notification) = rx.recv().await {
                 let prepared = this
-                    .update(cx, |_, cx| prepare(cx, &user_id, &notification))
+                    .update(cx, |_, cx| {
+                        note_dm_unread(cx, &user_id, &notification);
+                        prepare(cx, &user_id, &notification)
+                    })
                     .ok()
                     .flatten();
                 let Some(prepared) = prepared else {
@@ -158,6 +161,26 @@ struct PreparedNotification {
     clan_id: Option<String>,
     link: Option<String>,
     icon_url: Option<String>,
+}
+
+fn note_dm_unread(cx: &mut App, user_id: &str, n: &GotifyNotification) {
+    if n.sender_id == user_id {
+        return;
+    }
+    let Ok(channel_id) = n.channel_id.parse::<i64>() else {
+        return;
+    };
+    if channel_id == 0 {
+        return;
+    }
+    let ts = chrono::DateTime::parse_from_rfc3339(&n.date)
+        .map(|date| date.timestamp())
+        .unwrap_or(0);
+    if let Some(badge) = crate::badge::BadgeService::try_global(cx) {
+        badge.update(cx, |badge, cx| {
+            badge.note_dm_notification(ChannelId(channel_id), ts, cx);
+        });
+    }
 }
 
 const SENDER_AVATAR_PX: u32 = 64;

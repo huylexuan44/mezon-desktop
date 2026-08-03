@@ -111,6 +111,7 @@ pub(super) struct OpenMenu {
     pub(super) position: Point<Pixels>,
     pub(super) channel_id: ChannelId,
     pub(super) clan_id: ClanId,
+    pub(super) in_favorites: bool,
     pub(super) mute_sub_open: bool,
     pub(super) noti_sub_open: bool,
 }
@@ -128,6 +129,17 @@ fn coming_soon_modal(title: String, locale: String) -> impl Fn(&mut Window, &mut
         let locale = locale.clone();
         Shell::global(cx).update(cx, |shell, cx| {
             shell.show_coming_soon(title, &locale, window, cx);
+        });
+    }
+}
+
+fn mark_channel_read(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_window: &mut Window, cx: &mut App| {
+        ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.mark_channel_as_read(clan_id, channel_id, cx);
         });
     }
 }
@@ -363,6 +375,7 @@ pub(super) fn build_channel_menu(
     mute_sub_open: bool,
     noti_sub_open: bool,
     clan_default: Option<i32>,
+    in_favorites: bool,
     permissions: ChannelMenuPermissions,
 ) -> ContextMenu {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
@@ -380,12 +393,16 @@ pub(super) fn build_channel_menu(
         }
     });
 
+    if !in_favorites {
+        menu = menu
+            .item(
+                t("channelMenu.menu.watchMenu.markAsRead"),
+                mark_channel_read(clan_id, channel_id),
+            )
+            .separator();
+    }
+
     menu = menu
-        .item(
-            t("channelMenu.menu.watchMenu.markAsRead"),
-            coming_soon_toast(coming_soon.clone()),
-        )
-        .separator()
         .item(
             t("channelMenu.menu.inviteMenu.copyLink"),
             coming_soon_toast(coming_soon.clone()),

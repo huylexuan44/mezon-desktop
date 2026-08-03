@@ -1,4 +1,5 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Global};
 use mezon_client::RealtimeEvent;
@@ -17,6 +18,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 const STREAM_MODE_GROUP: i32 = 3;
 const STREAM_MODE_DM: i32 = 4;
 const MAX_BADGE_DEDUP: usize = 500;
+const DM_GOTIFY_DEDUP_WINDOW: Duration = Duration::from_secs(1);
 const NOTIFICATION_USER_MENTIONED: i32 = -9;
 const NOTIFICATION_USER_REPLIED: i32 = -11;
 const NOTIFICATION_CHANNEL_TYPE_THREAD: i32 = 7;
@@ -142,6 +144,8 @@ pub struct BadgeService {
     auth_state: Entity<AuthState>,
     processed_badge_messages: HashSet<(ChannelId, MessageId)>,
     processed_badge_order: VecDeque<(ChannelId, MessageId)>,
+    dm_push_channels: HashSet<ChannelId>,
+    dm_gotify_counted: HashMap<ChannelId, Instant>,
 }
 
 struct GlobalBadgeService(Entity<BadgeService>);
@@ -165,11 +169,50 @@ impl BadgeService {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.processed_badge_messages.clear();
         self.processed_badge_order.clear();
+        self.dm_push_channels.clear();
+        self.dm_gotify_counted.clear();
         cx.notify();
     }
 
     pub fn current_user_id(&self, cx: &App) -> Option<UserId> {
         self.current_user_id_raw(cx).map(UserId)
+    }
+
+    /// Count a DM message delivered only through the notification push stream — the server's
+    /// `ChannelMessage` socket push for fresh/unopened DMs is unreliable (sometimes absent).
+    /// The notification payload carries no message id, so dedup against the socket path is by
+    /// delivery channel: once a socket push has been seen for a DM the socket owns its
+    /// counting, and a race between the near-simultaneous pair is absorbed by a short window.
+    /// A late-arriving notification for a message the user already read is dropped by
+    /// comparing the notification date against the conversation's last-seen timestamp,
+    /// mirroring the web `isAlreadySeen` guard.
+    pub fn note_dm_notification(&mut self, channel_id: ChannelId, ts: i64, cx: &mut Context<Self>) {
+        let Some(last_seen) = DirectMessageStore::global(cx)
+            .read(cx)
+            .find(channel_id)
+            .map(|channel| channel.last_seen_timestamp)
+        else {
+            return;
+        };
+        if self.dm_push_channels.contains(&channel_id) {
+            tracing::debug!("note_dm_notification: channel {channel_id} counted via socket push");
+            return;
+        }
+        if ts > 0 && last_seen >= ts {
+            tracing::debug!(
+                "note_dm_notification: channel {channel_id} already seen, not counting"
+            );
+            return;
+        }
+        if !should_increment_dm_unread(cx, channel_id, false) {
+            tracing::debug!("note_dm_notification: viewing channel {channel_id}, not counting");
+            return;
+        }
+        self.dm_gotify_counted.insert(channel_id, Instant::now());
+        tracing::debug!("note_dm_notification: unread +1 for channel {channel_id}");
+        DirectMessageStore::global(cx).update(cx, |dm, cx| {
+            dm.note_message(channel_id, ts, false, true, cx);
+        });
     }
 
     fn new(auth_state: Entity<AuthState>, cx: &mut Context<Self>) -> Self {
@@ -190,6 +233,8 @@ impl BadgeService {
             auth_state,
             processed_badge_messages: HashSet::new(),
             processed_badge_order: VecDeque::new(),
+            dm_push_channels: HashSet::new(),
+            dm_gotify_counted: HashMap::new(),
         }
     }
 
@@ -234,6 +279,15 @@ impl BadgeService {
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         match event {
             RealtimeEvent::ChannelMessage(m) => {
+                tracing::debug!(
+                    "channel_message push: channel={} clan={} mode={} code={} topic={} sender={}",
+                    m.channel_id,
+                    m.clan_id,
+                    m.mode,
+                    m.code,
+                    m.topic_id,
+                    m.sender_id
+                );
                 let channel_id = badge_channel_id(m);
                 let ts = if m.create_time_seconds > 0 {
                     i64::from(m.create_time_seconds)
@@ -246,9 +300,28 @@ impl BadgeService {
 
                 if is_dm_message(m) {
                     if !is_content_mutation(m) {
-                        let increment_unread = should_increment_dm_unread(cx, channel_id, from_me);
+                        self.dm_push_channels.insert(channel_id);
+                        let gotify_counted = self
+                            .dm_gotify_counted
+                            .get(&channel_id)
+                            .is_some_and(|at| at.elapsed() < DM_GOTIFY_DEDUP_WINDOW);
+                        let fresh = message_id.is_zero()
+                            || mark_badge_processed(
+                                &mut self.processed_badge_messages,
+                                &mut self.processed_badge_order,
+                                (channel_id, message_id),
+                            );
+                        let increment_unread = fresh
+                            && !gotify_counted
+                            && should_increment_dm_unread(cx, channel_id, from_me);
                         DirectMessageStore::global(cx).update(cx, |dm, cx| {
-                            dm.note_message(channel_id, ts, from_me, increment_unread, cx);
+                            if !dm.note_message(channel_id, ts, from_me, increment_unread, cx) {
+                                let inserted = dm.insert_from_message(m, from_me, increment_unread, cx);
+                                tracing::info!(
+                                    "dm message for unknown channel {}: synthesized entry inserted={inserted}",
+                                    m.channel_id
+                                );
+                            }
                         });
                         ChannelList::global(cx).update(cx, |cl, cx| {
                             cl.note_user_channel_dm_message(
@@ -353,21 +426,21 @@ impl BadgeService {
                     DirectMessageStore::global(cx).update(cx, |dm, cx| {
                         dm.note_read(channel_id, cx);
                     });
-                } else if e.category_id == 0 {
-                    ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_mark_as_read_clan(clan_id, cx);
-                    });
-                    ClanList::global(cx).update(cx, |cls, cx| cls.apply_badge_read(clan_id, cx));
-                } else if e.channel_id == 0 {
-                    ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_mark_as_read_category(clan_id, e.category_id, cx);
-                    });
-                } else {
+                } else if e.channel_id != 0 {
                     let channel_id = ChannelId(e.channel_id);
                     ChannelList::global(cx).update(cx, |cl, cx| {
                         cl.apply_read(clan_id, channel_id, cx);
                         cl.apply_topic_read(channel_id, cx);
                     });
+                } else if e.category_id != 0 {
+                    ChannelList::global(cx).update(cx, |cl, cx| {
+                        cl.apply_mark_as_read_category(clan_id, e.category_id, cx);
+                    });
+                } else {
+                    ChannelList::global(cx).update(cx, |cl, cx| {
+                        cl.apply_mark_as_read_clan(clan_id, cx);
+                    });
+                    ClanList::global(cx).update(cx, |cls, cx| cls.apply_badge_read(clan_id, cx));
                 }
             }
             RealtimeEvent::LastSeenUpdated(e) => {

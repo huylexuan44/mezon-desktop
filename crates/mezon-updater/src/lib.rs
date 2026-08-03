@@ -235,6 +235,33 @@ pub async fn check_for_updates(base_url: &str, current_version: &str) -> Result<
     }
 }
 
+pub async fn check_store_feed(feed_url: &str, current_version: &str) -> Result<Option<String>> {
+    let current = semver::Version::parse(current_version)
+        .map_err(|e| anyhow!("invalid current version '{current_version}': {e}"))?;
+    validate_url_with_base(feed_url, feed_url)?;
+
+    let response = http_client()
+        .get(feed_url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("store update feed fetch failed: {e}"))?;
+    if !response.status().is_success() {
+        bail!("store update feed returned HTTP {}", response.status());
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| anyhow!("failed to read store update feed body: {e}"))?;
+
+    let latest = parse_version_from_manifest(&body)?;
+    if latest > current {
+        tracing::info!("store update available: {} -> {}", current, latest);
+        Ok(Some(latest.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 pub async fn check_for_updates_with_manifest(
     base_url: &str,
     current_version: &str,

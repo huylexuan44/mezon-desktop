@@ -21,7 +21,7 @@ use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::media_channel::MediaChannelPanel;
 use crate::chat::member_list::{MemberListPanel, MemberSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
-use crate::chat::message::ChannelMessages;
+use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::chat::message_search::{MESSAGE_SEARCH_PANEL_WIDTH, MessageSearchPanel};
 use crate::chat::pinned_popover::PinnedPopoverPanel;
 use crate::components::compositions::channel_row::ChannelIcon;
@@ -48,6 +48,7 @@ pub struct ChatArea {
     no_permission_label: Option<(SharedString, SharedString)>,
     _submit_sub: Option<Subscription>,
     _reply_sub: Option<Subscription>,
+    _edit_closed_sub: Option<Subscription>,
     _send_permission_sub: Subscription,
     _send_permission_channel_sub: Subscription,
     _send_permission_debounce: Option<Task<()>>,
@@ -100,6 +101,7 @@ impl ChatArea {
             no_permission_label: None,
             _submit_sub: None,
             _reply_sub: None,
+            _edit_closed_sub: None,
             _send_permission_sub: send_permission_sub,
             _send_permission_channel_sub: send_permission_channel_sub,
             _send_permission_debounce: None,
@@ -216,6 +218,12 @@ impl ChatArea {
                     MentionInputEvent::SendSound { url, filename } => {
                         this.send_sound(url.clone(), filename.clone(), cx)
                     }
+                    MentionInputEvent::EditLastMessage => {
+                        let timeline = this.chat_area.timeline.clone();
+                        timeline.update(cx, |timeline, cx| {
+                            timeline.edit_last_own_message(window, cx)
+                        });
+                    }
                 },
             );
             self._submit_sub = Some(submit_sub);
@@ -256,6 +264,23 @@ impl ChatArea {
                 },
             );
             self._reply_sub = Some(reply_sub);
+
+            let edit_closed_sub = cx.subscribe_in(
+                &self.timeline,
+                window,
+                |this: &mut crate::ChatLayout, _, event: &ChannelMessagesEvent, window, cx| {
+                    let ChannelMessagesEvent::EditClosed = event;
+                    if this.chat_area.can_send_message == Some(false) {
+                        return;
+                    }
+                    if let Some(input) = this.chat_area.mention_input.clone() {
+                        window.defer(cx, move |window, cx| {
+                            input.update(cx, |input, cx| input.focus_input(window, cx));
+                        });
+                    }
+                },
+            );
+            self._edit_closed_sub = Some(edit_closed_sub);
         }
     }
 

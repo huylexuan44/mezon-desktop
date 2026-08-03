@@ -1,5 +1,5 @@
 use block::ConcreteBlock;
-use gpui::{App, Window, div, prelude::*};
+use gpui::{App, Context, Window, div, prelude::*};
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -20,7 +20,11 @@ unsafe impl Sync for EventMonitor {}
 
 static EVENT_MONITOR: OnceLock<EventMonitor> = OnceLock::new();
 
-pub fn render_controls(_theme: &Theme, _window: &Window) -> impl IntoElement {
+pub fn render_controls<V: 'static>(
+    _theme: &Theme,
+    _window: &Window,
+    _cx: &mut Context<V>,
+) -> impl IntoElement {
     div()
 }
 

@@ -729,7 +729,7 @@ impl ChannelAppWindow {
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    bar.child(window_controls::render_controls(theme, window))
+                    bar.child(window_controls::render_controls(theme, window, cx))
                 }
             })
     }
@@ -742,12 +742,12 @@ impl ChannelAppWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::app::window_controls::{
-            CONTROL_CLOSE_HOVER, CONTROL_ICON_SIZE, control_button, controls_row,
+            CONTROL_ICON_SIZE, control_button, controls_row, window_control_hover_bg,
+            window_control_icon_color,
         };
-        use gpui::rgb;
 
-        let hover = theme.bg_hover;
-        let color = theme.text_secondary;
+        let hover_bg = window_control_hover_bg(theme);
+        let color = window_control_icon_color(theme);
         let icon_size = px(CONTROL_ICON_SIZE);
         let zoom_icon = if window.is_maximized() {
             IconName::WindowRestore
@@ -758,7 +758,9 @@ impl ChannelAppWindow {
         controls_row()
             .child(
                 control_button(color)
-                    .hover(move |style| style.bg(hover))
+                    .id("channel-app-window-control-min")
+                    .hover(move |style| style.bg(hover_bg))
+                    .on_hover(cx.listener(|_, _, _, cx| cx.notify()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, window, cx| {
@@ -774,7 +776,9 @@ impl ChannelAppWindow {
             )
             .child(
                 control_button(color)
-                    .hover(move |style| style.bg(hover))
+                    .id("channel-app-window-control-max")
+                    .hover(move |style| style.bg(hover_bg))
+                    .on_hover(cx.listener(|_, _, _, cx| cx.notify()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, window, cx| {
@@ -786,7 +790,9 @@ impl ChannelAppWindow {
             )
             .child(
                 control_button(color)
-                    .hover(|style| style.bg(rgb(CONTROL_CLOSE_HOVER)).text_color(gpui::white()))
+                    .id("channel-app-window-control-close")
+                    .hover(move |style| style.bg(hover_bg))
+                    .on_hover(cx.listener(|_, _, _, cx| cx.notify()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {

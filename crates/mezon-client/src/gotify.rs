@@ -26,6 +26,8 @@ pub struct GotifyNotification {
     #[serde(default, deserialize_with = "de_id")]
     pub sender_id: String,
     #[serde(default)]
+    pub date: String,
+    #[serde(default)]
     pub extras: GotifyExtras,
 }
 

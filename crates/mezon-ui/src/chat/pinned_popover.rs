@@ -25,7 +25,9 @@ use crate::chat::message::{
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
-use crate::image_cache::LruImageCache;
+use crate::image_cache::{
+    LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
+};
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::download::save_with_progress_toast;
 
@@ -39,6 +41,7 @@ const LIST_PAD_X: f32 = 16.;
 const LIST_PAD_Y: f32 = 8.;
 const EMPTY_BODY_HEIGHT: f32 = 144.;
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
+const ATTACHMENT_PREVIEW_SIZE: f32 = 120.;
 
 #[derive(Clone)]
 struct PinCardVm {
@@ -130,6 +133,7 @@ pub struct PinnedPopoverPanel {
     list_state: ListState,
     focus_handle: FocusHandle,
     avatar_image_cache: Entity<LruImageCache>,
+    message_image_cache: Entity<LruImageCache>,
     ogp_image_cache: Entity<LruImageCache>,
     pin_cards: Vec<PinCardVm>,
     _subs: Vec<gpui::Subscription>,
@@ -167,6 +171,15 @@ impl PinnedPopoverPanel {
         ];
 
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let message_image_cache = cx.new(|cx| {
+            LruImageCache::message(
+                "pinned-image",
+                MESSAGE_IMAGE_CACHE_CAPACITY,
+                MESSAGE_IMAGE_CACHE_BYTES,
+                MESSAGE_ENTRY_MAX_BYTES,
+                cx,
+            )
+        });
         let ogp_image_cache = crate::image_cache::ogp_aux_cache("pinned-ogp", cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
 
@@ -176,6 +189,7 @@ impl PinnedPopoverPanel {
             list_state,
             focus_handle,
             avatar_image_cache,
+            message_image_cache,
             ogp_image_cache,
             pin_cards: Vec::new(),
             _subs: subs,
@@ -235,6 +249,8 @@ impl EventEmitter<DismissEvent> for PinnedPopoverPanel {}
 
 impl Render for PinnedPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.message_image_cache
+            .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let store = PinnedMessagesStore::global(cx);
@@ -243,6 +259,7 @@ impl Render for PinnedPopoverPanel {
         let clan_id = store.read(cx).clan_id();
         let handle = self.popover_handle.clone();
         let avatar_cache = self.avatar_image_cache.clone();
+        let message_cache = self.message_image_cache.clone();
         let ogp_cache = self.ogp_image_cache.clone();
         let tokens = &theme.tokens;
 
@@ -289,6 +306,7 @@ impl Render for PinnedPopoverPanel {
                 handle,
                 list_state,
                 avatar_cache,
+                message_cache,
                 ogp_cache,
                 panel_max_h,
                 window,
@@ -335,6 +353,7 @@ fn render_body(
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     list_state: ListState,
     avatar_cache: Entity<LruImageCache>,
+    message_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
     panel_max_h: f32,
     window: &mut Window,
@@ -374,6 +393,7 @@ fn render_body(
         let locale_for_list = locale.clone();
         let handle_for_list = popover_handle.clone();
         let avatar_for_list = avatar_cache.clone();
+        let message_for_list = message_cache.clone();
         let ogp_for_list = ogp_cache.clone();
         div()
             .size_full()
@@ -398,6 +418,7 @@ fn render_body(
                             &locale_for_list,
                             handle_for_list.clone(),
                             avatar_for_list.clone(),
+                            message_for_list.clone(),
                             ogp_for_list.clone(),
                         ))
                         .into_any_element()
@@ -466,6 +487,7 @@ fn pin_card(
     locale: &str,
     popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
     avatar_cache: Entity<LruImageCache>,
+    message_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
@@ -509,7 +531,7 @@ fn pin_card(
                 .child(format_pin_time(vm.create_time, locale)),
         );
 
-    let content = render_pin_body(&vm.pin, &vm.text_spans, theme, avatar_cache, ogp_cache);
+    let content = render_pin_body(&vm.pin, &vm.text_spans, theme, message_cache, ogp_cache);
 
     let jump_message_id = vm.message_id.clone();
     let jump_handle = popover_handle.clone();
@@ -594,7 +616,7 @@ fn render_pin_body(
     let image_preview = pin
         .attachments
         .iter()
-        .find(|att| att.is_image() && !att.proxied_src.is_empty())
+        .find(|att| pin_image_attachment_has_src(att))
         .map(|att| render_pin_image_attachment(att, image_cache.clone()));
     let file_preview = pin
         .attachments
@@ -975,24 +997,31 @@ fn render_pin_spans(spans: &[MessageSpan], theme: &Theme) -> gpui::AnyElement {
     col.into_any_element()
 }
 
+fn pin_image_attachment_has_src(att: &MessageAttachment) -> bool {
+    att.is_image() && (!att.proxied_src.is_empty() || !att.url.is_empty())
+}
+
 fn render_pin_image_attachment(
     att: &MessageAttachment,
     image_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
-    let width = att.display_width.clamp(1., 280.);
-    let height = att.display_height.clamp(1., 200.);
+    let src = if att.proxied_src.is_empty() {
+        SharedString::from(att.url.clone())
+    } else {
+        att.proxied_src.clone()
+    };
     div()
         .mt_1()
-        .w(px(width))
-        .h(px(height))
-        .max_w_full()
+        .w(px(ATTACHMENT_PREVIEW_SIZE))
+        .h(px(ATTACHMENT_PREVIEW_SIZE))
         .flex_shrink_0()
         .overflow_hidden()
-        .rounded_md()
-        .image_cache(image_cache)
+        .rounded(px(4.))
         .child(
-            img(att.proxied_src.clone())
-                .size_full()
+            img(src)
+                .image_cache(&image_cache)
+                .w_full()
+                .h_full()
                 .object_fit(ObjectFit::Cover),
         )
         .into_any_element()
@@ -1171,13 +1200,14 @@ fn render_pin_embeds(
             if !embed.thumbnail_proxied.is_empty() {
                 card = card.child(
                     div()
-                        .max_w(px(220.))
-                        .max_h(px(120.))
+                        .w(px(ATTACHMENT_PREVIEW_SIZE))
+                        .h(px(ATTACHMENT_PREVIEW_SIZE))
+                        .flex_shrink_0()
                         .overflow_hidden()
-                        .rounded_md()
-                        .image_cache(image_cache.clone())
+                        .rounded(px(4.))
                         .child(
                             img(embed.thumbnail_proxied.clone())
+                                .image_cache(&image_cache)
                                 .w_full()
                                 .h_full()
                                 .object_fit(ObjectFit::Cover),

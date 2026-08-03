@@ -1029,6 +1029,7 @@ impl ChatLayout {
                 self.direct_store
                     .update(cx, |store, cx| store.ensure_loaded(cx));
                 self.chat_area.clear_member_panel();
+                MessagesStore::global(cx).update(cx, |store, cx| store.close(cx));
             }
             Route::Chat => {
                 self.pending_channel_id = None;
@@ -1069,9 +1070,14 @@ impl ChatLayout {
                     channel_list.select_channel(channel_id, cx);
                 });
             }
-            MessagesStore::global(cx).update(cx, |store, cx| store.open_channel(channel_id, cx));
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.open_channel_in_clan(clan_id, channel_id, cx);
+            });
         } else {
             self.pending_channel_id = Some(channel_id);
+            self.channel_list.update(cx, |channel_list, cx| {
+                channel_list.load_for_clan(clan_id, cx);
+            });
         }
     }
 
@@ -1095,6 +1101,9 @@ impl ChatLayout {
                 }
                 channel_list.select_channel(channel_id, cx);
             });
+            MessagesStore::global(cx).update(cx, |store, cx| {
+                store.open_channel_in_clan(clan_id, channel_id, cx);
+            });
         }
     }
 
@@ -1107,11 +1116,19 @@ impl ChatLayout {
         else {
             return;
         };
-        let channel_list = self.channel_list.read(cx);
-        if !channel_list.is_clan_cache_loaded(clan_id) {
-            return;
+        {
+            let channel_list = self.channel_list.read(cx);
+            if !channel_list.is_clan_cache_loaded(clan_id) {
+                return;
+            }
+            if channel_list.channel_in_clan(clan_id, thread_id) {
+                return;
+            }
         }
-        if channel_list.channel_in_clan(clan_id, thread_id) {
+        let resolving = self.channel_list.update(cx, |store, cx| {
+            store.ensure_channel_in_clan(clan_id, thread_id, cx)
+        });
+        if resolving {
             return;
         }
         crate::router::replace(
@@ -1139,12 +1156,20 @@ impl ChatLayout {
             channel_id,
         } = Router::global(cx).read(cx).route()
             && route_clan == clan_id
-            && self
+        {
+            if self
                 .channel_list
                 .read(cx)
                 .channel_in_clan(clan_id, channel_id)
-        {
-            return;
+            {
+                return;
+            }
+            let resolving = self.channel_list.update(cx, |store, cx| {
+                store.ensure_channel_in_clan(clan_id, channel_id, cx)
+            });
+            if resolving {
+                return;
+            }
         }
 
         let welcome = self.clan_list.read(cx).welcome_channel_id(clan_id);
@@ -1628,7 +1653,12 @@ impl Render for ChatLayout {
                     .cursor_pointer()
                     .hover(|s| s.bg(update_banner_bg(true)))
                     .on_click(|_, _, cx| {
-                        if let Some(store) = AutoUpdateStore::try_global(cx) {
+                        let Some(store) = AutoUpdateStore::try_global(cx) else {
+                            return;
+                        };
+                        if let Some(url) = store.read(cx).store_page_url() {
+                            cx.open_url(url);
+                        } else {
                             store.update(cx, |store, cx| store.check(true, cx));
                         }
                     })

@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, FontWeight, ObjectFit, SharedString, Window, div, img,
-    prelude::*, px, relative,
+    AnyElement, App, Entity, FocusHandle, FontWeight, ObjectFit, Rgba, SharedString, Window, div,
+    img, prelude::*, px, relative,
 };
 use mezon_store::{
     AppConfig, AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, StreamMember,
@@ -15,6 +15,19 @@ use ui::Tooltip;
 
 const MEMBER_AVATAR_SIZE: f32 = 40.;
 const STREAM_CONNECTED_BAR_HEIGHT: f32 = 52.;
+
+fn theme_is_light(theme: &Theme) -> bool {
+    let bg = theme.bg_primary;
+    0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.5
+}
+
+fn stream_channel_bg(theme: &Theme, joined: bool) -> Rgba {
+    if joined || !theme_is_light(theme) {
+        theme.tokens.theme_setting_primary
+    } else {
+        gpui::rgb(0xd1d5db)
+    }
+}
 
 pub fn render_stream_channel(
     window: &mut Window,
@@ -40,6 +53,8 @@ pub fn render_stream_channel(
     let clan_name = channel.clan_name.clone();
     let error_message = store.error_message().map(str::to_owned);
     let output_device = output_device_id.clone();
+    let joined = store.is_joined() || store.is_joining();
+    let shell_bg = stream_channel_bg(theme, joined);
 
     let body = if let Some(message) = error_message {
         render_error(
@@ -97,7 +112,7 @@ pub fn render_stream_channel(
         .min_h_0()
         .min_w_0()
         .overflow_hidden()
-        .bg(gpui::rgb(0x000000))
+        .bg(shell_bg)
         .child(stream_header(
             theme,
             locale,
@@ -250,12 +265,23 @@ pub fn render_stream_connected_bar(
     let jump_channel = channel_id;
     let jump_clan = clan_id;
     let hover_color = theme.text_primary;
+    let leave_icon_color = if theme_is_light(theme) {
+        theme.text_primary
+    } else {
+        theme.text_secondary
+    };
+    let leave_hover_bg = if theme_is_light(theme) {
+        theme.tokens.bg_secondary_button_hover
+    } else {
+        theme.bg_hover
+    };
 
     Some(
         div()
             .w_full()
             .px_4()
             .py_2()
+            .bg(theme.tokens.bg_active_member_channel)
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -315,11 +341,11 @@ pub fn render_stream_connected_bar(
                             .rounded_md()
                             .cursor_pointer()
                             .opacity(80.)
-                            .hover(|s| s.bg(theme.bg_tertiary))
+                            .hover(move |s| s.bg(leave_hover_bg))
                             .child(
                                 Icon::new(IconName::EndCall)
                                     .size(px(20.))
-                                    .text_color(theme.text_secondary),
+                                    .text_color(leave_icon_color),
                             )
                             .on_click(move |_, _, cx| {
                                 stream_leave.update(cx, |store, cx| store.leave_stream(cx));

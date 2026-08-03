@@ -144,7 +144,6 @@ fn build_dm_menu(
     mute_sub_open: bool,
 ) -> ContextMenu {
     let t = |key: &'static str| mezon_i18n::t(locale, key).to_string();
-    let coming_soon = t("common.comingSoon");
     let sidebar_dismiss = sidebar.clone();
     let mut menu = ContextMenu::new()
         .on_dismiss(move |_window, cx| {
@@ -153,14 +152,14 @@ fn build_dm_menu(
                 cx.notify();
             });
         })
-        .item(t("channelMenu.menu.watchMenu.markAsRead"), {
-            let message = coming_soon.clone();
+        .item(
+            t("channelMenu.menu.watchMenu.markAsRead"),
             move |_window: &mut Window, cx: &mut App| {
-                let message = message.clone();
-                crate::app::shell::Shell::global(cx)
-                    .update(cx, move |shell, cx| shell.info(message, cx));
-            }
-        })
+                DirectMessageStore::global(cx).update(cx, |store, cx| {
+                    store.mark_as_read(channel_id, cx);
+                });
+            },
+        )
         .separator();
     if muted {
         let label = match muted_until {

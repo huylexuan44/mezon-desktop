@@ -75,24 +75,31 @@ mod keychain_store {
 
     use super::*;
 
-    const SERVICE: &str = "mezon-desktop";
     const USERNAME: &str = "wallet";
+
+    fn service_name() -> &'static str {
+        if crate::running_in_app_sandbox() {
+            "mezon-desktop.mas"
+        } else {
+            "mezon-desktop"
+        }
+    }
 
     pub fn save_wallet(state: &PersistedWalletState) -> Result<()> {
         let json = serde_json::to_string(state)?;
-        let entry = Entry::new(SERVICE, USERNAME)?;
+        let entry = Entry::new(service_name(), USERNAME)?;
         entry.set_password(&json)?;
         Ok(())
     }
 
     pub fn load_wallet() -> Option<PersistedWalletState> {
-        let entry = Entry::new(SERVICE, USERNAME).ok()?;
+        let entry = Entry::new(service_name(), USERNAME).ok()?;
         let json = entry.get_password().ok()?;
         parse_wallet(&json)
     }
 
     pub fn clear_wallet() -> Result<()> {
-        let entry = Entry::new(SERVICE, USERNAME)?;
+        let entry = Entry::new(service_name(), USERNAME)?;
         entry.delete_credential()?;
         Ok(())
     }

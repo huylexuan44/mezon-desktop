@@ -44,7 +44,7 @@ use super::{
     ButtonOrScroll, ScrollDirection, X11Display, X11WindowStatePtr, XcbAtoms, XimCallbackEvent,
     XimHandler, button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
-    get_reply, get_valuator_axis_index, handle_connection_error, modifiers_from_state,
+    get_reply, get_valuator_axis_index, handle_connection_error, ibus, modifiers_from_state,
     pressed_button_from_mask, xcb_flush,
 };
 
@@ -217,6 +217,10 @@ pub struct X11ClientState {
     keyboard_layout: LinuxKeyboardLayout,
     pub(crate) ximc: Option<X11rbClient<Rc<XCBConnection>>>,
     pub(crate) xim_handler: Option<XimHandler>,
+    pub(crate) ibus: Option<ibus::IbusHandle>,
+    pub(crate) ibus_sink: ibus::IbusEventSink,
+    pub(crate) ibus_key_failures: u8,
+    pub(crate) ibus_respawn_failures: u8,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     // TODO: Can the other updates to `modifiers` be removed so that this is unnecessary?
@@ -282,7 +286,16 @@ impl X11ClientStatePtr {
             return;
         };
         let mut state = client.0.borrow_mut();
-        if state.composing || state.ximc.is_none() {
+        if state.composing {
+            return;
+        }
+        if state.has_ibus() {
+            let scaled_bounds = bounds.scale(state.scale_factor);
+            drop(state);
+            client.ibus_send_cursor_location(scaled_bounds);
+            return;
+        }
+        if state.ximc.is_none() {
             return;
         }
 
@@ -460,14 +473,30 @@ impl X11Client {
 
         let xcb_connection = Rc::new(xcb_connection);
 
-        let ximc = match X11rbClient::init(Rc::clone(&xcb_connection), x_root_index, None) {
-            Ok(ximc) => Some(ximc),
-            Err(error) => {
-                eprintln!(
-                    "[xim] no XIM server available; IME input is disabled (XMODIFIERS={:?}): {error}",
-                    std::env::var("XMODIFIERS").unwrap_or_default()
-                );
-                None
+        let (ibus_ping, ibus_ping_source) = calloop::ping::make_ping()
+            .map_err(|err| anyhow!("Failed to create ibus ping source: {err:?}"))?;
+        let ibus_sink = ibus::IbusEventSink::new(ibus_ping);
+        let xmodifiers = std::env::var("XMODIFIERS").unwrap_or_default();
+        let ibus_allowed =
+            !xmodifiers.contains("fcitx") && std::env::var_os("GPUI_X11_DISABLE_IBUS").is_none();
+        let ibus_handle = if ibus_allowed {
+            ibus::spawn_ibus_client(ibus_sink.clone())
+        } else {
+            None
+        };
+
+        let ximc = if ibus_handle.is_some() {
+            None
+        } else {
+            match X11rbClient::init(Rc::clone(&xcb_connection), x_root_index, None) {
+                Ok(ximc) => Some(ximc),
+                Err(error) => {
+                    eprintln!(
+                        "[xim] no XIM server available; IME input is disabled (XMODIFIERS={:?}): {error}",
+                        std::env::var("XMODIFIERS").unwrap_or_default()
+                    );
+                    None
+                }
             }
         };
         let xim_handler = if ximc.is_some() {
@@ -521,6 +550,14 @@ impl X11Client {
             })
             .map_err(|err| anyhow!("Failed to initialize XDP event source: {err:?}"))?;
 
+        handle
+            .insert_source(ibus_ping_source, {
+                move |_, _, client: &mut X11Client| {
+                    client.drain_ibus_events();
+                }
+            })
+            .map_err(|err| anyhow!("Failed to initialize ibus event source: {err:?}"))?;
+
         xcb_flush(&xcb_connection);
 
         Ok(X11Client(Rc::new(RefCell::new(X11ClientState {
@@ -554,6 +591,10 @@ impl X11Client {
             keyboard_layout,
             ximc,
             xim_handler,
+            ibus: ibus_handle,
+            ibus_sink,
+            ibus_key_failures: 0,
+            ibus_respawn_failures: 0,
 
             compose_state,
             pre_edit_text: None,
@@ -709,6 +750,11 @@ impl X11Client {
 
             for event in events.into_iter() {
                 let mut state = self.0.borrow_mut();
+                if state.has_ibus() {
+                    drop(state);
+                    self.ibus_handle_x11_event(event);
+                    continue;
+                }
                 if !state.has_xim() {
                     drop(state);
                     self.handle_event(event);
@@ -807,6 +853,9 @@ impl X11Client {
     }
 
     pub fn enable_ime(&self) {
+        if self.ibus_focus_in() {
+            return;
+        }
         self.revive_xim_if_dead();
         let mut state = self.0.borrow_mut();
         if !state.has_xim() {
@@ -891,6 +940,12 @@ impl X11Client {
     pub fn reset_ime(&self) {
         let mut state = self.0.borrow_mut();
         state.composing = false;
+        if let Some(handle) = state.ibus.as_ref().filter(|handle| handle.is_alive()) {
+            let handle = handle.clone();
+            drop(state);
+            handle.send(ibus::IbusRequest::Reset);
+            return;
+        }
         if let Some(mut ximc) = state.ximc.take() {
             if let Some(xim_handler) = state.xim_handler.as_ref() {
                 ximc.reset_ic(xim_handler.im_id, xim_handler.ic_id).ok();
@@ -1114,7 +1169,9 @@ impl X11Client {
                     state.restore_xim(ximc, xim_handler);
                 }
                 drop(state);
-                self.reset_ime();
+                if !self.ibus_focus_out() {
+                    self.reset_ime();
+                }
                 window.handle_ime_delete();
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
@@ -1273,7 +1330,7 @@ impl X11Client {
                     px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
                 );
 
-                if state.composing && state.ximc.is_some() {
+                if state.composing && (state.ximc.is_some() || state.has_ibus()) {
                     drop(state);
                     self.reset_ime();
                     window.handle_ime_unmark();
@@ -1643,6 +1700,286 @@ impl X11Client {
             }
         }
     }
+
+    fn ibus_handle_x11_event(&self, event: Event) {
+        match event {
+            Event::KeyPress(key_event) => {
+                if self.ibus_forward_key(&key_event, false) {
+                    return;
+                }
+                self.handle_event(Event::KeyPress(key_event));
+            }
+            Event::KeyRelease(key_event) => {
+                if self.ibus_forward_key(&key_event, true) {
+                    return;
+                }
+                self.handle_event(Event::KeyRelease(key_event));
+            }
+            other => {
+                self.handle_event(other);
+            }
+        }
+    }
+
+    fn ibus_forward_key(&self, event: &xproto::KeyPressEvent, is_release: bool) -> bool {
+        let (handle, keyval, keycode, ibus_state) = {
+            let state = self.0.borrow();
+            let Some(handle) = state.ibus.as_ref().filter(|handle| handle.is_alive()) else {
+                return false;
+            };
+            if state.keyboard_focused_window.is_none() {
+                return false;
+            }
+            let code: xkbc::Keycode = event.detail.into();
+            let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
+            let keysym = key_event_state.key_get_one_sym(code);
+            if keysym.is_modifier_key() {
+                return false;
+            }
+            let mut ibus_state = u32::from(u16::from(event.state));
+            if is_release {
+                ibus_state |= ibus::IBUS_RELEASE_MASK;
+            }
+            (
+                handle.clone(),
+                keysym.raw(),
+                u32::from(event.detail).saturating_sub(8),
+                ibus_state,
+            )
+        };
+        let handled = match handle.process_key(keyval, keycode, ibus_state) {
+            Some(handled) => {
+                self.0.borrow_mut().ibus_key_failures = 0;
+                handled
+            }
+            None => {
+                let mut state = self.0.borrow_mut();
+                state.ibus_key_failures = state.ibus_key_failures.saturating_add(1);
+                if state.ibus_key_failures >= 3 {
+                    eprintln!(
+                        "[ibus] no reply to {} key events; disabling ibus until the next focus change",
+                        state.ibus_key_failures
+                    );
+                    handle.mark_dead();
+                }
+                false
+            }
+        };
+        self.drain_ibus_events();
+        handled
+    }
+
+    fn drain_ibus_events(&self) {
+        loop {
+            let event = {
+                let state = self.0.borrow();
+                state.ibus_sink.pop()
+            };
+            let Some(event) = event else {
+                break;
+            };
+            self.handle_ibus_event(event);
+        }
+    }
+
+    fn handle_ibus_event(&self, event: ibus::IbusEvent) {
+        match event {
+            ibus::IbusEvent::Commit(text) => {
+                let window = {
+                    let mut state = self.0.borrow_mut();
+                    state.composing = false;
+                    state.keyboard_focused_window
+                };
+                if let Some(window) = window.and_then(|window| self.get_window(window)) {
+                    window.handle_ime_commit(text);
+                }
+            }
+            ibus::IbusEvent::Preedit { text, visible } => {
+                let text = if visible { text } else { String::new() };
+                let window = {
+                    let mut state = self.0.borrow_mut();
+                    state.composing = !text.is_empty();
+                    state.keyboard_focused_window
+                };
+                if let Some(window) = window.and_then(|window| self.get_window(window)) {
+                    window.handle_ime_preedit(text);
+                }
+                self.ibus_update_cursor_location();
+            }
+            ibus::IbusEvent::ForwardKey {
+                keyval: _,
+                keycode,
+                state,
+            } => {
+                self.ibus_replay_key(keycode, state);
+            }
+            ibus::IbusEvent::Dead => {
+                eprintln!("[ibus] connection lost; will retry on the next focus change");
+            }
+        }
+    }
+
+    fn ibus_replay_key(&self, keycode: u32, state_bits: u32) {
+        let (window_id, root) = {
+            let state = self.0.borrow();
+            let Some(window_id) = state.keyboard_focused_window else {
+                return;
+            };
+            let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+            (window_id, root)
+        };
+        let is_release = state_bits & ibus::IBUS_RELEASE_MASK != 0;
+        let key_event = xproto::KeyPressEvent {
+            response_type: if is_release {
+                xproto::KEY_RELEASE_EVENT
+            } else {
+                xproto::KEY_PRESS_EVENT
+            },
+            detail: (keycode.saturating_add(8)).min(u32::from(u8::MAX)) as u8,
+            sequence: 0,
+            time: x11rb::CURRENT_TIME,
+            root,
+            event: window_id,
+            child: x11rb::NONE,
+            root_x: 0,
+            root_y: 0,
+            event_x: 0,
+            event_y: 0,
+            state: xproto::KeyButMask::from((state_bits & 0xffff) as u16),
+            same_screen: true,
+        };
+        if is_release {
+            self.handle_event(Event::KeyRelease(key_event));
+        } else {
+            self.handle_event(Event::KeyPress(key_event));
+        }
+    }
+
+    fn ibus_update_cursor_location(&self) {
+        let window = {
+            let state = self.0.borrow();
+            let Some(window_id) = state.keyboard_focused_window else {
+                return;
+            };
+            let Some(window_ref) = state.windows.get(&window_id) else {
+                return;
+            };
+            window_ref.window.clone()
+        };
+        let Some(area) = window.get_ime_area() else {
+            return;
+        };
+        self.ibus_send_cursor_location(area);
+    }
+
+    fn ibus_send_cursor_location(&self, area: Bounds<gpui::ScaledPixels>) {
+        let (handle, x_window, root) = {
+            let state = self.0.borrow();
+            let Some(handle) = state.ibus.as_ref().filter(|handle| handle.is_alive()) else {
+                return;
+            };
+            let Some(window_id) = state.keyboard_focused_window else {
+                return;
+            };
+            let Some(window_ref) = state.windows.get(&window_id) else {
+                return;
+            };
+            let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+            (handle.clone(), window_ref.window.x_window, root)
+        };
+        let origin = {
+            let state = self.0.borrow();
+            state
+                .xcb_connection
+                .translate_coordinates(x_window, root, 0, 0)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .map(|reply| (i32::from(reply.dst_x), i32::from(reply.dst_y)))
+        };
+        let Some((origin_x, origin_y)) = origin else {
+            return;
+        };
+        handle.send(ibus::IbusRequest::CursorLocation {
+            x: origin_x + area.origin.x.0 as i32,
+            y: origin_y + area.origin.y.0 as i32,
+            w: (area.size.width.0 as i32).max(1),
+            h: (area.size.height.0 as i32).max(1),
+        });
+    }
+
+    fn ibus_focus_in(&self) -> bool {
+        let handle = {
+            let mut state = self.0.borrow_mut();
+            if state.ibus.as_ref().is_some_and(|handle| !handle.is_alive()) {
+                state.ibus_respawn_failures = state.ibus_respawn_failures.saturating_add(1);
+                state.ibus_key_failures = 0;
+                if state.ibus_respawn_failures >= 3 {
+                    eprintln!("[ibus] repeatedly unreachable; falling back to XIM");
+                    state.ibus = None;
+                } else {
+                    let sink = state.ibus_sink.clone();
+                    state.ibus = ibus::spawn_ibus_client(sink);
+                    if state.ibus.is_some() {
+                        eprintln!("[ibus] reconnecting");
+                    }
+                }
+            } else if state.ibus.as_ref().is_some_and(|handle| handle.is_alive()) {
+                state.ibus_respawn_failures = 0;
+            } else if state.ibus.is_none() && state.ibus_respawn_failures < 3 {
+                let ibus_allowed = !std::env::var("XMODIFIERS")
+                    .unwrap_or_default()
+                    .contains("fcitx")
+                    && std::env::var_os("GPUI_X11_DISABLE_IBUS").is_none();
+                if ibus_allowed {
+                    let sink = state.ibus_sink.clone();
+                    state.ibus = ibus::spawn_ibus_client(sink);
+                    if state.ibus.is_some() {
+                        eprintln!("[ibus] connected on focus-in");
+                        if let Some((mut ximc, xim_handler)) = state.take_xim() {
+                            if xim_handler.connected && xim_handler.ic_id != 0 {
+                                let _ = ximc.destroy_ic(xim_handler.im_id, xim_handler.ic_id);
+                            }
+                            eprintln!(
+                                "[ibus] disconnecting XIM in favor of the native ibus client"
+                            );
+                        }
+                    }
+                }
+            }
+            state
+                .ibus
+                .as_ref()
+                .filter(|handle| handle.is_alive())
+                .cloned()
+        };
+        let Some(handle) = handle else {
+            return false;
+        };
+        handle.send(ibus::IbusRequest::FocusIn);
+        self.ibus_update_cursor_location();
+        true
+    }
+
+    fn ibus_focus_out(&self) -> bool {
+        let handle = {
+            let mut state = self.0.borrow_mut();
+            let handle = state
+                .ibus
+                .as_ref()
+                .filter(|handle| handle.is_alive())
+                .cloned();
+            if handle.is_some() {
+                state.composing = false;
+            }
+            handle
+        };
+        let Some(handle) = handle else {
+            return false;
+        };
+        handle.send(ibus::IbusRequest::Reset);
+        handle.send(ibus::IbusRequest::FocusOut);
+        true
+    }
 }
 
 impl LinuxClient for X11Client {
@@ -1994,6 +2331,10 @@ impl LinuxClient for X11Client {
 impl X11ClientState {
     fn has_xim(&self) -> bool {
         self.ximc.is_some() && self.xim_handler.is_some()
+    }
+
+    fn has_ibus(&self) -> bool {
+        self.ibus.as_ref().is_some_and(|handle| handle.is_alive())
     }
 
     fn take_xim(&mut self) -> Option<(X11rbClient<Rc<XCBConnection>>, XimHandler)> {

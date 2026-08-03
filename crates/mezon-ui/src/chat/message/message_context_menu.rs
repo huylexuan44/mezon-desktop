@@ -156,6 +156,29 @@ fn active_group_dm_owner(cx: &App) -> (bool, bool) {
     (true, me.is_some() && direct.creator_id == me)
 }
 
+pub(crate) fn edit_message_allowed(
+    is_my_message: bool,
+    code: MessageCode,
+    is_forwarded: bool,
+    send_failed: bool,
+) -> bool {
+    is_my_message
+        && !send_failed
+        && !is_forwarded
+        && code != MessageCode::SendToken
+        && code != MessageCode::Poll
+        && code.is_user_timeline()
+}
+
+pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool {
+    edit_message_allowed(
+        current_user_id == msg.sender_id.as_str(),
+        msg.code,
+        msg.is_forwarded,
+        msg.send_failed,
+    )
+}
+
 fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {
     if is_topic_box {
         if is_first_topic_message(msg.id, cx) {
@@ -381,11 +404,7 @@ fn build_topic_menu(
         );
     }
 
-    let show_edit = is_own_message
-        && msg.code != MessageCode::SendToken
-        && msg.code.is_user_timeline()
-        && !is_poll
-        && !msg.is_forwarded;
+    let show_edit = message_is_editable(msg, current_user_id);
     if show_edit {
         let host = host.clone();
         let message_id = msg.id;
@@ -566,11 +585,7 @@ fn build_channel_menu(
         );
     }
 
-    let show_edit = is_own_message
-        && msg.code != MessageCode::SendToken
-        && msg.code.is_user_timeline()
-        && !is_poll
-        && !msg.is_forwarded;
+    let show_edit = message_is_editable(msg, current_user_id);
     if show_edit {
         let host = host.clone();
         let message_id = msg.id;
@@ -856,5 +871,45 @@ mod delete_permission_tests {
     #[test]
     fn clan_owner_has_no_bypass() {
         assert!(!delete_message_allowed(false, false, true, true, false));
+    }
+}
+
+#[cfg(test)]
+mod edit_permission_tests {
+    use super::edit_message_allowed;
+    use mezon_store::MessageCode;
+
+    #[test]
+    fn edit_allowed_only_for_own_plain_message() {
+        assert!(edit_message_allowed(true, MessageCode::Chat, false, false));
+        assert!(!edit_message_allowed(
+            false,
+            MessageCode::Chat,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn edit_rejects_message_kinds_without_editable_content() {
+        for code in [
+            MessageCode::SendToken,
+            MessageCode::Poll,
+            MessageCode::Welcome,
+            MessageCode::AuditLog,
+            MessageCode::CreateThread,
+            MessageCode::Indicator,
+        ] {
+            assert!(
+                !edit_message_allowed(true, code, false, false),
+                "{code:?} must not be editable"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_rejects_forwarded_and_unsent_messages() {
+        assert!(!edit_message_allowed(true, MessageCode::Chat, true, false));
+        assert!(!edit_message_allowed(true, MessageCode::Chat, false, true));
     }
 }

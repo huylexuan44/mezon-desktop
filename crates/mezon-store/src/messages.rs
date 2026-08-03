@@ -19,8 +19,9 @@ use mezon_client::transport::{
     mention_content_tokens,
 };
 use mezon_client::{
-    AppApi, AttachmentUploadOutcome, ConnectionStatus, MezonTransport, RealtimeEvent, UploadFile,
-    UploadThumbnail, UrlAttachment,
+    AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory, InboxMentionSpan,
+    MarkedInboxMessageInput, MezonTransport, RealtimeEvent, UploadFile, UploadThumbnail,
+    UrlAttachment, inbox_notification_from_marked_message_local,
 };
 
 use crate::AppConfig;
@@ -33,6 +34,7 @@ use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD}
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectKind, DirectMessageStore};
+use crate::inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxStore};
 use crate::message::{
     CallLog, CallLogType, Embed, EmbedAuthor, EmbedField, EmbedFooter, EmbedImage, EmbedInput,
     EmbedTextInput, InvitePreview, MentionTarget, Message, MessageAttachment, MessageButton,
@@ -1505,7 +1507,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("Failed to load more messages for {channel_id}: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.loading_more = false;
+                        this.finish_loading_more(cx);
                         cx.notify();
                     });
                     return;
@@ -1525,9 +1527,10 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
+                        this.finish_loading_more(cx);
+                        cx.notify();
                         return;
                     };
                     let older: Vec<Message> = parsed
@@ -1536,25 +1539,17 @@ impl MessagesStore {
                         .collect();
                     if older.is_empty() {
                         channel.has_more = false;
-                        // No more history above: tell the UI so it can drop the
-                        // persistent top loading skeleton.
                         cx.emit(MessagesEvent::Updated { message_id: None });
+                        this.finish_loading_more(cx);
                         cx.notify();
                         return;
                     }
                     let prepended = older.len();
                     let dropped_bottom = channel.messages.prepend_older(older);
-                    // Reached the channel start once the oldest row is the
-                    // FIRST_MESSAGE sentinel (cf. React `hasMore` check).
                     channel.has_more = has_more_from_oldest(channel.messages.as_slice());
                     (prepended, dropped_bottom)
                 };
                 if this.active_channel_id == Some(channel_id) {
-                    // Older rows were prepended; the cap may have dropped the same
-                    // many newest rows off the back. Emit the exact splice so the
-                    // UI window matches the buffer 1:1 — the prepend re-anchors to
-                    // the prior first row, and the back-trim removes off-screen
-                    // rows below.
                     cx.emit(MessagesEvent::Shifted {
                         added_top: prepended,
                         removed_top: 0,
@@ -1562,6 +1557,7 @@ impl MessagesStore {
                         removed_bottom: dropped_bottom,
                     });
                 }
+                this.finish_loading_more(cx);
                 cx.notify();
             });
         })
@@ -1637,7 +1633,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("Failed to load newer messages for {channel_id}: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.loading_more = false;
+                        this.finish_loading_more(cx);
                         cx.notify();
                     });
                     return;
@@ -1662,9 +1658,10 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
+                        this.finish_loading_more(cx);
+                        cx.notify();
                         return;
                     };
                     let newer: Vec<Message> = parsed
@@ -1672,32 +1669,26 @@ impl MessagesStore {
                         .filter(|m| !channel.messages.contains_id(m.id))
                         .collect();
                     if newer.is_empty() {
-                        match reconciled_tail_after_empty_page(
+                        let chase_tail = match reconciled_tail_after_empty_page(
                             this.last_message_by_channel.get(&channel_id).copied(),
                             expected_tail,
                             newest_id,
                         ) {
                             Some(tail) => {
                                 this.last_message_by_channel.insert(channel_id, tail);
+                                false
                             }
-                            None => {
-                                // The tail advanced while this fetch was in
-                                // flight; chase it immediately, otherwise the
-                                // buffer stays frozen with `has_more_bottom`
-                                // true and live appends stay gated. Bounded:
-                                // each chase consumes one tail move.
-                                if this.active_channel_id == Some(channel_id) {
-                                    this.load_more_bottom(cx);
-                                }
-                            }
-                        }
+                            None => this.active_channel_id == Some(channel_id),
+                        };
                         cx.emit(MessagesEvent::Updated { message_id: None });
+                        this.finish_loading_more(cx);
+                        if chase_tail && this.pending_jump.is_none() && !this.loading_more {
+                            this.load_more_bottom(cx);
+                        }
                         cx.notify();
                         return;
                     }
                     let added = newer.len();
-                    // Appending newer drops the oldest (front) at the cap; those
-                    // older rows then become re-fetchable from the top again.
                     let dropped = channel.messages.append_newer(newer);
                     if dropped > 0 {
                         channel.has_more = true;
@@ -1715,10 +1706,6 @@ impl MessagesStore {
                             "load_more_bottom: appended newer page"
                         );
                     }
-                    // Newer rows were appended; the cap may have dropped the same
-                    // many oldest rows off the front. Emit the exact splice so the
-                    // UI window matches the buffer 1:1 and the scroll stays
-                    // anchored to the prior content.
                     cx.emit(MessagesEvent::Shifted {
                         added_top: 0,
                         removed_top: dropped,
@@ -1726,6 +1713,7 @@ impl MessagesStore {
                         removed_bottom: 0,
                     });
                 }
+                this.finish_loading_more(cx);
                 cx.notify();
             });
         })
@@ -1747,11 +1735,16 @@ impl MessagesStore {
         self.try_consume_pending_jump(cx);
     }
 
+    fn finish_loading_more(&mut self, cx: &mut Context<Self>) {
+        self.loading_more = false;
+        self.try_consume_pending_jump(cx);
+    }
+
     fn try_consume_pending_jump(&mut self, cx: &mut Context<Self>) {
         let Some((channel_id, message_id)) = self.pending_jump else {
             return;
         };
-        if self.active_channel_id != Some(channel_id) || self.loading {
+        if self.active_channel_id != Some(channel_id) || self.loading || self.loading_more {
             return;
         }
         self.pending_jump = None;
@@ -1771,9 +1764,11 @@ impl MessagesStore {
             return;
         }
         if self.loading_more || self.loading {
+            self.pending_jump = Some((channel_id, message_id));
             return;
         }
         let Some(clan_id) = self.active_clan_id else {
+            self.pending_jump = Some((channel_id, message_id));
             return;
         };
         let anchor = message_id.get();
@@ -1804,7 +1799,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("jump_to_message AROUND fetch failed for {channel_id}: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.loading_more = false;
+                        this.finish_loading_more(cx);
                         cx.notify();
                     });
                     return;
@@ -1819,11 +1814,8 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
                 let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
-                // Centered trim if the window somehow exceeds the cap, keeping the
-                // target near the middle so both directions stay scrollable.
                 if window.len() > MAX_MESSAGES_PER_CHANNEL {
                     let target = window.iter().position(|m| m.id == message_id).unwrap_or(0);
                     let half = MAX_MESSAGES_PER_CHANNEL / 2;
@@ -1838,6 +1830,7 @@ impl MessagesStore {
                         message_id = anchor,
                         "jump_to_message: target not in AROUND window"
                     );
+                    this.finish_loading_more(cx);
                     cx.notify();
                     return;
                 }
@@ -1847,11 +1840,13 @@ impl MessagesStore {
                     channel.messages.replace(window);
                     channel.has_more = has_more;
                 }
+                this.loading_more = false;
                 if this.active_channel_id == Some(channel_id) {
                     let count = this.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
                     cx.emit(MessagesEvent::JumpTo { message_id });
                 }
+                this.try_consume_pending_jump(cx);
                 cx.notify();
             });
         })
@@ -2753,29 +2748,130 @@ impl MessagesStore {
         };
         let storage_id = self.reaction_storage_channel(message_id);
         let clan_id = self.active_clan_id.map_or(0, |c| c.get());
+        let channel_type = self.mode;
         let Some(channel) = self.cache.get(&storage_id) else {
             return;
         };
-        let Some(msg) = channel.messages.get_by_id(message_id) else {
+        let Some(msg) = channel.messages.get_by_id(message_id).cloned() else {
             return;
         };
-        let content_json = serde_json::to_string(&ApiMessageContent {
-            t: msg.content.clone(),
+        let content_json = msg
+            .raw_content
+            .as_deref()
+            .filter(|raw| !raw.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                serde_json::to_string(&ApiMessageContent {
+                    t: msg.content.clone(),
+                    ..Default::default()
+                })
+                .unwrap_or_else(|_| msg.content.clone())
+            });
+        let mentions: Vec<mezon_proto::api::MessageMention> = msg
+            .mention_targets
+            .iter()
+            .filter_map(|target| {
+                let user_id = target.user_id.as_ref()?.parse().ok()?;
+                Some(mezon_proto::api::MessageMention {
+                    user_id,
+                    role_id: target
+                        .role_id
+                        .as_ref()
+                        .and_then(|id| id.parse().ok())
+                        .unwrap_or(0),
+                    s: target.s,
+                    e: target.e,
+                    username: target.username.to_string(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let attachments: Vec<mezon_proto::api::MessageAttachment> = msg
+            .attachments
+            .iter()
+            .map(|att| mezon_proto::api::MessageAttachment {
+                url: att.url.clone(),
+                filename: att.filename.clone(),
+                filetype: att.filetype.clone(),
+                width: i32::try_from(att.width).unwrap_or(0),
+                height: i32::try_from(att.height).unwrap_or(0),
+                thumbnail: att.thumbnail.clone(),
+                duration: att.duration,
+                size: i32::try_from(att.size).unwrap_or(0),
+            })
+            .collect();
+        let attachment_link = attachments
+            .first()
+            .map(|att| att.url.clone())
+            .unwrap_or_default();
+        let attachment_type = attachments
+            .first()
+            .map(|att| att.filetype.clone())
+            .unwrap_or_default();
+        let has_more_attachment = attachments.len() > 1;
+        let avatar = msg.avatar_url.to_string();
+        let sender_id = msg.sender_id.parse().unwrap_or(0);
+        let display_name = msg.sender_name.to_string();
+        let create_time_seconds = u32::try_from(msg.create_time.max(0)).unwrap_or(0);
+        let mention_spans: Vec<InboxMentionSpan> = msg
+            .mention_targets
+            .iter()
+            .map(|target| InboxMentionSpan {
+                start: target.s,
+                end: target.e,
+                user_id: target.user_id.clone().unwrap_or_default(),
+                role_id: target.role_id.clone().unwrap_or_default(),
+                is_role: target.role_id.is_some(),
+            })
+            .collect();
+        let marked = MarkedInboxMessageInput {
+            message_id: message_id.get(),
+            channel_id: channel_id.get(),
+            clan_id,
+            sender_id,
+            username: display_name.clone(),
+            display_name,
+            avatar: avatar.clone(),
+            content_json: content_json.clone(),
+            create_time_seconds,
+            attachment_link,
+            attachment_type,
+            has_more_attachment,
+            mention_spans,
+            channel_type,
+            topic_id: msg.topic_id.map(|topic| topic.get()),
+        };
+        let request = mezon_proto::api::Message2InboxRequest {
+            message_id: message_id.get(),
+            channel_id: channel_id.get(),
+            clan_id,
+            avatar,
+            content: content_json,
+            mentions,
+            attachments,
             ..Default::default()
-        })
-        .unwrap_or_else(|_| msg.content.clone());
-
+        };
         let api = self.api.clone();
-        let channel_num = channel_id.get();
-        let message_num = message_id.get();
-        cx.spawn(async move |_this, _cx| {
-            if let Err(e) = api
-                .create_message_2_inbox(message_num, channel_num, clan_id, &content_json)
-                .await
-            {
-                tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
-            }
-        })
+        cx.spawn(
+            async move |_this, cx| match api.create_message_2_inbox(request).await {
+                Ok(()) => {
+                    let notification = inbox_notification_from_marked_message_local(&marked);
+                    cx.update(|cx| {
+                        InboxStore::global(cx).update(cx, |store, cx| {
+                            store.prepend_local(
+                                GLOBAL_INBOX_BUCKET_CLAN_ID,
+                                InboxCategory::Messages,
+                                notification,
+                                cx,
+                            );
+                        });
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("add_to_inbox create_message_2_inbox failed: {e}");
+                }
+            },
+        )
         .detach();
     }
 
@@ -3944,6 +4040,22 @@ impl MessagesStore {
 
     /// Open a clan channel as the active conversation (looks up clan/privacy from `ChannelList`).
     pub fn open_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
+        let Some(clan_id) = ChannelList::global(cx)
+            .read(cx)
+            .find_channel_in_active_clan(channel_id)
+            .map(|channel| channel.clan_id)
+        else {
+            return;
+        };
+        self.open_channel_in_clan(clan_id, channel_id, cx);
+    }
+
+    pub fn open_channel_in_clan(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_channel_id == Some(channel_id) && !self.is_dm {
             if self.loading {
                 return;
@@ -3954,29 +4066,37 @@ impl MessagesStore {
                 .map(|c| c.messages.is_empty())
                 .unwrap_or(true);
             if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                self.try_consume_pending_jump(cx);
                 return;
             }
             self.refetch_current_messages(cx);
             return;
         }
-        let Some(channel) = ChannelList::global(cx)
-            .read(cx)
-            .find_channel_in_active_clan(channel_id)
-            .cloned()
-        else {
+        let channel_list = ChannelList::global(cx).read(cx);
+        let channel = channel_list
+            .channel(clan_id, channel_id)
+            .or_else(|| {
+                channel_list
+                    .clan_id_for_channel(channel_id)
+                    .and_then(|resolved| channel_list.channel(resolved, channel_id))
+            })
+            .cloned();
+        let Some(channel) = channel else {
             return;
         };
+        self.open_channel_record(channel.clan_id, channel_id, &channel, cx);
+    }
+
+    fn open_channel_record(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        channel: &crate::channel::Channel,
+        cx: &mut Context<Self>,
+    ) {
         let (is_public, join_type, mode) =
             channel_join_params(channel.channel_type, channel.parent_id, channel.private);
-        self.activate(
-            channel.clan_id,
-            channel_id,
-            is_public,
-            false,
-            join_type,
-            mode,
-            cx,
-        );
+        self.activate(clan_id, channel_id, is_public, false, join_type, mode, cx);
     }
 
     /// Open a direct message / group conversation (clan_id = 0) as the active conversation.
@@ -3997,6 +4117,7 @@ impl MessagesStore {
                 .map(|c| c.messages.is_empty())
                 .unwrap_or(true);
             if !empty || self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
+                self.try_consume_pending_jump(cx);
                 return;
             }
             self.refetch_current_messages(cx);
@@ -4137,6 +4258,7 @@ impl MessagesStore {
                     self.loading = false;
                     let count = self.messages().len();
                     cx.emit(MessagesEvent::Reset { count });
+                    self.try_consume_pending_jump(cx);
                     cx.notify();
                 }
             }
@@ -5600,7 +5722,10 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
         }
         existing.attachments = new_attachments;
     }
-    existing.references = incoming.references.clone();
+    let kept_prior_references = incoming.references.is_empty();
+    if !kept_prior_references {
+        existing.references = incoming.references.clone();
+    }
     existing.update_time = incoming.update_time;
     existing.is_edited = incoming.is_edited;
     existing.ogp = incoming.ogp.clone();
@@ -5613,7 +5738,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.is_deleted_placeholder = incoming.is_deleted_placeholder;
     existing.topic_id = incoming.topic_id;
     existing.topic_creator_id = incoming.topic_creator_id;
-    existing.highlights_viewer_direct = incoming.highlights_viewer_direct;
+    existing.highlights_viewer_direct = incoming.highlights_viewer_direct
+        || (kept_prior_references && existing.highlights_viewer_direct);
     existing.raw_content = incoming.raw_content.clone();
     existing.mention_targets = incoming.mention_targets.clone();
     if incoming.poll.is_some() {
@@ -7906,6 +8032,92 @@ mod tests {
             !existing.attachments[0].presign_pending,
             "recompute against the arrived presign_finish flips the gate"
         );
+    }
+
+    #[test]
+    fn presign_finish_update_keeps_the_reply_reference() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_name: "Alice".into(),
+                content: "original".into(),
+                ..Default::default()
+            }])
+            .with_attachments(vec![MessageAttachment {
+                url: "https://cdn.example/uploads/photo.png".into(),
+                ..Default::default()
+            }]);
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        assert!(incoming.references.is_empty());
+        assert!(incoming.attachments.is_empty());
+        merge_message_update(&mut existing, &incoming);
+
+        assert_eq!(
+            existing.references.len(),
+            1,
+            "a content-only presign_finish echo must not drop the reply reference"
+        );
+        assert_eq!(existing.references[0].message_ref_id, MessageId(7));
+        assert_eq!(existing.attachments.len(), 1);
+    }
+
+    #[test]
+    fn presign_finish_update_keeps_the_reply_row_highlight() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_id: UserId(42),
+                ..Default::default()
+            }])
+            .with_viewer_highlight(true);
+
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100);
+        assert!(!incoming.highlights_viewer_direct);
+        merge_message_update(&mut existing, &incoming);
+
+        assert!(
+            existing.highlights_viewer_direct,
+            "the highlight is derived from references, so keeping them must keep it"
+        );
+    }
+
+    #[test]
+    fn update_that_carries_references_recomputes_the_highlight() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100)
+            .with_references(vec![MessageReference {
+                message_ref_id: MessageId(7),
+                sender_id: UserId(42),
+                ..Default::default()
+            }])
+            .with_viewer_highlight(true);
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(9),
+                sender_id: UserId(7),
+                ..Default::default()
+            },
+        ]);
+        merge_message_update(&mut existing, &incoming);
+        assert!(!existing.highlights_viewer_direct);
+    }
+
+    #[test]
+    fn update_that_carries_references_replaces_them() {
+        let mut existing = Message::new(MessageId(1), "hi", "u1", "U1", 100).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(7),
+                ..Default::default()
+            },
+        ]);
+        let incoming = Message::new(MessageId(1), "hi", "u1", "U1", 100).with_references(vec![
+            MessageReference {
+                message_ref_id: MessageId(9),
+                ..Default::default()
+            },
+        ]);
+        merge_message_update(&mut existing, &incoming);
+        assert_eq!(existing.references[0].message_ref_id, MessageId(9));
     }
 
     fn plain_api_message(

@@ -1,5 +1,5 @@
 use gpui::{
-    App, CursorStyle, Decorations, Div, Global, MouseButton, QuitMode, ResizeEdge, Tiling,
+    App, Context, CursorStyle, Decorations, Div, Global, MouseButton, QuitMode, ResizeEdge, Tiling,
     TitlebarOptions, Window, WindowDecorations, WindowHandle, div, prelude::*, px,
 };
 
@@ -45,8 +45,12 @@ pub const CLAN_SIDEBAR_HEADER_TOP: f32 = CLAN_SIDEBAR_STICKY_TOP;
 
 /// Render the platform window controls (minimize / maximize / close).
 /// Returns an empty element on macOS, where the native traffic lights are used.
-pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
-    platform::render_controls(theme, window)
+pub fn render_controls<V: 'static>(
+    theme: &Theme,
+    window: &Window,
+    cx: &mut Context<V>,
+) -> impl IntoElement {
+    platform::render_controls(theme, window, cx)
 }
 
 struct RunsInBackground(bool);
@@ -253,8 +257,16 @@ pub fn render_app_drag_header() -> impl IntoElement {
 pub(crate) const CONTROL_BUTTON_SIZE: f32 = 28.0;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) const CONTROL_ICON_SIZE: f32 = 12.0;
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-pub(crate) const CONTROL_CLOSE_HOVER: u32 = 0xc42b1c;
+pub(crate) fn window_control_hover_bg(theme: &Theme) -> Rgba {
+    theme.tokens.bg_hover
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn window_control_icon_color(theme: &Theme) -> Rgba {
+    theme.text_secondary
+}
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) fn control_button(color: Rgba) -> Div {

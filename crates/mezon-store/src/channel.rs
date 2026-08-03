@@ -28,6 +28,8 @@ const CATEGORY_EVENT_UPDATED: i32 = 2;
 const PREVIOUS_CHANNELS_PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const BADGE_SEED_MAX_ATTEMPTS: u32 = 3;
 const BADGE_SEED_RETRY_BACKOFF: Duration = Duration::from_millis(400);
+const CHANNEL_DETAIL_MAX_ATTEMPTS: u32 = 3;
+const CHANNEL_DETAIL_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const THREAD_ARCHIVE_DURATION_SECONDS: i64 = 7 * 24 * 60 * 60;
 const ADDED_THREAD_UNREAD_WINDOW_SECONDS: i64 = 1000;
 
@@ -293,6 +295,8 @@ pub struct ChannelList {
     channel_index: RefCell<ChannelLocationCache>,
     reset_generation: u64,
     reactivating: HashSet<ChannelId>,
+    channel_detail_pending: HashSet<ChannelId>,
+    channel_detail_failed: HashSet<ChannelId>,
     _previous_channels_persist: Task<()>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
@@ -442,6 +446,8 @@ impl ChannelList {
         self.persist_previous_channels(cx);
         self.invalidate_channel_index_all();
         self.reactivating.clear();
+        self.channel_detail_pending.clear();
+        self.channel_detail_failed.clear();
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
             cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -523,6 +529,8 @@ impl ChannelList {
             channel_index: RefCell::new(ChannelLocationCache::default()),
             reset_generation: 0,
             reactivating: HashSet::new(),
+            channel_detail_pending: HashSet::new(),
+            channel_detail_failed: HashSet::new(),
             _previous_channels_persist: Task::ready(()),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
@@ -818,6 +826,7 @@ impl ChannelList {
         }
         self.cache.insert(clan_id, categories, None);
         self.invalidate_channel_index(clan_id);
+        self.channel_detail_failed.clear();
         cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
         cx.notify();
         if self.want_extras.contains(&clan_id) {
@@ -911,6 +920,86 @@ impl ChannelList {
     pub fn ensure_user_channels_loaded(&mut self, cx: &mut Context<Self>) {
         if !self.user_channels_loaded && !self.user_channels_loading {
             self.fetch_user_channels(cx);
+        }
+    }
+
+    /// Mirrors mezon-react's `addThreadToChannels` (channelLoader): when a route targets a
+    /// channel/thread absent from the clan structure, fetch its detail and insert it. Returns
+    /// `true` while the channel is present or still being resolved (caller should wait), and
+    /// `false` once the fetch has definitively failed (caller may fall back).
+    pub fn ensure_channel_in_clan(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.channel_in_clan(clan_id, channel_id) {
+            return true;
+        }
+        if !self.cache.contains(&clan_id) {
+            return true;
+        }
+        if self.channel_detail_failed.remove(&channel_id) {
+            return false;
+        }
+        if !self.channel_detail_pending.insert(channel_id) {
+            return true;
+        }
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            let mut attempt = 0u32;
+            let desc = loop {
+                match api.list_channel_detail(channel_id.get()).await {
+                    Ok(desc) => break Some(desc),
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= CHANNEL_DETAIL_MAX_ATTEMPTS {
+                            tracing::warn!(
+                                "list_channel_detail failed for {channel_id} after {attempt} attempts: {e}"
+                            );
+                            break None;
+                        }
+                        cx.background_executor()
+                            .timer(CHANNEL_DETAIL_RETRY_BACKOFF * attempt)
+                            .await;
+                    }
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.channel_detail_pending.remove(&channel_id);
+                if this.reset_generation != generation {
+                    return;
+                }
+                match desc {
+                    Some(desc) => this.apply_channel_detail(clan_id, desc, cx),
+                    None => {
+                        this.channel_detail_failed.insert(channel_id);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        true
+    }
+
+    fn apply_channel_detail(
+        &mut self,
+        clan_id: ClanId,
+        desc: ApiChannelDesc,
+        cx: &mut Context<Self>,
+    ) {
+        let badge = desc.badge_count.max(0) as u32;
+        let mut channel = channel_from_desc(desc, badge, Vec::new(), false);
+        channel.clan_id = clan_id;
+        let Some(categories) = self.cache.get_mut(&clan_id) else {
+            return;
+        };
+        if insert_channel(categories, channel) {
+            self.invalidate_channel_index(clan_id);
+            cx.emit(ChannelEvent::ClanChannelsLoaded(clan_id));
+            cx.notify();
         }
     }
 
@@ -1463,6 +1552,57 @@ impl ChannelList {
             if let Err(e) = api.mark_as_read(0, 0, id).await {
                 tracing::error!("mark clan as read failed for clan {id}: {e}");
             }
+        })
+        .detach();
+    }
+
+    fn apply_channel_read_with_threads(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let thread_ids = self
+            .cache
+            .get(&clan_id)
+            .map(|categories| thread_ids_of(categories, channel_id))
+            .unwrap_or_default();
+        self.apply_read(clan_id, channel_id, cx);
+        for thread_id in thread_ids {
+            self.apply_read(clan_id, thread_id, cx);
+        }
+    }
+
+    pub fn mark_channel_as_read(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if channel_id.is_zero() {
+            return;
+        }
+        let category_id = self
+            .cache
+            .get(&clan_id)
+            .map(|categories| mark_as_read_category_id(categories, channel_id))
+            .unwrap_or(0);
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = api
+                .mark_as_read(channel_id.get(), category_id, clan_id.get())
+                .await
+            {
+                tracing::error!("mark channel as read failed for channel {channel_id}: {e}");
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+                this.apply_channel_read_with_threads(clan_id, channel_id, cx);
+            });
         })
         .detach();
     }
@@ -3431,6 +3571,47 @@ fn record_topic_parent_badge(
     entry.count = entry.count.saturating_add(1);
 }
 
+fn find_channel_in(categories: &[Category], channel_id: ChannelId) -> Option<&Channel> {
+    categories
+        .iter()
+        .flat_map(|category| category.channels.iter())
+        .find(|channel| channel.id == channel_id)
+}
+
+fn numeric_category_id(channel: &Channel) -> Option<i64> {
+    channel
+        .category_id
+        .as_deref()
+        .and_then(|id| id.parse::<i64>().ok())
+        .filter(|id| *id != 0)
+}
+
+fn mark_as_read_category_id(categories: &[Category], channel_id: ChannelId) -> i64 {
+    let Some(channel) = find_channel_in(categories, channel_id) else {
+        return 0;
+    };
+    numeric_category_id(channel)
+        .or_else(|| {
+            channel
+                .parent_id
+                .and_then(|parent_id| find_channel_in(categories, parent_id))
+                .and_then(numeric_category_id)
+        })
+        .unwrap_or(0)
+}
+
+fn thread_ids_of(categories: &[Category], parent_id: ChannelId) -> Vec<ChannelId> {
+    let mut ids: Vec<ChannelId> = categories
+        .iter()
+        .flat_map(|category| category.channels.iter())
+        .filter(|channel| channel.parent_id == Some(parent_id))
+        .map(|channel| channel.id)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 fn clear_topic_badges_for_parent(
     topic_badges: &mut HashMap<ChannelId, TopicParentBadge>,
     parent_id: ChannelId,
@@ -3714,6 +3895,77 @@ mod tests {
         assert_eq!(index.get(&ChannelId(999)), None);
     }
 
+    fn category(id: &str, channels: Vec<Channel>) -> Category {
+        Category {
+            id: id.into(),
+            clan_id: ClanId(1),
+            name: "General".into(),
+            order: 0,
+            channels,
+        }
+    }
+
+    fn favorites_category(channels: Vec<Channel>) -> Category {
+        let mut cat = category(FAVOR_CATE_ID, channels);
+        cat.name = "favoriteChannel".into();
+        cat.order = i32::MIN;
+        cat
+    }
+
+    #[test]
+    fn mark_as_read_category_id_resolves_through_the_favorites_copy() {
+        let mut favorited = make_channel(10, "alpha", "77");
+        favorited.is_favorite = true;
+        let cats = assemble_with_favorites(vec![category("77", vec![favorited])], ClanId(1));
+        assert_eq!(cats[0].id, FAVOR_CATE_ID);
+        assert_eq!(mark_as_read_category_id(&cats, ChannelId(10)), 77);
+    }
+
+    #[test]
+    fn mark_as_read_category_id_falls_back_to_the_parent_channel() {
+        let mut thread = make_thread(500, 10, "77");
+        thread.category_id = None;
+        let cats = vec![category(
+            "77",
+            vec![make_channel(10, "alpha", "77"), thread],
+        )];
+        assert_eq!(mark_as_read_category_id(&cats, ChannelId(500)), 77);
+    }
+
+    #[test]
+    fn mark_as_read_category_id_is_zero_when_unresolvable() {
+        let cats = categories();
+        assert_eq!(mark_as_read_category_id(&cats, ChannelId(999)), 0);
+        assert_eq!(mark_as_read_category_id(&cats, ChannelId(10)), 0);
+    }
+
+    #[test]
+    fn mark_as_read_of_a_zero_channel_would_request_a_clan_wide_read() {
+        let cats = vec![category("77", vec![make_channel(10, "alpha", "77")])];
+        assert_eq!(mark_as_read_category_id(&cats, ChannelId(0)), 0);
+    }
+
+    #[test]
+    fn thread_ids_of_collects_each_child_once() {
+        let cats = vec![
+            category(
+                "77",
+                vec![
+                    make_channel(10, "alpha", "77"),
+                    make_thread(501, 10, "77"),
+                    make_thread(500, 10, "77"),
+                    make_thread(600, 11, "77"),
+                ],
+            ),
+            favorites_category(vec![make_thread(500, 10, "77")]),
+        ];
+        assert_eq!(
+            thread_ids_of(&cats, ChannelId(10)),
+            vec![ChannelId(500), ChannelId(501)]
+        );
+        assert!(thread_ids_of(&cats, ChannelId(999)).is_empty());
+    }
+
     #[test]
     fn clan_channel_index_lookup_matches_linear_scan() {
         let cats = categories();
@@ -3768,6 +4020,49 @@ mod tests {
             .find(|c| c.id == ChannelId(500))
             .unwrap();
         assert_eq!(inserted.channel_type, ChannelType::Thread);
+        assert_eq!(inserted.parent_id, Some(ChannelId(10)));
+    }
+
+    #[test]
+    fn channel_detail_desc_inserts_thread_under_parent() {
+        let mut cats = categories();
+        let desc = ApiChannelDesc {
+            channel_id: 500,
+            channel_label: "my-thread".into(),
+            channel_type: 7,
+            clan_id: 0,
+            category_name: String::new(),
+            category_id: 0,
+            channel_private: 0,
+            count_mess_unread: 0,
+            member_count: 0,
+            parent_id: 10,
+            is_mute: false,
+            last_seen_message_id: 0,
+            last_seen_timestamp: 0,
+            last_sent_message_id: 0,
+            last_sent_timestamp: 0,
+            badge_count: 2,
+            active: CHANNEL_ACTIVE_JOINED,
+            creator_id: 0,
+            clan_name: String::new(),
+            channel_avatar: String::new(),
+        };
+        let badge = desc.badge_count.max(0) as u32;
+        let mut channel = channel_from_desc(desc, badge, Vec::new(), false);
+        channel.clan_id = ClanId(1);
+        assert!(insert_channel(&mut cats, channel));
+        let ids: Vec<ChannelId> = cats[0].channels.iter().map(|c| c.id).collect();
+        let parent_pos = ids.iter().position(|id| *id == ChannelId(10)).unwrap();
+        assert_eq!(ids[parent_pos + 1], ChannelId(500));
+        let inserted = cats
+            .iter()
+            .flat_map(|c| &c.channels)
+            .find(|c| c.id == ChannelId(500))
+            .unwrap();
+        assert_eq!(inserted.channel_type, ChannelType::Thread);
+        assert_eq!(inserted.clan_id, ClanId(1));
+        assert_eq!(inserted.badge_count, 2);
         assert_eq!(inserted.parent_id, Some(ChannelId(10)));
     }
 

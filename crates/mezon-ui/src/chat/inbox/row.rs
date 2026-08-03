@@ -7,13 +7,15 @@ use gpui::{
 };
 use mezon_store::{
     Channel, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    InboxCategory, InboxMentionSpan, InboxNotification, MessageSpan, ProfileContext, RolesStore,
-    TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore, attachment_link_is_image,
-    inbox_spans_from_raw, message_content_is_attachment, resolve_user_profile,
+    DirectMessageStore, InboxCategory, InboxMentionSpan, InboxNotification, MessageSpan,
+    ProfileContext, RolesStore, TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore,
+    attachment_link_is_image, inbox_spans_from_raw, message_content_is_attachment,
+    resolve_user_profile,
 };
 
 use crate::components::primitives::{Avatar, Sizable, Size, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
+use crate::router::Route;
 use crate::theme::Theme;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
@@ -62,6 +64,7 @@ pub(crate) struct NotificationRowView {
     attachment_link: String,
     attachment_type: String,
     has_more_attachment: bool,
+    pub(crate) can_jump: bool,
 }
 
 #[derive(Clone)]
@@ -314,6 +317,38 @@ fn build_mention_breadcrumb(
     })
 }
 
+pub(crate) fn notification_jump_route(notification: &InboxNotification, cx: &App) -> Option<Route> {
+    let channel_id_str = notification.effective_channel_id()?;
+    if channel_id_str.is_empty() || channel_id_str == "0" {
+        return None;
+    }
+    let channel_id = channel_id_str.parse::<ChannelId>().ok()?;
+    let clan_id = notification
+        .effective_clan_id()
+        .and_then(|id| id.parse::<ClanId>().ok())
+        .filter(|id| !id.is_zero())
+        .or_else(|| {
+            ChannelList::global(cx)
+                .read(cx)
+                .clan_id_for_channel(channel_id)
+                .filter(|id| !id.is_zero())
+        });
+    match clan_id {
+        Some(clan_id) => Some(Route::Channel {
+            clan_id,
+            channel_id,
+        }),
+        None => Some(Route::DirectMessage {
+            direct_id: channel_id,
+            message_type: DirectMessageStore::global(cx)
+                .read(cx)
+                .find(channel_id)
+                .map(|dm| dm.kind.channel_type().to_string())
+                .unwrap_or_else(|| "3".into()),
+        }),
+    }
+}
+
 pub(crate) fn build_notification_row_view(
     notification: &InboxNotification,
     locale: &SharedString,
@@ -431,6 +466,9 @@ pub(crate) fn build_notification_row_view(
         .map(|(clan, user_id)| resolve_inbox_sender_color(clan, user_id, cx))
         .unwrap_or_else(|| Hsla::from(rgb(DEFAULT_ROLE_COLOR)));
 
+    let can_jump = notification.effective_message_id().is_some()
+        && notification_jump_route(notification, cx).is_some();
+
     NotificationRowView {
         sender_name,
         avatar_url,
@@ -449,6 +487,7 @@ pub(crate) fn build_notification_row_view(
         attachment_link,
         attachment_type,
         has_more_attachment,
+        can_jump,
     }
 }
 

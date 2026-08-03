@@ -416,6 +416,7 @@ pub const PREVIEW_ENTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// full-resolution file, so we guard against a single pathological image
 /// blowing up RAM by refusing to retain anything decoded larger than this and
 /// negatively caching it (shown as the initials fallback instead).
+pub const AVATAR_ANIMATION_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const AVATAR_ENTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub const MESSAGE_ENTRY_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const SHARED_ENTRY_MAX_BYTES: u64 = 12 * 1024 * 1024;
@@ -1167,11 +1168,12 @@ fn load_avatar_scaled(
         };
 
         if image::guess_format(&bytes).is_ok() {
-            let decoded = match decode_scaled_dynamic(&bytes, max_px) {
-                Some(image) => image,
-                None => image::load_from_memory(&bytes)?,
+            let animation_budget = if max_px <= AVATAR_SMALL_DECODE_MAX_PX {
+                AVATAR_ANIMATION_MAX_BYTES
+            } else {
+                AVATAR_ENTRY_MAX_BYTES
             };
-            Ok(avatar_render_image(decoded, max_px))
+            decode_avatar_image(&bytes, max_px, animation_budget)
         } else {
             svg_renderer
                 .render_single_frame(&bytes, 1.0)
@@ -1369,6 +1371,64 @@ where
     Ok(out)
 }
 
+fn downscaled_avatar_animation_frames<I>(
+    frames: I,
+    max_px: u32,
+    byte_budget: u64,
+) -> Result<Vec<image::Frame>, AnimationDecodeError>
+where
+    I: Iterator<Item = image::ImageResult<image::Frame>>,
+{
+    let mut out: Vec<image::Frame> = Vec::new();
+    let mut stride = 1usize;
+    let mut max_frames = usize::MAX;
+    for (source_index, frame) in frames.enumerate() {
+        let frame = frame.map_err(|err| AnimationDecodeError::Image(err.into()))?;
+        let delay = frame.delay();
+        let buffer = frame.into_buffer();
+        let side = buffer.width().min(buffer.height()).clamp(1, max_px);
+        if max_frames == usize::MAX {
+            let frame_bytes = u64::from(side) * u64::from(side) * 4;
+            max_frames = (byte_budget / frame_bytes).max(2) as usize;
+        }
+
+        if source_index.is_multiple_of(stride) && out.len() >= max_frames {
+            out = out
+                .into_iter()
+                .step_by(2)
+                .map(|frame| scale_frame_delay(frame, 2))
+                .collect();
+            stride = stride.saturating_mul(2);
+        }
+        if !source_index.is_multiple_of(stride) {
+            continue;
+        }
+        let mut buffer = image::DynamicImage::ImageRgba8(buffer)
+            .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
+            .into_rgba8();
+        for pixel in buffer.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let delay = image::Delay::from_saturating_duration(
+            std::time::Duration::from(delay).saturating_mul(stride as u32),
+        );
+        out.push(image::Frame::from_parts(buffer, 0, 0, delay));
+    }
+    if out.is_empty() {
+        return Err(AnimationDecodeError::Image(ImageCacheError::Other(
+            Arc::new(anyhow::anyhow!("avatar animation decoded to zero frames")),
+        )));
+    }
+    Ok(out)
+}
+
+fn scale_frame_delay(frame: image::Frame, factor: u32) -> image::Frame {
+    let delay = image::Delay::from_saturating_duration(
+        std::time::Duration::from(frame.delay()).saturating_mul(factor),
+    );
+    image::Frame::from_parts(frame.into_buffer(), 0, 0, delay)
+}
+
 fn scaled_to_dynamic(scaled: mezon_video::ScaledImage) -> Option<image::DynamicImage> {
     let mut rgba = scaled.bgra;
     for pixel in rgba.chunks_exact_mut(4) {
@@ -1386,7 +1446,7 @@ fn decode_scaled_dynamic_path(path: &std::path::Path, max_px: u32) -> Option<ima
     scaled_to_dynamic(mezon_video::scaled_image_decode_path(path, max_px)?)
 }
 
-fn avatar_render_image(decoded: image::DynamicImage, max_px: u32) -> Arc<RenderImage> {
+fn avatar_frame(decoded: image::DynamicImage, max_px: u32) -> image::Frame {
     let side = decoded.width().min(decoded.height()).clamp(1, max_px);
     let mut data = decoded
         .resize_to_fill(side, side, image::imageops::FilterType::Triangle)
@@ -1394,7 +1454,11 @@ fn avatar_render_image(decoded: image::DynamicImage, max_px: u32) -> Arc<RenderI
     for pixel in data.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    Arc::new(RenderImage::new(vec![image::Frame::new(data)]))
+    image::Frame::new(data)
+}
+
+fn avatar_render_image(decoded: image::DynamicImage, max_px: u32) -> Arc<RenderImage> {
+    Arc::new(RenderImage::new(vec![avatar_frame(decoded, max_px)]))
 }
 
 fn decode_static_image(
@@ -1437,6 +1501,62 @@ fn reject_oversized_canvas(
         ));
     }
     Ok(())
+}
+
+fn decode_avatar_image(
+    bytes: &[u8],
+    max_px: u32,
+    animation_byte_budget: u64,
+) -> Result<Arc<RenderImage>, ImageCacheError> {
+    use image::AnimationDecoder as _;
+    let format = image::guess_format(bytes)?;
+    reject_oversized_canvas(bytes, format)?;
+    let frames = match format {
+        image::ImageFormat::Gif => {
+            let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+            match downscaled_avatar_animation_frames(
+                decoder.into_frames(),
+                max_px,
+                animation_byte_budget,
+            ) {
+                Ok(frames) => frames,
+                Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
+                    decode_static_image(bytes, format, max_px)?,
+                    max_px,
+                )],
+                Err(AnimationDecodeError::Image(err)) => return Err(err),
+            }
+        }
+        image::ImageFormat::WebP => {
+            let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+            image::ImageDecoder::set_limits(&mut decoder, decoder_limits())?;
+            if decoder.has_animation() {
+                match downscaled_avatar_animation_frames(
+                    decoder.into_frames(),
+                    max_px,
+                    animation_byte_budget,
+                ) {
+                    Ok(frames) => frames,
+                    Err(AnimationDecodeError::BudgetExceeded) => vec![avatar_frame(
+                        decode_static_image(bytes, format, max_px)?,
+                        max_px,
+                    )],
+                    Err(AnimationDecodeError::Image(err)) => return Err(err),
+                }
+            } else {
+                vec![avatar_frame(
+                    decode_static_image(bytes, format, max_px)?,
+                    max_px,
+                )]
+            }
+        }
+        _ => vec![avatar_frame(
+            decode_static_image(bytes, format, max_px)?,
+            max_px,
+        )],
+    };
+    Ok(Arc::new(RenderImage::new(frames)))
 }
 
 fn decode_message_image(
@@ -1974,5 +2094,31 @@ mod tests {
     fn message_static_cap_covers_two_x_inline_display() {
         const MAX_INLINE_LOGICAL_PX: u32 = 480;
         const _: () = assert!(MESSAGE_STATIC_MAX_PX >= MAX_INLINE_LOGICAL_PX * 2);
+    }
+
+    #[test]
+    fn avatar_gif_retains_animation_frames() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut bytes);
+            encoder.set_repeat(Repeat::Infinite).expect("GIF repeat");
+            for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                let buffer = image::RgbaImage::from_pixel(4, 2, image::Rgba(color));
+                let frame = image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("GIF frame");
+            }
+        }
+        let image = decode_avatar_image(&bytes, AVATAR_SMALL_DECODE_MAX_PX, AVATAR_ENTRY_MAX_BYTES)
+            .expect("animated avatar");
+        assert_eq!(image.frame_count(), 2);
+        let size = image.size(0);
+        assert_eq!(size.width, size.height);
+        assert_eq!(image.delay(0), image::Delay::from_numer_denom_ms(50, 1));
     }
 }

@@ -367,6 +367,7 @@ pub enum MentionInputEvent {
         url: String,
         filename: String,
     },
+    EditLastMessage,
 }
 
 pub struct MentionInput {
@@ -2036,10 +2037,14 @@ impl MentionInput {
             self.suggestion_scroll
                 .scroll_to_item(self.selected, ScrollStrategy::Nearest);
             cx.notify();
-        } else {
-            self.input
-                .update(cx, |input, cx| input.move_caret_line(-1, cx));
+            return;
         }
+        if self.input.read(cx).value().is_empty() {
+            cx.emit(MentionInputEvent::EditLastMessage);
+            return;
+        }
+        self.input
+            .update(cx, |input, cx| input.move_caret_line(-1, cx));
     }
 
     fn on_nav_down(&mut self, cx: &mut Context<Self>) {

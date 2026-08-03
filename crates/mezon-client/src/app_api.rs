@@ -226,6 +226,10 @@ impl AppApi {
         self.transport.list_channel_by_user_id().await
     }
 
+    pub async fn list_channel_detail(&self, channel_id: i64) -> Result<ApiChannelDesc> {
+        self.transport.list_channel_detail(channel_id).await
+    }
+
     pub async fn list_dm_channels(&self, page: i32) -> Result<Vec<ApiDirectChannel>> {
         self.transport.list_dm_channel_descs(page).await
     }
@@ -954,15 +958,9 @@ impl AppApi {
 
     pub async fn create_message_2_inbox(
         &self,
-        message_id: i64,
-        channel_id: i64,
-        clan_id: i64,
-        content: &str,
+        request: mezon_proto::api::Message2InboxRequest,
     ) -> Result<()> {
-        self.transport
-            .create_message_2_inbox(message_id, channel_id, clan_id, content)
-            .await
-            .map(|_| ())
+        self.transport.create_message_2_inbox(request).await
     }
 
     pub async fn create_sd_topic(

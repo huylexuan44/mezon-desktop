@@ -56,8 +56,38 @@ pub struct AutoUpdateStore {
 struct GlobalAutoUpdateStore(Entity<AutoUpdateStore>);
 impl Global for GlobalAutoUpdateStore {}
 
+#[derive(Clone, Copy)]
+struct StoreChannel {
+    feed_url: &'static str,
+    page_url: &'static str,
+}
+
+const MAC_APP_STORE: StoreChannel = StoreChannel {
+    feed_url: "https://cdn.komu.vn/release/latest-mac.yml",
+    page_url: "macappstore://itunes.apple.com/app/mezon-desktop/id6756601798",
+};
+
+const MICROSOFT_STORE: StoreChannel = StoreChannel {
+    feed_url: "https://cdn.komu.vn/release/latest.yml",
+    page_url: "ms-windows-store://pdp/?ProductId=9pf25lf1fj17",
+};
+
+fn store_channel() -> Option<StoreChannel> {
+    if crate::running_in_app_sandbox() {
+        Some(MAC_APP_STORE)
+    } else if crate::running_from_windows_store() {
+        Some(MICROSOFT_STORE)
+    } else {
+        None
+    }
+}
+
 fn auto_update_disabled() -> bool {
     std::env::var("MEZON_DISABLE_AUTO_UPDATE").is_ok()
+}
+
+fn baked_store_version() -> Option<&'static str> {
+    option_env!("MEZON_STORE_VERSION")
 }
 
 fn running_from_cargo_target() -> bool {
@@ -71,8 +101,8 @@ impl AutoUpdateStore {
         mezon_updater::cleanup_stale_update_artifacts();
         let entity = cx.new(|cx| {
             let poll_task = (!auto_update_disabled()
-                && !cfg!(debug_assertions)
-                && !running_from_cargo_target())
+                && (store_channel().is_some()
+                    || (!cfg!(debug_assertions) && !running_from_cargo_target())))
             .then(|| {
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(FIRST_POLL_DELAY).await;
@@ -112,6 +142,10 @@ impl AutoUpdateStore {
         &self.status
     }
 
+    pub fn store_page_url(&self) -> Option<&'static str> {
+        store_channel().map(|channel| channel.page_url)
+    }
+
     pub fn check(&mut self, manual: bool, cx: &mut Context<Self>) {
         if self.pending.is_some() {
             return;
@@ -129,6 +163,10 @@ impl AutoUpdateStore {
                 return;
             }
             self.last_auto_check = Some(now);
+        }
+        if let Some(channel) = store_channel() {
+            self.check_store(channel, manual, cx);
+            return;
         }
         let current_version = match &self.status {
             AutoUpdateStatus::Updated { version } => version.to_string(),
@@ -244,6 +282,55 @@ impl AutoUpdateStore {
                             }
                         } else {
                             tracing::info!("auto-update check failed: {error:#}");
+                            AutoUpdateStatus::Idle
+                        }
+                    }
+                };
+                cx.notify();
+            });
+        }));
+    }
+
+    fn check_store(&mut self, channel: StoreChannel, manual: bool, cx: &mut Context<Self>) {
+        let Some(current_version) = baked_store_version() else {
+            tracing::warn!("store build has no baked MEZON_STORE_VERSION; skipping update check");
+            return;
+        };
+
+        self.status = AutoUpdateStatus::Checking;
+        cx.notify();
+
+        let work = mezon_client::transport_runtime::handle().spawn(async move {
+            mezon_updater::check_store_feed(channel.feed_url, current_version).await
+        });
+
+        self.pending = Some(cx.spawn(async move |this, cx| {
+            let result = work
+                .await
+                .map_err(|e| anyhow::anyhow!("update task failed: {e}"))
+                .and_then(|inner| inner);
+
+            let _ = this.update(cx, |this, cx| {
+                this.pending = None;
+                this.status = match result {
+                    Ok(Some(version)) => AutoUpdateStatus::UpdateAvailable {
+                        version: SharedString::from(version),
+                    },
+                    Ok(None) => {
+                        if manual {
+                            AutoUpdateStatus::UpToDate
+                        } else {
+                            AutoUpdateStatus::Idle
+                        }
+                    }
+                    Err(error) => {
+                        if manual {
+                            tracing::error!("store update check failed: {error:#}");
+                            AutoUpdateStatus::Errored {
+                                message: SharedString::from(format!("{error:#}")),
+                            }
+                        } else {
+                            tracing::info!("store update check failed: {error:#}");
                             AutoUpdateStatus::Idle
                         }
                     }

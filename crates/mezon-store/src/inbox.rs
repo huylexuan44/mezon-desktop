@@ -6,12 +6,15 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{
     AppApi, ConnectionStatus, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
     InboxNotification, RealtimeEvent, inbox_notification_from_api,
+    is_pending_inbox_notification_id,
 };
 
 use crate::CACHE_TTL;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const REALTIME_BUCKET_CAP: usize = (INBOX_PAGE_LIMIT as usize) * 4;
+
+pub const GLOBAL_INBOX_BUCKET_CLAN_ID: &str = "0";
 
 #[derive(Debug, Clone)]
 pub enum InboxEvent {
@@ -143,42 +146,43 @@ impl InboxStore {
         }
     }
 
-    pub fn items(&self, clan_id: &str, category: InboxCategory) -> &[InboxNotification] {
-        self.bucket(clan_id, category)
+    fn bucket_key(_clan_id: &str, category: InboxCategory) -> BucketKey {
+        BucketKey {
+            clan_id: GLOBAL_INBOX_BUCKET_CLAN_ID.to_string(),
+            category,
+        }
+    }
+
+    fn emit_updated(&self, cx: &mut Context<Self>) {
+        cx.emit(InboxEvent::Updated { clan_id: None });
+    }
+
+    pub fn items(&self, _clan_id: &str, category: InboxCategory) -> &[InboxNotification] {
+        self.bucket(category)
             .map(|b| b.items.as_slice())
             .unwrap_or(&[])
     }
 
-    pub fn is_loading(&self, clan_id: &str, category: InboxCategory) -> bool {
-        self.bucket(clan_id, category)
-            .map(|b| b.loading)
-            .unwrap_or(false)
+    pub fn is_loading(&self, _clan_id: &str, category: InboxCategory) -> bool {
+        self.bucket(category).map(|b| b.loading).unwrap_or(false)
     }
 
-    pub fn has_more(&self, clan_id: &str, category: InboxCategory) -> bool {
-        self.bucket(clan_id, category)
-            .map(|b| b.has_more)
-            .unwrap_or(true)
+    pub fn has_more(&self, _clan_id: &str, category: InboxCategory) -> bool {
+        self.bucket(category).map(|b| b.has_more).unwrap_or(true)
     }
 
-    fn bucket(&self, clan_id: &str, category: InboxCategory) -> Option<&CategoryBucket> {
-        self.buckets.get(&BucketKey {
-            clan_id: clan_id.to_string(),
-            category,
-        })
+    fn bucket(&self, category: InboxCategory) -> Option<&CategoryBucket> {
+        self.buckets.get(&Self::bucket_key("", category))
     }
 
-    fn bucket_mut(&mut self, clan_id: &str, category: InboxCategory) -> &mut CategoryBucket {
+    fn bucket_mut(&mut self, category: InboxCategory) -> &mut CategoryBucket {
         self.buckets
-            .entry(BucketKey {
-                clan_id: clan_id.to_string(),
-                category,
-            })
+            .entry(Self::bucket_key("", category))
             .or_default()
     }
 
-    fn is_fresh(&self, clan_id: &str, category: InboxCategory) -> bool {
-        self.bucket(clan_id, category)
+    fn is_fresh(&self, category: InboxCategory) -> bool {
+        self.bucket(category)
             .and_then(|b| b.fetched_at)
             .is_some_and(|t| t.elapsed() < CACHE_TTL)
     }
@@ -189,16 +193,12 @@ impl InboxStore {
         category: InboxCategory,
         cx: &mut Context<Self>,
     ) {
-        if self.is_fresh(clan_id, category) {
+        if self.is_fresh(category) {
             return;
         }
-        let never_fetched = self
-            .bucket(clan_id, category)
-            .is_none_or(|b| b.fetched_at.is_none());
+        let never_fetched = self.bucket(category).is_none_or(|b| b.fetched_at.is_none());
         if !never_fetched {
-            let empty = self
-                .bucket(clan_id, category)
-                .is_none_or(|b| b.items.is_empty());
+            let empty = self.bucket(category).is_none_or(|b| b.items.is_empty());
             if !empty {
                 return;
             }
@@ -207,10 +207,7 @@ impl InboxStore {
     }
 
     pub fn fetch_more(&mut self, clan_id: &str, category: InboxCategory, cx: &mut Context<Self>) {
-        let Some(last_id) = self
-            .bucket(clan_id, category)
-            .and_then(|b| b.last_id.clone())
-        else {
+        let Some(last_id) = self.bucket(category).and_then(|b| b.last_id.clone()) else {
             return;
         };
         if !self.has_more(clan_id, category) {
@@ -226,7 +223,7 @@ impl InboxStore {
         cursor: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let bucket = self.bucket_mut(clan_id, category);
+        let bucket = self.bucket_mut(category);
         if bucket.loading {
             return;
         }
@@ -237,12 +234,12 @@ impl InboxStore {
         cx.notify();
 
         let api = self.api.clone();
-        let clan_id = clan_id.to_string();
+        let api_clan_id = clan_id.to_string();
         let reset_gen = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_notifications(
-                    &clan_id,
+                    &api_clan_id,
                     INBOX_PAGE_LIMIT,
                     &notification_id,
                     category as i32,
@@ -253,21 +250,65 @@ impl InboxStore {
                 if this.reset_generation != reset_gen {
                     return;
                 }
-                this.apply_fetch_result(&clan_id, category, generation, result, cx);
+                this.apply_fetch_result(category, generation, result, cx);
             });
         })
         .detach();
     }
 
+    pub fn prepend_local(
+        &mut self,
+        _clan_id: &str,
+        category: InboxCategory,
+        notification: InboxNotification,
+        cx: &mut Context<Self>,
+    ) {
+        let bucket = self.bucket_mut(category);
+        if bucket.items.iter().any(|n| n.id == notification.id) {
+            return;
+        }
+        if let Some(message_id) = notification.effective_message_id()
+            && bucket.items.iter().any(|existing| {
+                existing.effective_message_id().as_deref() == Some(message_id.as_str())
+            })
+        {
+            return;
+        }
+        bucket.items.insert(0, notification);
+        if bucket.items.len() > REALTIME_BUCKET_CAP {
+            bucket.items.truncate(REALTIME_BUCKET_CAP);
+        }
+        bucket.fetched_at = Some(Instant::now());
+        self.emit_updated(cx);
+        cx.notify();
+    }
+
+    fn drop_pending_duplicates(items: &mut Vec<InboxNotification>, incoming: &[InboxNotification]) {
+        let incoming_message_ids: std::collections::HashSet<String> = incoming
+            .iter()
+            .filter_map(|n| n.effective_message_id())
+            .collect();
+        if incoming_message_ids.is_empty() {
+            return;
+        }
+        items.retain(|existing| {
+            if !is_pending_inbox_notification_id(&existing.id) {
+                return true;
+            }
+            existing
+                .effective_message_id()
+                .is_none_or(|message_id| !incoming_message_ids.contains(&message_id))
+        });
+    }
+
     fn apply_fetch_result(
         &mut self,
-        clan_id: &str,
         category: InboxCategory,
         generation: u64,
         result: Result<Vec<InboxNotification>, anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
-        let bucket = self.bucket_mut(clan_id, category);
+        let bucket = self.bucket_mut(category);
         if bucket.fetch_generation != generation {
             return;
         }
@@ -278,6 +319,7 @@ impl InboxStore {
                 if bucket.items.is_empty() {
                     bucket.items = items;
                 } else {
+                    Self::drop_pending_duplicates(&mut bucket.items, &items);
                     let existing: std::collections::HashSet<String> =
                         bucket.items.iter().map(|n| n.id.clone()).collect();
                     bucket
@@ -289,16 +331,12 @@ impl InboxStore {
                 }
                 bucket.last_id = bucket.items.last().map(|n| n.id.clone());
                 bucket.fetched_at = Some(Instant::now());
-                cx.emit(InboxEvent::Updated {
-                    clan_id: Some(clan_id.to_string()),
-                });
+                self.emit_updated(cx);
                 cx.notify();
             }
             Err(e) => {
                 tracing::error!("list_notifications failed: {e}");
-                cx.emit(InboxEvent::Updated {
-                    clan_id: Some(clan_id.to_string()),
-                });
+                self.emit_updated(cx);
                 cx.notify();
             }
         }
@@ -306,22 +344,23 @@ impl InboxStore {
 
     pub fn delete(
         &mut self,
-        clan_id: &str,
+        _clan_id: &str,
         id: &str,
         category: InboxCategory,
         cx: &mut Context<Self>,
     ) {
-        let Some(removed) = self.remove_item(clan_id, category, id) else {
+        let Some(removed) = self.remove_item(category, id) else {
             return;
         };
-        cx.emit(InboxEvent::Updated {
-            clan_id: Some(clan_id.to_string()),
-        });
+        self.emit_updated(cx);
         cx.notify();
+
+        if is_pending_inbox_notification_id(id) {
+            return;
+        }
 
         let api = self.api.clone();
         let id = id.to_string();
-        let clan_id = clan_id.to_string();
         let reset_gen = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api
@@ -333,10 +372,8 @@ impl InboxStore {
                     if this.reset_generation != reset_gen {
                         return;
                     }
-                    this.reinsert_item(&clan_id, category, removed);
-                    cx.emit(InboxEvent::Updated {
-                        clan_id: Some(clan_id.clone()),
-                    });
+                    this.reinsert_item(category, removed);
+                    this.emit_updated(cx);
                     cx.notify();
                 });
             }
@@ -344,27 +381,14 @@ impl InboxStore {
         .detach();
     }
 
-    fn remove_item(
-        &mut self,
-        clan_id: &str,
-        category: InboxCategory,
-        id: &str,
-    ) -> Option<InboxNotification> {
-        let key = BucketKey {
-            clan_id: clan_id.to_string(),
-            category,
-        };
-        let bucket = self.buckets.get_mut(&key)?;
+    fn remove_item(&mut self, category: InboxCategory, id: &str) -> Option<InboxNotification> {
+        let bucket = self.buckets.get_mut(&Self::bucket_key("", category))?;
         let pos = bucket.items.iter().position(|n| n.id == id)?;
         Some(bucket.items.remove(pos))
     }
 
-    fn reinsert_item(&mut self, clan_id: &str, category: InboxCategory, item: InboxNotification) {
-        let key = BucketKey {
-            clan_id: clan_id.to_string(),
-            category,
-        };
-        let Some(bucket) = self.buckets.get_mut(&key) else {
+    fn reinsert_item(&mut self, category: InboxCategory, item: InboxNotification) {
+        let Some(bucket) = self.buckets.get_mut(&Self::bucket_key("", category)) else {
             return;
         };
         if bucket.items.iter().any(|n| n.id == item.id) {
@@ -380,7 +404,7 @@ impl InboxStore {
         let RealtimeEvent::Notifications(batch) = event else {
             return;
         };
-        let mut changed_clans: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut changed = false;
         for raw in &batch.notifications {
             let Ok(notification) = inbox_notification_from_api(raw.clone()) else {
                 continue;
@@ -388,14 +412,10 @@ impl InboxStore {
             if self.should_skip_realtime(&notification) {
                 continue;
             }
-            let Some(clan_id) = self.realtime_bucket_clan_id(&notification) else {
-                continue;
-            };
-            let key = BucketKey {
-                clan_id: clan_id.clone(),
-                category: notification.category,
-            };
-            let Some(bucket) = self.buckets.get_mut(&key) else {
+            let Some(bucket) = self
+                .buckets
+                .get_mut(&Self::bucket_key("", notification.category))
+            else {
                 continue;
             };
             if bucket.fetched_at.is_none() {
@@ -408,22 +428,12 @@ impl InboxStore {
             if bucket.items.len() > REALTIME_BUCKET_CAP {
                 bucket.items.truncate(REALTIME_BUCKET_CAP);
             }
-            changed_clans.insert(clan_id);
+            changed = true;
         }
-        if !changed_clans.is_empty() {
-            for clan_id in changed_clans {
-                cx.emit(InboxEvent::Updated {
-                    clan_id: Some(clan_id),
-                });
-            }
+        if changed {
+            self.emit_updated(cx);
             cx.notify();
         }
-    }
-
-    fn realtime_bucket_clan_id(&self, notification: &InboxNotification) -> Option<String> {
-        notification
-            .effective_clan_id()
-            .or_else(|| self.active_clan_id.clone())
     }
 
     fn should_skip_realtime(&self, notification: &InboxNotification) -> bool {
@@ -445,17 +455,14 @@ impl InboxStore {
 
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
         self.mark_all_stale();
-        let Some(active_clan_id) = self.active_clan_id.clone() else {
-            return;
-        };
         let categories: Vec<InboxCategory> = self
             .buckets
             .keys()
-            .filter(|key| key.clan_id == active_clan_id)
+            .filter(|key| key.clan_id == GLOBAL_INBOX_BUCKET_CLAN_ID)
             .map(|key| key.category)
             .collect();
         for category in categories {
-            self.fetch_page(&active_clan_id, category, None, cx);
+            self.fetch_page(GLOBAL_INBOX_BUCKET_CLAN_ID, category, None, cx);
         }
     }
 }

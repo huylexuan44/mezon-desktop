@@ -8,7 +8,6 @@ fn main() {
 
     cc::Build::new()
         .file("tests/pod.c")
-        .shared_flag(true)
         .flag("-Wno-missing-field-initializers")
         .includes(&libspa.include_paths)
         .compile("pod");

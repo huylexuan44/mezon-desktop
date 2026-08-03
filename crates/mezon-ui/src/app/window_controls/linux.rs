@@ -1,13 +1,22 @@
-use gpui::{App, Div, MouseButton, Pixels, Rgba, StyleRefinement, Window, prelude::*, px, rgb};
+use gpui::{
+    AnyElement, App, Context, MouseButton, Pixels, Rgba, StyleRefinement, Window, prelude::*, px,
+};
 
 use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
-use super::{CONTROL_CLOSE_HOVER, control_button, controls_row, hide_main_window};
+use super::{
+    control_button, controls_row, hide_main_window, window_control_hover_bg,
+    window_control_icon_color,
+};
 
-pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
-    let hover = theme.bg_hover;
-    let color = theme.text_secondary;
+pub fn render_controls<V: 'static>(
+    theme: &Theme,
+    window: &Window,
+    cx: &mut Context<V>,
+) -> impl IntoElement {
+    let hover_bg = window_control_hover_bg(theme);
+    let color = window_control_icon_color(theme);
     let icon_size = px(super::CONTROL_ICON_SIZE);
     let zoom_icon = if window.is_maximized() {
         IconName::WindowRestore
@@ -17,49 +26,56 @@ pub fn render_controls(theme: &Theme, window: &Window) -> impl IntoElement {
 
     controls_row()
         .child(window_control_button(
+            "window-control-min",
             color,
             icon_size,
             IconName::WindowMinimize,
-            move |style| style.bg(hover),
+            move |style| style.bg(hover_bg),
             |window, _| window.minimize_window(),
+            cx,
         ))
         .child(window_control_button(
+            "window-control-max",
             color,
             icon_size,
             zoom_icon,
-            move |style| style.bg(hover),
+            move |style| style.bg(hover_bg),
             |window, _| window.zoom_window(),
+            cx,
         ))
         .child(window_control_button(
+            "window-control-close",
             color,
             icon_size,
             IconName::WindowClose,
-            |style| style.bg(rgb(CONTROL_CLOSE_HOVER)).text_color(gpui::white()),
+            move |style| style.bg(hover_bg),
             |window, cx| {
-                // Hide-to-tray belongs to the main window alone. These controls are shared by
-                // every window that uses the app title bar, and hiding a secondary window instead
-                // of closing it leaves it alive but unmapped: reopening then re-maps it and the
-                // window manager, not the app, picks where it lands.
                 let is_main = crate::app::main_window::handle(cx) == Some(window.window_handle());
                 if !is_main || !hide_main_window(window, cx) {
                     window.remove_window();
                 }
             },
+            cx,
         ))
 }
 
-fn window_control_button(
+fn window_control_button<V: 'static>(
+    id: &'static str,
     color: Rgba,
     icon_size: Pixels,
     icon: IconName,
     hover: impl FnOnce(StyleRefinement) -> StyleRefinement + 'static,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> Div {
+    cx: &mut Context<V>,
+) -> AnyElement {
     control_button(color)
+        .id(id)
         .hover(hover)
+        .on_hover(cx.listener(|_, _, _, cx| cx.notify()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx);
         })
         .child(Icon::new(icon).size(icon_size).text_color(color))
+        .into_any_element()
 }

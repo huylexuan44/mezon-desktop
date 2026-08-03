@@ -1,5 +1,5 @@
 use crate::components::primitives::{Icon, IconName, Label, h_flex, v_flex};
-use gpui::{Context, Entity, FontWeight, Window, div, prelude::*};
+use gpui::{Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 use mezon_store::{AccountStore, AuthState, Settings};
 
 use crate::theme::ActiveTheme;
@@ -47,12 +47,60 @@ impl Render for DevicePage {
         let locale = self.settings.read(cx).language.clone();
         let store = AccountStore::global(cx).read(cx);
 
+        let platform_label = |platform: &str| -> SharedString {
+            if platform.trim().is_empty() {
+                mezon_i18n::t(&locale, "setting.deviceSettings.platformDesktop")
+                    .to_uppercase()
+                    .into()
+            } else {
+                platform.to_uppercase().into()
+            }
+        };
+
+        let device_icon = |platform: &str| {
+            let normalized = platform.trim().to_ascii_lowercase();
+            let is_mobile =
+                normalized == "mobile" || normalized == "android" || normalized == "ios";
+            div()
+                .size(px(40.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme.bg_primary)
+                .child(
+                    Icon::new(if is_mobile {
+                        IconName::DeviceMobileIcon
+                    } else {
+                        IconName::DeviceDesktopIcon
+                    })
+                    .size_5()
+                    .text_color(theme.text_primary),
+                )
+        };
+
         v_flex()
-            .gap_4()
+            .gap_8()
             .child(
-                Label::new(mezon_i18n::t(&locale, "setting.devices.description"))
-                    .text_sm()
-                    .text_color(theme.text_muted),
+                v_flex()
+                    .gap_4()
+                    .child(
+                        Label::new(mezon_i18n::t(
+                            &locale,
+                            "setting.deviceSettings.description1",
+                        ))
+                        .text_sm()
+                        .text_color(theme.text_muted),
+                    )
+                    .child(
+                        Label::new(mezon_i18n::t(
+                            &locale,
+                            "setting.deviceSettings.description2",
+                        ))
+                        .text_sm()
+                        .text_color(theme.text_muted),
+                    ),
             )
             .child(if let Some(error) = &store.devices_error {
                 div()
@@ -77,127 +125,120 @@ impl Render for DevicePage {
                 let others: Vec<_> = store.devices.iter().filter(|d| !d.is_current).collect();
 
                 v_flex()
-                    .gap_6()
+                    .gap_8()
                     .child(
                         v_flex()
-                            .gap_2()
+                            .gap_4()
+                            .p_4()
+                            .rounded_lg()
+                            .bg(theme.bg_secondary)
+                            .shadow_sm()
                             .child(
-                                Label::new(mezon_i18n::t(&locale, "setting.devices.currentDevice"))
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_muted),
+                                Label::new(mezon_i18n::t(
+                                    &locale,
+                                    "setting.deviceSettings.currentDevice",
+                                ))
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary),
                             )
                             .children(current.iter().map(|device| {
                                 h_flex()
                                     .items_center()
-                                    .gap_3()
-                                    .px_4()
-                                    .py_3()
-                                    .rounded_lg()
-                                    .bg(theme.bg_primary)
+                                    .gap_4()
+                                    .py_4()
+                                    .child(device_icon(&device.platform))
                                     .child(
-                                        Icon::new(IconName::WindowMaximize)
-                                            .size_5()
-                                            .text_color(theme.status_online),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.text_primary)
-                                                    .child(device.device_name.clone()),
-                                            )
-                                            .child(
-                                                div().text_xs().text_color(theme.text_muted).child(
-                                                    format!(
-                                                        "{} · {} · {}",
-                                                        device.platform,
-                                                        device.ip,
-                                                        mezon_i18n::t(
-                                                            &locale,
-                                                            "setting.devices.activeNow"
-                                                        )
-                                                    ),
-                                                ),
-                                            ),
-                                    )
-                                    .child(div().flex_1())
-                                    .child(
-                                        div().text_xs().text_color(theme.status_online).child(
-                                            mezon_i18n::t(&locale, "setting.devices.activeNow"),
-                                        ),
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_primary)
+                                            .child(platform_label(&device.platform)),
                                     )
                                     .into_any_element()
                             })),
                     )
                     .child(
                         v_flex()
-                            .gap_2()
+                            .gap_4()
+                            .p_4()
+                            .rounded_lg()
+                            .bg(theme.bg_secondary)
+                            .shadow_sm()
                             .child(
-                                Label::new(mezon_i18n::t(&locale, "setting.devices.otherDevices"))
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text_muted),
+                                Label::new(mezon_i18n::t(
+                                    &locale,
+                                    "setting.deviceSettings.otherDevices",
+                                ))
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_primary),
                             )
                             .when(others.is_empty(), |el| {
                                 el.child(
                                     div()
                                         .text_sm()
                                         .text_color(theme.text_muted)
-                                        .px_4()
                                         .child(mezon_i18n::t(&locale, "setting.devices.noOther")),
                                 )
                             })
                             .children(others.iter().map(|device| {
-                                let last_active = device.last_active_label.clone();
                                 let device_id = device.device_id.clone();
+                                let detail =
+                                    match (device.location.trim(), device.last_active_label.trim())
+                                    {
+                                        ("", "") | ("", "Unknown") => None,
+                                        ("", last_active) => Some(last_active.to_string()),
+                                        (location, "") | (location, "Unknown") => {
+                                            Some(location.to_string())
+                                        }
+                                        (location, last_active) => {
+                                            Some(format!("{location} · {last_active}"))
+                                        }
+                                    };
+
                                 h_flex()
                                     .items_center()
-                                    .gap_3()
-                                    .px_4()
-                                    .py_3()
-                                    .rounded_lg()
-                                    .bg(theme.bg_secondary)
-                                    .child(
-                                        Icon::new(IconName::Speaker)
-                                            .size_5()
-                                            .text_color(theme.text_secondary),
-                                    )
+                                    .gap_4()
+                                    .py_4()
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(device_icon(&device.platform))
                                     .child(
                                         v_flex()
+                                            .gap_1()
                                             .child(
                                                 div()
                                                     .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(theme.text_primary)
-                                                    .child(device.device_name.clone()),
+                                                    .child(platform_label(&device.platform)),
                                             )
-                                            .child(
-                                                div().text_xs().text_color(theme.text_muted).child(
-                                                    format!(
-                                                        "{} · {}",
-                                                        device.platform, device.location
-                                                    ),
-                                                ),
-                                            ),
+                                            .when_some(detail, |content, detail| {
+                                                content.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(theme.text_muted)
+                                                        .child(detail),
+                                                )
+                                            }),
                                     )
                                     .child(div().flex_1())
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(theme.text_muted)
-                                            .child(last_active),
-                                    )
-                                    .child(
-                                        div()
                                             .id(format!("remove-device-{}", device_id))
+                                            .size(px(24.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
                                             .cursor_pointer()
-                                            .text_color(theme.danger_text)
+                                            .bg(theme.text_muted)
+                                            .hover(move |style| style.bg(theme.danger))
                                             .child(
                                                 Icon::new(IconName::Close)
                                                     .size_4()
-                                                    .text_color(theme.danger_text),
+                                                    .text_color(theme.bg_primary),
                                             )
                                             .on_click(cx.listener(
                                                 move |this, _event, _window, cx| {

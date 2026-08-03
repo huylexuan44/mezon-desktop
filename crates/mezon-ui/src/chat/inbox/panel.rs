@@ -21,7 +21,7 @@ use crate::image_cache::{
 
 use crate::chat::inbox::row::{
     NotificationRowView, TopicRowView, build_notification_row_view, build_topic_row_view,
-    notification_copy_text, render_notification_body, render_topic_body,
+    notification_copy_text, notification_jump_route, render_notification_body, render_topic_body,
 };
 use crate::chat::inbox::{InboxTab, row_height_for_tab};
 use crate::components::primitives::{Icon, IconName};
@@ -109,8 +109,8 @@ impl InboxPopoverPanel {
         }
 
         let _inbox_sub = cx.subscribe(&inbox_store, |this, _, event, cx| {
-            let InboxEvent::Updated { clan_id } = event;
-            if clan_id.as_deref().is_some_and(|id| id != this.clan_id) {
+            let InboxEvent::Updated { .. } = event;
+            if this.tab == InboxTab::Topics {
                 return;
             }
             this.sync_from_store(cx);
@@ -720,54 +720,14 @@ fn schedule_inbox_jump(
     cx: &mut App,
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     route: Route,
-    _clan_id: String,
-    channel_id: String,
-    message_id: String,
+    channel_id: ChannelId,
+    message_id: MessageId,
 ) {
-    let jump = channel_id
-        .parse::<ChannelId>()
-        .ok()
-        .zip(message_id.parse::<MessageId>().ok());
     navigate(cx, route);
-    if let Some((channel, target)) = jump {
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.request_jump(channel, target, cx);
-        });
-    }
+    MessagesStore::global(cx).update(cx, |store, cx| {
+        store.request_jump(channel_id, message_id, cx);
+    });
     inbox_handle.hide(cx);
-}
-
-fn notification_jump_route(notification: &InboxNotification) -> Option<Route> {
-    let message_id = notification
-        .message
-        .as_ref()
-        .map(|m| m.message_id.as_str())
-        .filter(|id| !id.is_empty())
-        .unwrap_or("");
-    if message_id.is_empty() {
-        return None;
-    }
-    let channel_id = notification.effective_channel_id()?;
-    let Ok(channel) = channel_id.parse::<ChannelId>() else {
-        return None;
-    };
-    let clan_id = notification.effective_clan_id();
-    if clan_id
-        .as_deref()
-        .is_none_or(|id| id.is_empty() || id == "0")
-    {
-        return Some(Route::DirectMessage {
-            direct_id: channel,
-            message_type: "3".into(),
-        });
-    }
-    let Ok(clan) = clan_id.unwrap().parse::<ClanId>() else {
-        return None;
-    };
-    Some(Route::Channel {
-        clan_id: clan,
-        channel_id: channel,
-    })
 }
 
 fn schedule_notification_jump(
@@ -775,23 +735,24 @@ fn schedule_notification_jump(
     inbox_handle: ui::PopoverMenuHandle<InboxPopoverPanel>,
     notification: InboxNotification,
 ) {
-    let Some(route) = notification_jump_route(&notification) else {
+    let Some(message_id) = notification
+        .effective_message_id()
+        .and_then(|id| id.parse::<MessageId>().ok())
+    else {
         return;
     };
-    let message_id = notification
-        .message
-        .as_ref()
-        .map(|m| m.message_id.clone())
-        .filter(|id| !id.is_empty())
-        .unwrap_or_default();
-    schedule_inbox_jump(
-        cx,
-        inbox_handle,
-        route,
-        notification.effective_clan_id().unwrap_or_default(),
-        notification.effective_channel_id().unwrap_or_default(),
-        message_id,
-    );
+    let Some(route) = notification_jump_route(&notification, cx) else {
+        return;
+    };
+    let channel_id = match &route {
+        Route::Channel { channel_id, .. }
+        | Route::DirectMessage {
+            direct_id: channel_id,
+            ..
+        } => *channel_id,
+        _ => return,
+    };
+    schedule_inbox_jump(cx, inbox_handle, route, channel_id, message_id);
 }
 
 const PENDING_TOPIC_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -846,9 +807,8 @@ fn schedule_topic_jump(
             clan_id: clan,
             channel_id: channel,
         },
-        topic.clan_id,
-        topic.channel_id,
-        topic.message_id,
+        channel,
+        origin_message_id,
     );
 }
 
@@ -903,7 +863,7 @@ fn render_notification_item(
     let category = notification.category;
     let id: SharedString = notification.id.clone().into();
     let copy_text = notification_copy_text(&notification);
-    let show_jump = tab == InboxTab::Mentions;
+    let show_jump = matches!(tab, InboxTab::Mentions | InboxTab::Messages) && view.can_jump;
     let show_copy = tab == InboxTab::Messages && copy_text.is_some();
     let copy_text = copy_text.unwrap_or_default();
     let jump_notification = notification.clone();

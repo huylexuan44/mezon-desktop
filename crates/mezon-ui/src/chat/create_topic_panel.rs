@@ -9,7 +9,7 @@ use crate::chat::ReplyTarget;
 use crate::chat::channel_typing::ChannelTyping;
 use crate::chat::input_bar::{InputBar, ReplyClearSource};
 use crate::chat::mention_input::{MentionInput, MentionInputEvent};
-use crate::chat::message::ChannelMessages;
+use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
@@ -92,6 +92,23 @@ impl TopicPanel {
                 MentionInputEvent::Cancel => {
                     TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));
                 }
+                MentionInputEvent::EditLastMessage => {
+                    let timeline = this.topic_timeline.clone();
+                    timeline.update(cx, |timeline, cx| {
+                        timeline.edit_last_own_message(window, cx)
+                    });
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &topic_timeline,
+            window,
+            |this, _, event: &ChannelMessagesEvent, window, cx| {
+                let ChannelMessagesEvent::EditClosed = event;
+                let input = this.mention_input.clone();
+                window.defer(cx, move |window, cx| {
+                    input.update(cx, |input, cx| input.focus_input(window, cx));
+                });
             },
         ));
 

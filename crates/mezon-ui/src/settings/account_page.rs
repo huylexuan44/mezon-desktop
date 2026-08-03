@@ -171,7 +171,7 @@ impl Render for AccountPage {
         let banner_color = self
             .banner_color
             .map(gpui::Hsla::from)
-            .unwrap_or(theme.tokens.bg_secondary.into());
+            .unwrap_or(theme.tokens.bg_highlight_react_theme.into());
 
         // React renders these labels through `uppercase font-bold text-xs`.
         let account_field = |label: SharedString, value: SharedString| {
@@ -218,9 +218,15 @@ impl Render for AccountPage {
                     .relative()
                     .rounded_lg()
                     .overflow_hidden()
-                    .bg(theme.bg_primary)
+                    .bg(theme.bg_secondary)
                     .shadow_md()
-                    .child(div().h(px(BANNER_HEIGHT)).w_full().bg(banner_color))
+                    .child(
+                        div()
+                            .h(px(BANNER_HEIGHT))
+                            .w_full()
+                            .bg(banner_color)
+                            .rounded_t_lg(),
+                    )
                     .child(
                         h_flex()
                             .h(px(HEADER_ROW_HEIGHT))
@@ -265,7 +271,7 @@ impl Render for AccountPage {
                                     .gap_4()
                                     .p_4()
                                     .rounded_md()
-                                    .bg(theme.bg_secondary)
+                                    .bg(theme.bg_primary)
                                     .shadow_sm()
                                     .child(
                                         h_flex()
@@ -304,7 +310,7 @@ impl Render for AccountPage {
                                     .items_center()
                                     .p_4()
                                     .rounded_md()
-                                    .bg(theme.bg_secondary)
+                                    .bg(theme.bg_primary)
                                     .shadow_sm()
                                     .child(account_field(
                                         mezon_i18n::t(&locale, "setting.account.email").into(),
@@ -317,7 +323,7 @@ impl Render for AccountPage {
                                     .items_center()
                                     .p_4()
                                     .rounded_md()
-                                    .bg(theme.bg_secondary)
+                                    .bg(theme.bg_primary)
                                     .shadow_sm()
                                     .child(account_field(
                                         mezon_i18n::t(&locale, "setting.account.password").into(),
@@ -345,7 +351,7 @@ impl Render for AccountPage {
                                     .items_center()
                                     .p_4()
                                     .rounded_md()
-                                    .bg(theme.bg_secondary)
+                                    .bg(theme.bg_primary)
                                     .shadow_sm()
                                     .child(account_field(
                                         mezon_i18n::t(&locale, "setting.account.phone").into(),
