@@ -149,18 +149,29 @@ pub(crate) fn ibus_address() -> Option<String> {
         .unwrap_or_default();
     let preferred = bus_dir.join(format!("{machine_id}-unix-{display_num}"));
     let mut candidates = vec![preferred];
+    // The file is named after the session the daemon serves, which is not always
+    // the X display we were started with: a GNOME/KDE Wayland session writes
+    // `<machine>-unix-wayland-0` while the app runs on XWayland as `:0` or `:1`.
+    // Prefer an exact display match, then anything the daemon left behind.
     if let Ok(entries) = std::fs::read_dir(&bus_dir) {
         let suffix = format!("-{display_num}");
+        let mut matching = Vec::new();
+        let mut others = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(&suffix))
-            {
-                candidates.push(path);
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.ends_with(&suffix) {
+                matching.push(path);
+            } else if name.contains("-unix-") {
+                others.push(path);
             }
         }
+        matching.sort();
+        others.sort();
+        candidates.append(&mut matching);
+        candidates.append(&mut others);
     }
     for candidate in candidates {
         if let Ok(content) = std::fs::read_to_string(&candidate)
