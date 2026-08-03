@@ -34,7 +34,11 @@ pub(crate) const IBUS_RELEASE_MASK: u32 = 1 << 30;
 const IBUS_CAP_PREEDIT_TEXT: u32 = 1;
 const IBUS_CAP_FOCUS: u32 = 1 << 3;
 const CALL_TIMEOUT: Duration = Duration::from_millis(500);
-pub(crate) const KEY_REPLY_TIMEOUT: Duration = Duration::from_millis(300);
+// The worker must always answer a key before the UI thread stops waiting for it:
+// if the UI gave up first it would type the raw key while the engine was still
+// composing it, mixing raw keystrokes into the text.
+const KEY_CALL_TIMEOUT: Duration = Duration::from_millis(400);
+pub(crate) const KEY_REPLY_TIMEOUT: Duration = Duration::from_millis(700);
 
 pub(crate) enum IbusRequest {
     Key {
@@ -271,13 +275,43 @@ async fn with_timeout<T>(
     }
 }
 
+/// Await a method reply while still draining signals, so preedit/commit events
+/// never back up behind an in-flight call and stall the connection.
+async fn pump_call(
+    call: impl Future<Output = zbus::Result<zbus::Message>>,
+    stream: &mut futures::stream::Fuse<zbus::MessageStream>,
+    context_path: &OwnedObjectPath,
+    sink: &IbusEventSink,
+    timeout: Duration,
+) -> anyhow::Result<zbus::Message> {
+    let mut call = std::pin::pin!(futures::FutureExt::fuse(call));
+    let mut timer = std::pin::pin!(futures::FutureExt::fuse(smol::Timer::after(timeout)));
+    loop {
+        futures::select! {
+            reply = call => return Ok(reply?),
+            message = stream.next() => match message {
+                Some(Ok(message)) => {
+                    if let Some(event) = event_from_message(&message, context_path) {
+                        sink.push(event);
+                    }
+                }
+                Some(Err(_)) => {}
+                None => anyhow::bail!("ibus connection closed"),
+            },
+            _ = timer => anyhow::bail!("ibus call timed out"),
+        }
+    }
+}
+
 async fn context_call(
     connection: &zbus::Connection,
     path: &OwnedObjectPath,
     method: &str,
     body: &(impl zbus::export::serde::ser::Serialize + zvariant::DynamicType),
+    stream: &mut futures::stream::Fuse<zbus::MessageStream>,
+    sink: &IbusEventSink,
 ) -> anyhow::Result<()> {
-    with_timeout(
+    pump_call(
         connection.call_method(
             Some("org.freedesktop.IBus"),
             path.as_ref(),
@@ -285,6 +319,9 @@ async fn context_call(
             method,
             body,
         ),
+        stream,
+        path,
+        sink,
         CALL_TIMEOUT,
     )
     .await?;
@@ -344,78 +381,118 @@ async fn run_ibus(
         &context_path,
         "SetCapabilities",
         &(IBUS_CAP_PREEDIT_TEXT | IBUS_CAP_FOCUS),
+        &mut stream,
+        &sink,
     )
     .await?;
 
     eprintln!("[ibus] connected; input context {}", context_path.as_str());
 
+    enum WorkerEvent {
+        Request(IbusRequest),
+        Signal(zbus::Message),
+        Closed,
+    }
+
     loop {
-        futures::select! {
-            request = request_rx.recv().fuse() => {
-                let Ok(request) = request else {
-                    return Ok(());
-                };
-                let result = match request {
-                    IbusRequest::Key {
-                        keyval,
-                        keycode,
-                        state,
-                        reply,
-                    } => {
-                        let call = with_timeout(
-                            connection.call_method(
-                                Some("org.freedesktop.IBus"),
-                                context_path.as_ref(),
-                                Some("org.freedesktop.IBus.InputContext"),
-                                "ProcessKeyEvent",
-                                &(keyval, keycode, state),
-                            ),
-                            CALL_TIMEOUT,
-                        )
-                        .await;
-                        drain_ready_signals(&mut stream, &context_path, &sink);
-                        match call.and_then(|reply| Ok(reply.body().deserialize::<bool>()?)) {
-                            Ok(handled) => {
-                                let _ = reply.send(handled);
-                                Ok(())
-                            }
-                            Err(error) => {
-                                let _ = reply.send(false);
-                                Err(error)
-                            }
-                        }
-                    }
-                    IbusRequest::FocusIn => {
-                        context_call(&connection, &context_path, "FocusIn", &()).await
-                    }
-                    IbusRequest::FocusOut => {
-                        context_call(&connection, &context_path, "FocusOut", &()).await
-                    }
-                    IbusRequest::Reset => {
-                        context_call(&connection, &context_path, "Reset", &()).await
-                    }
-                    IbusRequest::CursorLocation { x, y, w, h } => {
-                        context_call(&connection, &context_path, "SetCursorLocation", &(x, y, w, h))
-                            .await
-                    }
-                };
-                if !matches!(result.as_ref(), Ok(())) {
-                    drain_ready_signals(&mut stream, &context_path, &sink);
-                }
-                if let Err(error) = result {
-                    anyhow::bail!("ibus request failed: {error}");
-                }
-            }
-            message = stream.next() => {
-                let Some(message) = message else {
-                    anyhow::bail!("ibus connection closed");
-                };
-                if let Ok(message) = message
-                    && let Some(event) = event_from_message(&message, &context_path)
-                {
+        // The stream borrow must end before a request is served, so the request
+        // handlers can keep draining signals while they await their own reply.
+        let next = futures::select! {
+            request = request_rx.recv().fuse() => match request {
+                Ok(request) => WorkerEvent::Request(request),
+                Err(_) => WorkerEvent::Closed,
+            },
+            message = stream.next() => match message {
+                Some(Ok(message)) => WorkerEvent::Signal(message),
+                Some(Err(_)) => continue,
+                None => anyhow::bail!("ibus connection closed"),
+            },
+        };
+
+        let request = match next {
+            WorkerEvent::Closed => return Ok(()),
+            WorkerEvent::Signal(message) => {
+                if let Some(event) = event_from_message(&message, &context_path) {
                     sink.push(event);
                 }
+                continue;
             }
+            WorkerEvent::Request(request) => request,
+        };
+
+        let result = match request {
+            IbusRequest::Key {
+                keyval,
+                keycode,
+                state,
+                reply,
+            } => {
+                let call = pump_call(
+                    connection.call_method(
+                        Some("org.freedesktop.IBus"),
+                        context_path.as_ref(),
+                        Some("org.freedesktop.IBus.InputContext"),
+                        "ProcessKeyEvent",
+                        &(keyval, keycode, state),
+                    ),
+                    &mut stream,
+                    &context_path,
+                    &sink,
+                    KEY_CALL_TIMEOUT,
+                )
+                .await;
+                drain_ready_signals(&mut stream, &context_path, &sink);
+                match call.and_then(|reply| Ok(reply.body().deserialize::<bool>()?)) {
+                    Ok(handled) => {
+                        let _ = reply.send(handled);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = reply.send(false);
+                        Err(error)
+                    }
+                }
+            }
+            IbusRequest::FocusIn => {
+                context_call(
+                    &connection,
+                    &context_path,
+                    "FocusIn",
+                    &(),
+                    &mut stream,
+                    &sink,
+                )
+                .await
+            }
+            IbusRequest::FocusOut => {
+                context_call(
+                    &connection,
+                    &context_path,
+                    "FocusOut",
+                    &(),
+                    &mut stream,
+                    &sink,
+                )
+                .await
+            }
+            IbusRequest::Reset => {
+                context_call(&connection, &context_path, "Reset", &(), &mut stream, &sink).await
+            }
+            IbusRequest::CursorLocation { x, y, w, h } => {
+                context_call(
+                    &connection,
+                    &context_path,
+                    "SetCursorLocation",
+                    &(x, y, w, h),
+                    &mut stream,
+                    &sink,
+                )
+                .await
+            }
+        };
+
+        if let Err(error) = result {
+            anyhow::bail!("ibus request failed: {error}");
         }
     }
 }
