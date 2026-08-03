@@ -583,24 +583,30 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
 
         #[cfg(target_os = "linux")]
         {
-            if let Err(error) = mezon_webview::init_gtk() {
-                tracing::error!("gtk init failed: {error:#}");
-            }
-            cx.spawn(async move |async_cx| {
-                let foreground = async_cx.foreground_executor().clone();
-                loop {
-                    async_cx
-                        .background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
-                    foreground
-                        .spawn(async move {
-                            mezon_webview::pump_gtk_events();
-                        })
-                        .detach();
+            match mezon_webview::init_gtk() {
+                Ok(()) => {
+                    cx.spawn(async move |async_cx| {
+                        let foreground = async_cx.foreground_executor().clone();
+                        loop {
+                            async_cx
+                                .background_executor()
+                                .timer(std::time::Duration::from_millis(16))
+                                .await;
+                            foreground
+                                .spawn(async move {
+                                    mezon_webview::pump_gtk_events();
+                                })
+                                .detach();
+                        }
+                    })
+                    .detach();
                 }
-            })
-            .detach();
+                Err(error) => {
+                    tracing::error!(
+                        "gtk init failed; channel app webviews are disabled: {error:#}"
+                    );
+                }
+            }
         }
 
         #[cfg(target_os = "windows")]

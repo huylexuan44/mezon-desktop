@@ -203,6 +203,7 @@ pub struct TextArea {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    discard_ime_commit: Option<String>,
     last_lines: Vec<DocLine>,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
@@ -250,6 +251,7 @@ impl TextArea {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            discard_ime_commit: None,
             last_lines: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
@@ -888,6 +890,11 @@ impl EntityInputHandler for TextArea {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(marked) = self.marked_range.clone() {
+            let marked = self.clamp_range(marked);
+            self.discard_ime_commit = self.content.get(marked).map(str::to_string);
+        }
         self.marked_range = None;
     }
 
@@ -898,6 +905,18 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if range_utf16.is_none()
+            && self.marked_range.is_none()
+            && let Some(expected) = self.discard_ime_commit.as_deref()
+        {
+            if new_text == expected {
+                self.discard_ime_commit = None;
+                return;
+            }
+            if !new_text.is_empty() {
+                self.discard_ime_commit = None;
+            }
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
@@ -931,6 +950,18 @@ impl EntityInputHandler for TextArea {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if range_utf16.is_none()
+            && self.marked_range.is_none()
+            && let Some(expected) = self.discard_ime_commit.as_deref()
+        {
+            if new_text == expected {
+                self.discard_ime_commit = None;
+                return;
+            }
+            if !new_text.is_empty() {
+                self.discard_ime_commit = None;
+            }
+        }
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))

@@ -48,14 +48,14 @@ pub fn tool_count(read_only: bool) -> usize {
         .count()
 }
 
-pub fn build_tool_router<S, F, Fut>(_read_only: bool, invoke: F) -> ToolRouter<S>
+pub fn build_tool_router<S, F, Fut>(read_only: bool, invoke: F) -> ToolRouter<S>
 where
     S: Send + Sync + 'static,
     F: Fn(String, Value) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<Value>> + Send + 'static,
 {
     let mut router = ToolRouter::<S>::new();
-    for spec in TOOL_SPECS {
+    for spec in TOOL_SPECS.iter().filter(|spec| !read_only || !spec.write) {
         let tool_name = spec.name.to_string();
         let invoke = invoke.clone();
         router.add_route(ToolRoute::new_dyn(

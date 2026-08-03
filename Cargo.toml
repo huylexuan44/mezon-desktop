@@ -370,6 +370,7 @@ cbindgen              = "0.28.0"
 [patch.crates-io]
 gpui = { path = "crates/vendor/gpui" }
 libspa = { path = "crates/vendor/libspa" }
+zbus = { path = "crates/vendor/zbus" }
 
 [patch."https://github.com/zed-industries/scap"]
 zed-scap = { path = "crates/vendor/zed-scap" }

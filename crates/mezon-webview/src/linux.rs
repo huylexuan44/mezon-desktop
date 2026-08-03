@@ -50,6 +50,9 @@ pub fn init_gtk() -> Result<()> {
 const GTK_EVENTS_PER_PUMP: usize = 32;
 
 pub fn pump_gtk_events() {
+    if !gtk::is_initialized() {
+        return;
+    }
     for _ in 0..GTK_EVENTS_PER_PUMP {
         if !gtk::events_pending() {
             return;
@@ -59,6 +62,9 @@ pub fn pump_gtk_events() {
 }
 
 fn drain_gtk_events() {
+    if !gtk::is_initialized() {
+        return;
+    }
     while gtk::events_pending() {
         gtk::main_iteration_do(false);
     }
