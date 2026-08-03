@@ -267,12 +267,12 @@ impl InboxStore {
         if bucket.items.iter().any(|n| n.id == notification.id) {
             return;
         }
-        if let Some(message_id) = notification.effective_message_id() {
-            if bucket.items.iter().any(|existing| {
+        if let Some(message_id) = notification.effective_message_id()
+            && bucket.items.iter().any(|existing| {
                 existing.effective_message_id().as_deref() == Some(message_id.as_str())
-            }) {
-                return;
-            }
+            })
+        {
+            return;
         }
         bucket.items.insert(0, notification);
         if bucket.items.len() > REALTIME_BUCKET_CAP {

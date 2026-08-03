@@ -2856,7 +2856,7 @@ impl MessagesStore {
             async move |_this, cx| match api.create_message_2_inbox(request).await {
                 Ok(()) => {
                     let notification = inbox_notification_from_marked_message_local(&marked);
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         InboxStore::global(cx).update(cx, |store, cx| {
                             store.prepend_local(
                                 GLOBAL_INBOX_BUCKET_CLAN_ID,
