@@ -6,10 +6,11 @@ use windows::Win32::Media::MediaFoundation::{
     IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
     MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
-    MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
+    MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
+    MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFTranscodeContainerType_MPEG4,
+    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
 };
 use windows::core::HSTRING;
 use yuv::{YuvBiPlanarImageMut, YuvConversionMode, YuvRange, YuvStandardMatrix, bgra_to_yuv_nv12};
@@ -71,8 +72,14 @@ impl WindowsSink {
         ensure_media_foundation();
         unsafe {
             let target = HSTRING::from(path.as_os_str());
-            let writer: IMFSinkWriter =
-                MFCreateSinkWriterFromURL(&target, None, None).map_err(|error| {
+            let mut attributes = None;
+            MFCreateAttributes(&mut attributes, 1).map_err(|_| RecordError::Create)?;
+            let attributes = attributes.ok_or(RecordError::Create)?;
+            attributes
+                .SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)
+                .map_err(|_| RecordError::Create)?;
+            let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&target, None, &attributes)
+                .map_err(|error| {
                     tracing::error!("could not create the call recording sink writer: {error}");
                     RecordError::Create
                 })?;

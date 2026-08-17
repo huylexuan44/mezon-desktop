@@ -311,9 +311,19 @@ fn audio_worker(shared: Arc<Shared>, rx: flume::Receiver<AudioChunk>) {
 }
 
 pub fn part_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".part");
-    PathBuf::from(name)
+    match (path.file_stem(), path.extension()) {
+        (Some(stem), Some(extension)) => {
+            let mut name = stem.to_os_string();
+            name.push(".part.");
+            name.push(extension);
+            path.with_file_name(name)
+        }
+        _ => {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(".part");
+            PathBuf::from(name)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -439,6 +449,19 @@ mod tests {
             stats.video_frames
         );
         recorder.finish().expect("finish");
+    }
+
+    #[test]
+    fn the_partial_file_keeps_the_real_extension_last() {
+        let part = part_path(Path::new("/tmp/mezon-call-20260817.mp4"));
+        assert_eq!(part, Path::new("/tmp/mezon-call-20260817.part.mp4"));
+        assert_eq!(part.extension().and_then(|e| e.to_str()), Some("mp4"));
+
+        let webm = part_path(Path::new("/tmp/call.webm"));
+        assert_eq!(webm.extension().and_then(|e| e.to_str()), Some("webm"));
+
+        let bare = part_path(Path::new("/tmp/call"));
+        assert_eq!(bare, Path::new("/tmp/call.part"));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::transport::ApiClanDesc;
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
-use mezon_proto::api::{SystemMessage, SystemMessageRequest, UpdateClanDescRequest};
+use mezon_proto::api::{self, SystemMessage, SystemMessageRequest, UpdateClanDescRequest};
 
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
@@ -21,6 +21,83 @@ pub const MAX_COMMUNITY_ABOUT_CHARS: usize = 100;
 pub const MAX_COMMUNITY_DESCRIPTION_CHARS: usize = 300;
 pub const MAX_COMMUNITY_SHORT_URL_CHARS: usize = 50;
 pub const MAX_COMMUNITY_BANNER_URL_BYTES: usize = 2048;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnboardingAnswer {
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnboardingContent {
+    pub guide_type: i32,
+    pub task_type: i32,
+    pub channel_id: i64,
+    pub title: String,
+    pub content: String,
+    pub image_url: String,
+    pub answers: Vec<OnboardingAnswer>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnboardingItem {
+    pub id: i64,
+    pub guide_type: i32,
+    pub task_type: i32,
+    pub channel_id: i64,
+    pub title: String,
+    pub content: String,
+    pub image_url: String,
+    pub answers: Vec<OnboardingAnswer>,
+}
+
+impl From<api::OnboardingAnswer> for OnboardingAnswer {
+    fn from(answer: api::OnboardingAnswer) -> Self {
+        Self {
+            title: answer.title,
+            description: answer.description,
+        }
+    }
+}
+
+impl From<OnboardingAnswer> for api::OnboardingAnswer {
+    fn from(answer: OnboardingAnswer) -> Self {
+        Self {
+            title: answer.title,
+            description: answer.description,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<api::OnboardingItem> for OnboardingItem {
+    fn from(item: api::OnboardingItem) -> Self {
+        Self {
+            id: item.id,
+            guide_type: item.guide_type,
+            task_type: item.task_type,
+            channel_id: item.channel_id,
+            title: item.title,
+            content: item.content,
+            image_url: item.image_url,
+            answers: item.answers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<OnboardingContent> for api::OnboardingContent {
+    fn from(content: OnboardingContent) -> Self {
+        Self {
+            guide_type: content.guide_type,
+            task_type: content.task_type,
+            channel_id: content.channel_id,
+            title: content.title,
+            content: content.content,
+            image_url: content.image_url,
+            answers: content.answers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClanImageMimeType {
@@ -1034,6 +1111,107 @@ impl ClanList {
                 .find(|desc| desc.clan_id == id)
                 .map(CommunityInfo::from)
                 .ok_or_else(|| "clan not found".into())
+        })
+    }
+
+    pub fn fetch_onboarding(
+        &self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<OnboardingItem>, String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.list_onboarding(clan_id.get(), 100, 1)
+                .await
+                .map(|response| {
+                    response
+                        .list_onboarding
+                        .into_iter()
+                        .map(Into::into)
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn create_onboarding_items(
+        &self,
+        clan_id: ClanId,
+        contents: Vec<OnboardingContent>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<OnboardingItem>, String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.create_onboarding(
+                clan_id.get(),
+                contents.into_iter().map(Into::into).collect(),
+            )
+            .await
+            .map(|response| {
+                response
+                    .list_onboarding
+                    .into_iter()
+                    .map(Into::into)
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn update_onboarding_item(
+        &self,
+        clan_id: ClanId,
+        id: i64,
+        content: OnboardingContent,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.update_onboarding(id, clan_id.get(), content.into())
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn delete_onboarding_item(
+        &self,
+        clan_id: ClanId,
+        id: i64,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let api = self.api.clone();
+        cx.spawn(async move |_, _| {
+            api.delete_onboarding(id, clan_id.get())
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub fn set_onboarding_enabled(
+        &mut self,
+        clan_id: ClanId,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let Some(clan) = self.clans.iter().find(|clan| clan.id == clan_id).cloned() else {
+            return cx.spawn(async move |_, _| Err("clan not found".into()));
+        };
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let request = community_update_request(clan_id, &clan, |request| {
+                request.is_onboarding = Some(enabled);
+            });
+            api.update_clan_desc(request)
+                .await
+                .map_err(|error| error.to_string())?;
+            this.update(cx, |this, cx| {
+                if let Some(clan) = this.clans.iter_mut().find(|clan| clan.id == clan_id) {
+                    clan.is_onboarding = enabled;
+                }
+                cx.notify();
+            })
+            .map_err(|_| "store dropped".to_string())?;
+            Ok(())
         })
     }
 

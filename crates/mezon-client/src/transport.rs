@@ -8534,13 +8534,13 @@ impl MezonTransport {
     }
 
     /// Create onboarding.
-    pub async fn create_onboarding(&self, clan_id: i64) -> Result<api::ListOnboardingResponse> {
+    pub async fn create_onboarding(
+        &self,
+        clan_id: i64,
+        contents: Vec<api::OnboardingContent>,
+    ) -> Result<api::ListOnboardingResponse> {
         let cid = self.generate_cid();
-        let body = api::CreateOnboardingRequest {
-            clan_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
+        let body = api::CreateOnboardingRequest { clan_id, contents }.encode_to_vec();
         let (code, response) = self.send_api_request(cid, "CreateOnboarding", body).await?;
         if code != 0 {
             return Err(anyhow::anyhow!("API error: code={}", code));
@@ -8549,12 +8549,22 @@ impl MezonTransport {
     }
 
     /// Update onboarding.
-    pub async fn update_onboarding(&self, id: i64, clan_id: i64) -> Result<()> {
+    pub async fn update_onboarding(
+        &self,
+        id: i64,
+        clan_id: i64,
+        content: api::OnboardingContent,
+    ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateOnboardingRequest {
             id,
             clan_id,
-            ..Default::default()
+            task_type: content.task_type,
+            channel_id: content.channel_id,
+            title: content.title,
+            content: content.content,
+            image_url: content.image_url,
+            answers: content.answers,
         }
         .encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateOnboarding", body).await?;

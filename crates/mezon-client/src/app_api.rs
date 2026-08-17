@@ -295,6 +295,36 @@ impl AppApi {
         self.transport.list_clan_descs().await
     }
 
+    pub async fn list_onboarding(
+        &self,
+        clan_id: i64,
+        limit: i32,
+        page: i32,
+    ) -> Result<mezon_proto::api::ListOnboardingResponse> {
+        self.transport.list_onboarding(clan_id, limit, page).await
+    }
+
+    pub async fn create_onboarding(
+        &self,
+        clan_id: i64,
+        contents: Vec<mezon_proto::api::OnboardingContent>,
+    ) -> Result<mezon_proto::api::ListOnboardingResponse> {
+        self.transport.create_onboarding(clan_id, contents).await
+    }
+
+    pub async fn update_onboarding(
+        &self,
+        id: i64,
+        clan_id: i64,
+        content: mezon_proto::api::OnboardingContent,
+    ) -> Result<()> {
+        self.transport.update_onboarding(id, clan_id, content).await
+    }
+
+    pub async fn delete_onboarding(&self, id: i64, clan_id: i64) -> Result<()> {
+        self.transport.delete_onboarding(id, clan_id).await
+    }
+
     pub async fn list_clan_users(
         &self,
         clan_id: i64,
