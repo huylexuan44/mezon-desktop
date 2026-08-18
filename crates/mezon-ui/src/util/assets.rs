@@ -51,6 +51,21 @@ mod tests {
             CHANNEL_SETTING_LOGO_LIGHT,
             CHANNEL_SETTING_LOGO_DARK,
             ONBOARDING,
+            "icons/flower.svg",
+            "icons/flower-rose-line.svg",
+            "icons/flower-peony.svg",
+            "icons/flower-five-petal.svg",
+            "icons/flower-tulips.svg",
+            "icons/flower-cluster.svg",
+            "icons/flower-bouquet.svg",
+            "icons/flower-sprig.svg",
+            "icons/flower-daisy.svg",
+            "icons/flower-stems.svg",
+            "icons/flower-lotus.svg",
+            "icons/flower-tied.svg",
+            "icons/flower-sun.svg",
+            "icons/flower-ring.svg",
+            "icons/flower-bud.svg",
         ] {
             let loaded = Assets
                 .load(path)

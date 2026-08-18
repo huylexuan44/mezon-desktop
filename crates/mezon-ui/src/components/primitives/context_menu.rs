@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, anchored,
-    deferred, div, img, prelude::*, px, relative,
+    deferred, div, img, prelude::*, px, relative, svg,
 };
 
 use super::icon::{Icon, IconName};
@@ -25,6 +25,7 @@ enum Item {
         leading_icon: Option<IconName>,
         trailing_icon: Option<IconName>,
         danger: bool,
+        disabled: bool,
         on_click: MenuHandler,
     },
     ReactionSubmenu {
@@ -92,6 +93,7 @@ impl ContextMenu {
             leading_icon: None,
             trailing_icon: None,
             danger: false,
+            disabled: false,
             on_click: Rc::new(on_click),
         });
         self
@@ -108,6 +110,7 @@ impl ContextMenu {
             leading_icon: Some(icon),
             trailing_icon: None,
             danger: false,
+            disabled: false,
             on_click: Rc::new(on_click),
         });
         self
@@ -124,6 +127,7 @@ impl ContextMenu {
             leading_icon: None,
             trailing_icon: Some(icon),
             danger: false,
+            disabled: false,
             on_click: Rc::new(on_click),
         });
         self
@@ -139,6 +143,7 @@ impl ContextMenu {
             leading_icon: None,
             trailing_icon: None,
             danger: true,
+            disabled: false,
             on_click: Rc::new(on_click),
         });
         self
@@ -155,6 +160,7 @@ impl ContextMenu {
             leading_icon: Some(icon),
             trailing_icon: None,
             danger: true,
+            disabled: false,
             on_click: Rc::new(on_click),
         });
         self
@@ -171,8 +177,16 @@ impl ContextMenu {
             leading_icon: None,
             trailing_icon: Some(icon),
             danger: true,
+            disabled: false,
             on_click: Rc::new(on_click),
         });
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        if let Some(Item::Entry { disabled: flag, .. }) = self.items.last_mut() {
+            *flag = disabled;
+        }
         self
     }
 
@@ -413,11 +427,24 @@ impl RenderOnce for ContextMenu {
                     leading_icon,
                     trailing_icon,
                     danger: is_danger,
+                    disabled,
                     on_click,
                 } => {
                     let dismiss = dismiss.clone();
-                    let label_color = if is_danger { danger_text } else { text };
-                    let icon_color = if is_danger { danger_text } else { muted };
+                    let label_color = if disabled {
+                        muted
+                    } else if is_danger {
+                        danger_text
+                    } else {
+                        text
+                    };
+                    let icon_color = if disabled {
+                        muted
+                    } else if is_danger {
+                        danger_text
+                    } else {
+                        muted
+                    };
                     panel = panel.child(
                         h_flex()
                             .id(("context-menu-item", index))
@@ -428,13 +455,15 @@ impl RenderOnce for ContextMenu {
                             .rounded(px(4.))
                             .text_sm()
                             .text_color(label_color)
-                            .cursor_pointer()
-                            .hover(|s| {
-                                if is_danger {
-                                    s.bg(danger_hover_bg)
-                                } else {
-                                    s.bg(hover)
-                                }
+                            .when(disabled, |row| row.opacity(0.5).cursor_not_allowed())
+                            .when(!disabled, |row| {
+                                row.cursor_pointer().hover(|s| {
+                                    if is_danger {
+                                        s.bg(danger_hover_bg)
+                                    } else {
+                                        s.bg(hover)
+                                    }
+                                })
                             })
                             .when_some(on_reaction_close.clone(), |row, close| {
                                 row.on_hover(move |hovered, window, cx| {
@@ -445,17 +474,28 @@ impl RenderOnce for ContextMenu {
                             })
                             .when(leading_icon.is_some(), |row| row.gap_2())
                             .when_some(leading_icon, |row, icon| {
-                                row.child(Icon::new(icon).size_4().text_color(icon_color))
+                                let icon_el = if icon == IconName::Flower {
+                                    svg()
+                                        .path(icon.path())
+                                        .size(px(24.))
+                                        .flex_none()
+                                        .text_color(icon_color)
+                                } else {
+                                    Icon::new(icon).size_4().text_color(icon_color)
+                                };
+                                row.child(icon_el)
                             })
                             .child(div().flex_1().child(label))
                             .when_some(trailing_icon, |row, icon| {
                                 row.child(Icon::new(icon).size_4().text_color(icon_color))
                             })
-                            .on_click(move |_: &ClickEvent, window, cx| {
-                                on_click(window, cx);
-                                if let Some(dismiss) = &dismiss {
-                                    dismiss(window, cx);
-                                }
+                            .when(!disabled, |row| {
+                                row.on_click(move |_: &ClickEvent, window, cx| {
+                                    on_click(window, cx);
+                                    if let Some(dismiss) = &dismiss {
+                                        dismiss(window, cx);
+                                    }
+                                })
                             }),
                     );
                 }

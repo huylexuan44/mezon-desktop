@@ -481,6 +481,11 @@ const SPLASH_LOGO_WIDTH: f32 = 280.;
 const SPLASH_LOGO_HEIGHT: f32 = 50.;
 const SPLASH_LOGO_VIEWPORT_FRACTION: f32 = 0.72;
 const SPLASH_DOT_BASE_SIZE: f32 = 6.;
+const SPLASH_DOT_SCALE_MIN: f32 = 0.8;
+const SPLASH_DOT_SCALE_RANGE: f32 = 0.4;
+const SPLASH_DOT_CELL_SIZE: f32 =
+    SPLASH_DOT_BASE_SIZE * (SPLASH_DOT_SCALE_MIN + SPLASH_DOT_SCALE_RANGE);
+const SPLASH_DOT_PITCH: f32 = 12.;
 const SPLASH_DOT_CYCLE_MS: u64 = 1400;
 const SPLASH_DOT_STAGGER_MS: u64 = 200;
 const SPLASH_PROGRESS_MS: u64 = 30_000;
@@ -512,27 +517,43 @@ fn splash_dot_intensity(delta: f32, offset: f32) -> f32 {
 /// tick on the root view for as long as the machine stays offline. Nobody is watching a background
 /// window, so the pulse is dropped there.
 fn render_splash_dots(animate: bool) -> gpui::AnyElement {
-    let mut row = div().flex().flex_row().gap(px(6.)).mt(px(4.));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPLASH_DOT_PITCH - SPLASH_DOT_CELL_SIZE))
+        .mt(px(4.))
+        .h(px(SPLASH_DOT_CELL_SIZE));
     for index in 0..3u64 {
         let offset = (index * SPLASH_DOT_STAGGER_MS) as f32 / SPLASH_DOT_CYCLE_MS as f32;
         let dot = div()
             .rounded_full()
             .bg(gpui::rgb(SPLASH_ACCENT))
             .size(px(SPLASH_DOT_BASE_SIZE));
-        row = row.child(if animate {
+        let dot = if animate {
             dot.with_animation(
                 gpui::ElementId::Integer(index),
                 Animation::new(Duration::from_millis(SPLASH_DOT_CYCLE_MS)).repeat(),
                 move |el, delta| {
                     let intensity = splash_dot_intensity(delta, offset);
+                    let scale = SPLASH_DOT_SCALE_MIN + SPLASH_DOT_SCALE_RANGE * intensity;
                     el.opacity(0.2 + 0.8 * intensity)
-                        .size(px(SPLASH_DOT_BASE_SIZE * (0.8 + 0.4 * intensity)))
+                        .size(px(SPLASH_DOT_BASE_SIZE * scale))
                 },
             )
             .into_any_element()
         } else {
             dot.opacity(0.6).into_any_element()
-        });
+        };
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .size(px(SPLASH_DOT_CELL_SIZE))
+                .child(dot),
+        );
     }
     row.into_any_element()
 }

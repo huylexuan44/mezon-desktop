@@ -6,8 +6,8 @@ use gpui::{
     Window, div, point, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, DirectKind, DirectMessageStore, InVoiceInfo, PinnedMessagesStore, Settings,
-    StreamStore, ThreadsStore,
+    ChannelId, DirectKind, DirectMessageStore, DmAvatarPresence, InVoiceInfo, PinnedMessagesStore,
+    Settings, StreamStore, ThreadsStore,
 };
 use ui::{Clickable, PopoverMenu, PopoverMenuHandle, Toggleable, Tooltip};
 
@@ -40,6 +40,8 @@ fn canvas_popover_y_offset() -> Pixels {
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
+    /// Peer presence for a 1:1 DM; always `None` for a group.
+    pub presence: DmAvatarPresence,
     pub label: SharedString,
     pub avatar_src: SharedString,
     pub avatar_raw: SharedString,
@@ -376,7 +378,16 @@ impl ChannelHeader {
                         } else if !info.avatar_raw.is_empty() {
                             avatar = avatar.src(info.avatar_raw.clone());
                         }
-                        avatar
+                        div()
+                            .relative()
+                            .flex_shrink_0()
+                            .size(px(32.))
+                            .child(avatar)
+                            .children(crate::util::user_status::presence_badge_element(
+                                info.presence,
+                                theme.bg_primary,
+                                theme,
+                            ))
                     }))
                     .child({
                         let name_el = div()
@@ -870,6 +881,17 @@ impl ChannelHeader {
     }
 }
 
+/// The DM peer's badge, matching the sidebar row: the live presence, with the
+/// DM list's `online` flag only bootstrapping it until presence is known.
+/// Groups never carry one.
+fn dm_peer_presence(dm: &mezon_store::DirectChannel, cx: &App) -> DmAvatarPresence {
+    dm.peer_user_id
+        .filter(|_| dm.kind != DirectKind::Group)
+        .zip(mezon_store::PresenceStore::try_global(cx))
+        .map(|(user_id, presence)| presence.read(cx).dm_avatar_presence(user_id, dm.online))
+        .unwrap_or(DmAvatarPresence::None)
+}
+
 pub struct ChatHeader {
     name: SharedString,
     icon: Option<ChannelIcon>,
@@ -901,6 +923,7 @@ pub struct ChatHeader {
     _pinned_observe: Subscription,
     _direct_observe: Subscription,
     _group_members_observe: Subscription,
+    _presence_subscribe: Subscription,
 }
 
 impl ChatHeader {
@@ -924,6 +947,15 @@ impl ChatHeader {
         let _group_members_observe = cx.observe(
             &mezon_store::GroupMembersStore::global(cx),
             |this, _, cx| this.refresh_dm_header(cx),
+        );
+        // Only the status event: presence also notifies on every typing tick.
+        let _presence_subscribe = cx.subscribe(
+            &mezon_store::PresenceStore::global(cx),
+            |this, _, event, cx| {
+                if matches!(event, mezon_store::PresenceEvent::StatusChanged) {
+                    this.refresh_dm_presence(cx);
+                }
+            },
         );
         Self {
             name: SharedString::default(),
@@ -954,6 +986,7 @@ impl ChatHeader {
             _pinned_observe,
             _direct_observe,
             _group_members_observe,
+            _presence_subscribe,
         }
     }
 
@@ -971,6 +1004,7 @@ impl ChatHeader {
         let store = DirectMessageStore::try_global(cx)?;
         let dm = store.read(cx).find(direct_id)?;
         let is_group = dm.kind == DirectKind::Group;
+        let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {
             String::new()
         } else {
@@ -994,6 +1028,7 @@ impl ChatHeader {
         Some(DmHeaderInfo {
             channel_id: dm.id,
             is_group,
+            presence,
             label: SharedString::from(dm.label.clone()),
             avatar_src: SharedString::from(avatar_src),
             avatar_raw: SharedString::from(dm.avatar.clone()),
@@ -1014,6 +1049,33 @@ impl ChatHeader {
         };
         self.dm_header.as_ref().map(|info| info.channel_id) == route_id
             && self.locale.as_deref() == locale
+    }
+
+    /// Presence-only refresh. The status tick fires for every peer the app
+    /// tracks, so it patches the cached block's badge in place instead of
+    /// rebuilding it -- a hash lookup rather than a fresh set of strings.
+    fn refresh_dm_presence(&mut self, cx: &mut Context<Self>) {
+        let Some(channel_id) = self
+            .dm_header
+            .as_ref()
+            .filter(|info| !info.is_group)
+            .map(|info| info.channel_id)
+        else {
+            return;
+        };
+        let next = DirectMessageStore::try_global(cx)
+            .and_then(|store| {
+                let store = store.read(cx);
+                let dm = store.find(channel_id)?;
+                Some(dm_peer_presence(dm, cx))
+            })
+            .unwrap_or(DmAvatarPresence::None);
+        if let Some(info) = self.dm_header.as_mut()
+            && info.presence != next
+        {
+            info.presence = next;
+            cx.notify();
+        }
     }
 
     fn refresh_dm_header(&mut self, cx: &mut Context<Self>) {

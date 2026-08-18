@@ -5777,7 +5777,6 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
- "image",
  "mezon-cli",
  "mezon-client",
  "mezon-mcp",

@@ -1,5 +1,5 @@
 use futures::StreamExt as _;
-use gpui::{App, AsyncApp};
+use gpui::{App, AppContext as _, AsyncApp};
 use mezon_client::AppApi;
 use mezon_mcp::{
     CaptureTarget, McpCommand, McpController, McpStartParams, ToolCallParams, is_write_tool,
@@ -291,9 +291,22 @@ impl McpRuntime {
                         reply_to,
                         reply,
                     } => {
-                        let result = cx.update(|cx| {
-                            send_attachment(cx, &auth_state, &paths, &content, anonymous, reply_to)
-                        });
+                        let prepared = cx
+                            .background_spawn(async move { outgoing_attachments(&paths) })
+                            .await;
+                        let result = match prepared {
+                            Ok(attachments) => cx.update(|cx| {
+                                send_attachment(
+                                    cx,
+                                    &auth_state,
+                                    attachments,
+                                    &content,
+                                    anonymous,
+                                    reply_to,
+                                )
+                            }),
+                            Err(error) => Err(error),
+                        };
                         let _ = reply.send(result);
                     }
                     McpCommand::ListEmojis {
@@ -569,55 +582,37 @@ fn send_buzz(cx: &mut App, text: &str) -> anyhow::Result<Value> {
     Ok(json!({ "ok": true, "text": text }))
 }
 
-fn outgoing_attachment(path: &str) -> anyhow::Result<mezon_store::OutgoingAttachment> {
-    let path = std::path::PathBuf::from(path);
-    if !path.is_file() {
-        anyhow::bail!("file not found: {}", path.display());
-    }
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("unreadable filename"))?
-        .to_string();
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("png")
-        .to_ascii_lowercase();
-    let filetype = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "png" => "image/png".to_string(),
-        "gif" => "image/gif".to_string(),
-        "webp" => "image/webp".to_string(),
-        "mp4" => "video/mp4".to_string(),
-        "pdf" => "application/pdf".to_string(),
-        "txt" => "text/plain".to_string(),
-        other => format!("image/{other}"),
-    };
-    let (width, height) = image::image_dimensions(&path).unwrap_or((0, 0));
-    Ok(mezon_store::OutgoingAttachment {
-        path,
-        filename,
-        filetype,
-        width: i32::try_from(width).unwrap_or(0),
-        height: i32::try_from(height).unwrap_or(0),
-        duration: 0,
-        poster_jpeg: None,
-    })
+fn outgoing_attachments(paths: &[String]) -> anyhow::Result<Vec<mezon_store::OutgoingAttachment>> {
+    paths
+        .iter()
+        .map(|path| {
+            let path = std::path::PathBuf::from(path);
+            if !path.is_file() {
+                anyhow::bail!("file not found: {}", path.display());
+            }
+            let pending = mezon_ui::chat::mention_input::build_pending(path.clone())
+                .ok_or_else(|| anyhow::anyhow!("unreadable attachment: {}", path.display()))?;
+            Ok(mezon_store::OutgoingAttachment {
+                path: pending.path,
+                filename: pending.filename,
+                filetype: pending.filetype,
+                width: i32::try_from(pending.width).unwrap_or(0),
+                height: i32::try_from(pending.height).unwrap_or(0),
+                duration: pending.duration,
+                poster_jpeg: pending.poster_jpeg,
+            })
+        })
+        .collect()
 }
 
 fn send_attachment(
     cx: &mut App,
     auth_state: &gpui::Entity<AuthState>,
-    paths: &[String],
+    attachments: Vec<mezon_store::OutgoingAttachment>,
     content: &str,
     anonymous: bool,
     reply_to: i64,
 ) -> anyhow::Result<Value> {
-    let attachments = paths
-        .iter()
-        .map(|path| outgoing_attachment(path))
-        .collect::<anyhow::Result<Vec<_>>>()?;
     let filenames: Vec<String> = attachments.iter().map(|att| att.filename.clone()).collect();
     let (user_id, username) = match auth_state.read(cx) {
         AuthState::Authenticated(session) => (session.user_id.clone(), session.username.clone()),

@@ -28,9 +28,9 @@ use mezon_store::{
 };
 use std::time::Duration;
 
+pub use attachments::build_pending;
 use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending, mime_from_extension,
-    validate_batch,
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, mime_from_extension, validate_batch,
 };
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
