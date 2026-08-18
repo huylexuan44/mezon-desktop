@@ -210,6 +210,7 @@ pub struct VoiceStore {
     recording: RecordingState,
     recording_elapsed: Duration,
     recording_stalled: bool,
+    recording_avatars: HashMap<String, Option<Arc<mezon_voice::compose::AvatarImage>>>,
     _recording_tick: Option<Task<()>>,
     _recording_start: Option<Task<()>>,
     _events_task: Option<Task<()>>,
@@ -285,6 +286,50 @@ impl EventEmitter<VoiceStoreEvent> for VoiceStore {}
 
 struct GlobalVoiceStore(Entity<VoiceStore>);
 impl Global for GlobalVoiceStore {}
+
+impl VoiceStore {
+    fn display_name_for(&self, participant: &VoiceParticipant, cx: &App) -> String {
+        let resolved = self.resolve_reaction_name(&participant.identity, cx);
+        if !resolved.is_empty() {
+            return resolved;
+        }
+        // LiveKit hands back the identity as the name, and a raw user id in the
+        // recording reads as noise — leave the pill off instead.
+        if participant.name.chars().all(|c| c.is_ascii_digit()) {
+            return String::new();
+        }
+        participant.name.clone()
+    }
+}
+
+async fn load_avatar(url: &str) -> Option<Arc<mezon_voice::compose::AvatarImage>> {
+    let (bytes, _) = mezon_client::transport_runtime::fetch_bytes(url)
+        .await
+        .map_err(|error| tracing::warn!("could not fetch a recording avatar: {error}"))
+        .ok()?;
+    let decoded = image::load_from_memory(&bytes)
+        .map_err(|error| tracing::warn!("could not decode a recording avatar: {error}"))
+        .ok()?
+        .thumbnail(256, 256)
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let mut bgra = decoded.into_raw();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(mezon_voice::compose::AvatarImage {
+        width,
+        height,
+        bgra,
+    }))
+}
+
+fn initial_of(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default()
+}
 
 pub fn screen_tile_id(identity: &str) -> String {
     format!("{identity}\u{1}screen")
@@ -415,6 +460,7 @@ impl VoiceStore {
             recording: RecordingState::Idle,
             recording_elapsed: Duration::ZERO,
             recording_stalled: false,
+            recording_avatars: HashMap::new(),
             _recording_tick: None,
             _recording_start: None,
             _events_task: None,
@@ -2073,6 +2119,7 @@ impl VoiceStore {
                 cx.notify();
             }
             VoiceEvent::Participants(mut list) => {
+                let refresh_scene = self.recording == RecordingState::Recording;
                 if !self.pending_removals.is_empty() {
                     let now = Instant::now();
                     self.pending_removals.retain(|identity, issued_at| {
@@ -2096,6 +2143,9 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
                 self.participants = list;
+                if refresh_scene {
+                    self.publish_recording_scene(cx);
+                }
                 if remote_joined {
                     self.play_join_sound(cx);
                 }
@@ -2342,13 +2392,17 @@ impl VoiceStore {
         if self.recording != RecordingState::Idle {
             return Err("a recording is already running".into());
         }
-        let Some(session) = &self.session else {
+        let Some((scene, starter)) = self.session.as_ref().map(|session| {
+            (
+                Some(session.record_frame_source()),
+                session.record_starter(),
+            )
+        }) else {
             return Err("not in a call".into());
         };
-        let window = window_id.map(mezon_voice::RecordWindow::Id).or_else(|| {
-            mezon_voice::wayland_record_portal().then_some(mezon_voice::RecordWindow::Portal)
-        });
-        let starter = session.record_starter();
+        let _ = window_id;
+        self.fetch_missing_avatars(cx);
+        self.publish_recording_scene(cx);
         let generation = self.session_generation;
         self.recording = RecordingState::Starting;
         cx.notify();
@@ -2356,7 +2410,7 @@ impl VoiceStore {
         self._recording_start = Some(cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { starter.start(path, window) })
+                .spawn(async move { starter.start(path, scene) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.session_generation != generation {
@@ -2483,6 +2537,85 @@ impl VoiceStore {
         .detach();
     }
 
+    fn fetch_missing_avatars(&mut self, cx: &mut Context<Self>) {
+        let Some((_, clan)) = self.connection.connected_channel() else {
+            return;
+        };
+        let Ok(clan_id) = clan.parse::<i64>() else {
+            return;
+        };
+        let wanted: Vec<(String, String)> = self
+            .participants
+            .iter()
+            .filter(|p| !self.recording_avatars.contains_key(&p.identity))
+            .filter_map(|p| {
+                let uid = p.identity.parse::<i64>().ok()?;
+                let url = ClanMembersStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .member(ClanId(clan_id), UserId(uid))
+                        .map(|m| m.avatar().to_string())
+                })?;
+                (!url.is_empty()).then_some((p.identity.clone(), url))
+            })
+            .collect();
+
+        for (identity, url) in wanted {
+            self.recording_avatars.insert(identity.clone(), None);
+            cx.spawn(async move |this, cx| {
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move { load_avatar(&url).await })
+                    .await;
+                let _ = this.update(cx, |this, _| {
+                    this.recording_avatars.insert(identity, decoded);
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn publish_recording_scene(&self, cx: &App) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let focused = self.focused_tile();
+        let mut tiles = Vec::new();
+        for participant in &self.participants {
+            let label = self.display_name_for(participant, cx);
+            let avatar = self
+                .recording_avatars
+                .get(&participant.identity)
+                .cloned()
+                .flatten();
+            if let Some(key) = participant.screenshare {
+                let id = screen_tile_id(&participant.identity);
+                tiles.push(mezon_voice::compose::SceneTile {
+                    focused: focused == Some(id.as_str()),
+                    key: id,
+                    label: label.clone(),
+                    initial: initial_of(&label),
+                    avatar: avatar.clone(),
+                    frame_key: Some(key),
+                    is_screen_share: true,
+                    speaking: false,
+                });
+            }
+            let id = camera_tile_id(&participant.identity);
+            tiles.push(mezon_voice::compose::SceneTile {
+                focused: focused == Some(id.as_str()),
+                key: id,
+                label: label.clone(),
+                initial: initial_of(&label),
+                avatar: avatar.clone(),
+                frame_key: participant.camera,
+                is_screen_share: false,
+                speaking: participant.speaking,
+            });
+        }
+        session.record_scene().set(tiles);
+    }
+
     fn start_recording_tick(&mut self, cx: &mut Context<Self>) {
         self._recording_tick = Some(cx.spawn(async move |this, cx| {
             let mut reported_video_gap = false;
@@ -2517,6 +2650,8 @@ impl VoiceStore {
                             this.stop_recording(cx);
                             return false;
                         }
+                        this.fetch_missing_avatars(cx);
+                        this.publish_recording_scene(cx);
                         if this.recording_elapsed != stats.elapsed
                             || this.recording_stalled != stats.video_stalled
                         {

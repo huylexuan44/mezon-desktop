@@ -1,5 +1,6 @@
 mod audio;
 mod camera;
+pub mod compose;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -41,9 +42,7 @@ pub use camera::{CameraDeviceInfo, enumerate_cameras};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
-pub use record::{
-    RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordWindow,
-};
+pub use record::{RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
@@ -58,16 +57,6 @@ pub fn record_file_extension() -> &'static str {
     mezon_record::file_extension()
 }
 
-pub fn wayland_record_portal() -> bool {
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
-        linux_session::is_wayland_session()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    {
-        false
-    }
-}
 pub use screen_picker::{PickedScreen, system_screen_share_pick};
 pub use screen_previews::{ScreenSharePreview, capture_screen_share_preview};
 pub use screen_targets::{
@@ -153,6 +142,7 @@ pub struct VoiceSession {
     frame_store: Arc<VideoFrameStore>,
     screen_full_res: Arc<AtomicBool>,
     record_taps: record::RecordTaps,
+    record_scene: compose::Scene,
     record: Arc<parking_lot::RwLock<Option<record::RecordSession>>>,
 }
 
@@ -205,12 +195,21 @@ impl VoiceSession {
             frame_store,
             screen_full_res,
             record_taps,
+            record_scene: compose::Scene::default(),
             record: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
     pub fn record_starter(&self) -> record::RecordStarter {
         record::RecordStarter::new(self.record_taps.clone(), self.record.clone())
+    }
+
+    pub fn record_scene(&self) -> compose::Scene {
+        self.record_scene.clone()
+    }
+
+    pub fn record_frame_source(&self) -> (compose::Scene, Arc<VideoFrameStore>) {
+        (self.record_scene.clone(), self.frame_store.clone())
     }
 
     pub fn take_recording(&self) -> Option<record::RecordSession> {
