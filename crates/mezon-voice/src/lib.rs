@@ -37,12 +37,17 @@ use livekit::webrtc::video_frame::I420Buffer;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::{Condvar, Mutex};
 
-pub use audio::AudioFormat;
-pub use camera::{CameraDeviceInfo, enumerate_cameras};
+pub use audio::{AudioFormat, AudioIo, DeviceResetKind, PlaybackMixer};
+pub use camera::{
+    CameraController, CameraDeviceInfo, camera_denied, enumerate_cameras, start_camera,
+    start_camera_into,
+};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
-pub use record::{RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter};
+pub use record::{
+    RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
+};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
@@ -65,11 +70,10 @@ pub use screen_targets::{
 };
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
-pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into};
+pub use video::{VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key};
 
-use crate::camera::CameraController;
 use crate::screen::ScreenStopper;
-use crate::video::{local_camera_key, local_screen_key, track_frame_key};
+use crate::video::{local_screen_key, track_frame_key};
 
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
@@ -618,9 +622,19 @@ async fn session_main(
             event = room_events.recv() => {
                 let Some(event) = event else { break };
                 match event {
-                    RoomEvent::TrackSubscribed { track, participant, .. } => {
+                    RoomEvent::TrackSubscribed { track, publication, participant } => {
                         match track {
                             RemoteTrack::Audio(audio_track) => {
+                                // Screen-share audio and a plain microphone are
+                                // the same kind of remote track here, so the
+                                // source is the only way to tell from a log
+                                // whether the shared sound ever reached the mix
+                                // the recorder tees from.
+                                tracing::info!(
+                                    "playing remote {:?} audio from {}",
+                                    publication.source(),
+                                    participant.identity().as_str()
+                                );
                                 if let (Some(mixer), Some(out_fmt)) = (&audio_mixer, out_fmt) {
                                     let key = track_frame_key(participant.identity().as_str(), audio_track.sid().as_str());
                                     if let Some(handle) = audio_tracks.remove(&key) {
@@ -821,9 +835,10 @@ async fn session_main(
                             let tx = screen_tx.clone();
                             let generation = screen_gen;
                             let taps = record_taps.clone();
+                            let events = evt_tx.clone();
                             screen_task = Some(runtime::runtime().spawn(async move {
                                 let result =
-                                    start_screen_track(&room, &identity, store, full_res, pick, share_audio, taps).await;
+                                    start_screen_track(&room, &identity, store, full_res, pick, share_audio, taps, events).await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
                         }
@@ -1078,7 +1093,11 @@ async fn start_screen_track(
     pick: PickedScreen,
     share_audio: bool,
     record_taps: Option<record::RecordTaps>,
+    evt_tx: flume::Sender<VoiceEvent>,
 ) -> Result<ScreenSession> {
+    // Whether the switch in the picker was on is the first thing to know when a
+    // recording comes out silent, and it left no trace anywhere before.
+    tracing::info!("starting screen share (share system audio: {share_audio})");
     let (stopper, track_rx) =
         screen::start_screen(identity.to_string(), frame_store, full_res, pick);
     let track = track_rx
@@ -1103,9 +1122,16 @@ async fn start_screen_track(
         .await?;
     let audio = if share_audio {
         match start_screen_audio_track(room, record_taps).await {
-            Ok(audio) => Some(audio),
+            Ok(audio) => {
+                tracing::info!("sharing this machine's system audio with the call");
+                Some(audio)
+            }
             Err(e) => {
+                // The screen keeps sharing without it, so a log line was the
+                // only sign — nobody in the call hears the shared sound and the
+                // recording has none either, with nothing to explain why.
                 tracing::warn!("system audio share unavailable: {e:#}");
+                let _ = evt_tx.send(VoiceEvent::Error(format!("screen audio: {e}")));
                 None
             }
         }

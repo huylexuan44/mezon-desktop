@@ -3,15 +3,17 @@ use std::sync::Once;
 use std::time::Duration;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
-    MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
-    MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
-    MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
-    MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFTranscodeContainerType_MPEG4,
-    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    IMFSinkWriter, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_SUBTYPE, MF_TRANSCODE_CONTAINERTYPE, MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM,
+    MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFStartup,
+    MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, eAVEncH264VProfile_Main,
 };
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::core::HSTRING;
 use yuv::{YuvBiPlanarImageMut, YuvConversionMode, YuvRange, YuvStandardMatrix, bgra_to_yuv_nv12};
 
@@ -30,6 +32,7 @@ pub fn file_extension() -> &'static str {
 
 const VIDEO_BITRATE: u32 = 2_500_000;
 const AUDIO_BYTES_PER_SECOND: u32 = 16_000;
+const BYTES_PER_AUDIO_FRAME: u32 = 2 * RECORD_CHANNELS;
 
 static MF_INIT: Once = Once::new();
 
@@ -39,6 +42,32 @@ fn ensure_media_foundation() {
             tracing::error!("MFStartup failed for call recording: {error}");
         }
     });
+}
+
+struct Apartment(bool);
+
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+thread_local! {
+    static APARTMENT: Apartment = Apartment(unsafe {
+        // RPC_E_CHANGED_MODE means the thread already lives in an apartment we
+        // can call from, so only undo the ones we actually joined.
+        CoInitializeEx(None, COINIT_MULTITHREADED).is_ok()
+    });
+}
+
+/// The sink writer is created on one background thread and then fed from the
+/// audio worker and the compositor, and every one of those calls goes straight
+/// into COM. A thread that never joined an apartment can fail its very first
+/// `WriteSample`, which leaves a header-only MP4 behind, so join before calling.
+fn ensure_thread_apartment() {
+    APARTMENT.with(|_| ());
 }
 
 fn pack_ratio(high: u32, low: u32) -> u64 {
@@ -55,6 +84,9 @@ pub struct WindowsSink {
     audio_stream: u32,
     video: Option<VideoConfig>,
     nv12: Vec<u8>,
+    audio_samples: u64,
+    video_samples: u64,
+    dropped_frames: u64,
     finished: bool,
 }
 
@@ -70,6 +102,7 @@ pub fn create_sink(
 impl WindowsSink {
     fn new(path: &Path, video: Option<VideoConfig>) -> Result<Self, RecordError> {
         ensure_media_foundation();
+        ensure_thread_apartment();
         unsafe {
             let target = HSTRING::from(path.as_os_str());
             let mut attributes = None;
@@ -97,6 +130,9 @@ impl WindowsSink {
                         .SetUINT32(&MF_MT_AVG_BITRATE, VIDEO_BITRATE)
                         .map_err(|_| RecordError::Create)?;
                     out_type
+                        .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)
+                        .map_err(|_| RecordError::Create)?;
+                    out_type
                         .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                         .map_err(|_| RecordError::Create)?;
                     out_type
@@ -108,9 +144,10 @@ impl WindowsSink {
                     out_type
                         .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_ratio(1, 1))
                         .map_err(|_| RecordError::Create)?;
-                    let stream = writer
-                        .AddStream(&out_type)
-                        .map_err(|_| RecordError::Create)?;
+                    let stream = writer.AddStream(&out_type).map_err(|error| {
+                        tracing::error!("call recorder could not add the H.264 stream: {error}");
+                        RecordError::Create
+                    })?;
 
                     let in_type = MFCreateMediaType().map_err(|_| RecordError::Create)?;
                     in_type
@@ -161,9 +198,10 @@ impl WindowsSink {
             audio_out
                 .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AUDIO_BYTES_PER_SECOND)
                 .map_err(|_| RecordError::Create)?;
-            let audio_stream = writer
-                .AddStream(&audio_out)
-                .map_err(|_| RecordError::Create)?;
+            let audio_stream = writer.AddStream(&audio_out).map_err(|error| {
+                tracing::error!("call recorder could not add the AAC stream: {error}");
+                RecordError::Create
+            })?;
 
             let audio_in = MFCreateMediaType().map_err(|_| RecordError::Create)?;
             audio_in
@@ -182,7 +220,19 @@ impl WindowsSink {
                 .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, RECORD_CHANNELS)
                 .map_err(|_| RecordError::Create)?;
             audio_in
-                .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 2 * RECORD_CHANNELS)
+                .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, BYTES_PER_AUDIO_FRAME)
+                .map_err(|_| RecordError::Create)?;
+            // An uncompressed audio type is only complete with its byte rate and
+            // its independent-samples flag; without them the AAC encoder is free
+            // to reject every sample we hand it later on.
+            audio_in
+                .SetUINT32(
+                    &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                    RECORD_SAMPLE_RATE * BYTES_PER_AUDIO_FRAME,
+                )
+                .map_err(|_| RecordError::Create)?;
+            audio_in
+                .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)
                 .map_err(|_| RecordError::Create)?;
             writer
                 .SetInputMediaType(audio_stream, &audio_in, None)
@@ -202,6 +252,9 @@ impl WindowsSink {
                 audio_stream,
                 video,
                 nv12: Vec::new(),
+                audio_samples: 0,
+                video_samples: 0,
+                dropped_frames: 0,
                 finished: false,
             })
         }
@@ -236,7 +289,9 @@ impl WindowsSink {
                 .SetSampleDuration(hundred_nanos(duration))
                 .map_err(|_| RecordError::Encode)?;
             self.writer.WriteSample(stream, &sample).map_err(|error| {
-                tracing::error!("call recorder could not write a sample: {error}");
+                tracing::error!(
+                    "call recorder could not write a sample to stream {stream}: {error}"
+                );
                 RecordError::Encode
             })
         }
@@ -245,16 +300,32 @@ impl WindowsSink {
 
 impl RecordSink for WindowsSink {
     fn push_audio(&mut self, pcm: &[i16], pts: Duration) -> Result<(), RecordError> {
+        ensure_thread_apartment();
         let mut bytes = Vec::with_capacity(std::mem::size_of_val(pcm));
         for sample in pcm {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         let frames = (pcm.len() / RECORD_CHANNELS as usize) as u64;
         let duration = Duration::from_nanos(frames * 1_000_000_000 / RECORD_SAMPLE_RATE as u64);
-        unsafe { self.write(self.audio_stream, &bytes, pts, duration) }
+        unsafe { self.write(self.audio_stream, &bytes, pts, duration) }?;
+        self.audio_samples += 1;
+
+        // The MP4 sink interleaves by timestamp, so it holds every audio sample
+        // in memory until the video stream reaches the same point — and writes
+        // nothing at all to the file while it waits. Tell it the video stream is
+        // simply not there yet so the muxer keeps draining.
+        if let Some(stream) = self.video_stream
+            && self.video_samples == 0
+        {
+            unsafe {
+                let _ = self.writer.SendStreamTick(stream, hundred_nanos(pts));
+            }
+        }
+        Ok(())
     }
 
     fn push_video(&mut self, frame: VideoFrameRef<'_>, pts: Duration) -> Result<(), RecordError> {
+        ensure_thread_apartment();
         let (Some(stream), Some(config)) = (self.video_stream, self.video) else {
             return Ok(());
         };
@@ -277,16 +348,20 @@ impl RecordSink for WindowsSink {
             width,
             height,
         };
-        if bgra_to_yuv_nv12(
+        if let Err(error) = bgra_to_yuv_nv12(
             &mut planar,
             data,
             stride as u32,
             YuvRange::Limited,
             YuvStandardMatrix::Bt709,
             YuvConversionMode::Balanced,
-        )
-        .is_err()
-        {
+        ) {
+            // Dropping every frame silently is how a recording ends up with no
+            // video track at all, so say it once rather than never.
+            if self.dropped_frames == 0 {
+                tracing::error!("call recorder could not convert a frame to NV12: {error}");
+            }
+            self.dropped_frames += 1;
             return Ok(());
         }
 
@@ -294,23 +369,40 @@ impl RecordSink for WindowsSink {
         let bytes = std::mem::take(&mut self.nv12);
         let result = unsafe { self.write(stream, &bytes, pts, duration) };
         self.nv12 = bytes;
-        result
+        result?;
+        self.video_samples += 1;
+        Ok(())
     }
 
     fn finish(mut self: Box<Self>) -> Result<(), RecordError> {
+        ensure_thread_apartment();
         self.finished = true;
         unsafe {
             self.writer.Finalize().map_err(|error| {
                 tracing::error!("could not finalize the call recording: {error}");
                 RecordError::Finish
-            })
+            })?
+        };
+        tracing::info!(
+            "the call recording encoded {} audio and {} video samples ({} frames dropped)",
+            self.audio_samples,
+            self.video_samples,
+            self.dropped_frames
+        );
+        // Media Foundation reports success for a finalize that wrote nothing but
+        // the container header, and that file opens in no player anywhere.
+        if self.audio_samples == 0 && self.video_samples == 0 {
+            tracing::error!("the call recording was finalized without a single encoded sample");
+            return Err(RecordError::Finish);
         }
+        Ok(())
     }
 }
 
 impl Drop for WindowsSink {
     fn drop(&mut self) {
         if !self.finished {
+            ensure_thread_apartment();
             let _ = unsafe { self.writer.Finalize() };
         }
     }

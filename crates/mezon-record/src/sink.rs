@@ -13,6 +13,8 @@ pub enum RecordError {
     Encode,
     #[error("could not finalize the recording file")]
     Finish,
+    #[error("the recording was cut short and the partial file was kept")]
+    Incomplete,
     #[error("not enough free disk space to record")]
     DiskSpace,
 }

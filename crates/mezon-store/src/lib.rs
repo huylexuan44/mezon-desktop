@@ -6,6 +6,7 @@ pub mod audit_log;
 pub mod auto_update;
 pub mod badge;
 pub mod cache;
+pub mod call;
 pub mod canvas;
 pub mod channel;
 pub mod channel_media;
@@ -89,6 +90,7 @@ pub use audit_log::{
 pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
 pub use badge::BadgeService;
 pub use cache::{Freshness, KeyedCache};
+pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
 pub use channel::*;
 pub use channel_media::{

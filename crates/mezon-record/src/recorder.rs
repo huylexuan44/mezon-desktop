@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use crate::container;
 use crate::disk;
 use crate::mixer::{AudioMixer, AudioSource};
 use crate::platform;
@@ -203,9 +204,10 @@ impl Recorder {
             dropped_audio_chunks: self.shared.dropped.load(Ordering::Relaxed),
             dropped_video_frames: self.shared.dropped_video.load(Ordering::Relaxed),
             video_frames: frames,
-            video_stalled: self.video.is_some()
-                && frames > 0
-                && pts.saturating_sub(last) > VIDEO_STALL,
+            // `last` sits at zero until the first frame lands, so a video
+            // track that never starts reads as stalled too — which is exactly
+            // what it is.
+            video_stalled: self.video.is_some() && pts.saturating_sub(last) > VIDEO_STALL,
         }
     }
 
@@ -222,8 +224,25 @@ impl Recorder {
         let Some(sink) = sink else {
             return Err(RecordError::Finish);
         };
+        let failed = self.shared.failed.load(Ordering::Relaxed);
         sink.finish()?;
         let part = part_path(&self.path);
+
+        if failed {
+            tracing::warn!("the call recorder gave up mid-call; keeping what it managed to encode");
+        }
+        // A muxer that finalized nothing but a container header still leaves a
+        // file behind, and Media Foundation even reports success for one. Keep
+        // that partial under its own name and report the failure rather than
+        // handing the user an mp4 that opens in no player.
+        if !container::is_playable(&part) {
+            tracing::error!(
+                "the call recording carries no usable media; the partial file stays at {}",
+                part.display()
+            );
+            return Err(RecordError::Incomplete);
+        }
+
         if std::fs::rename(&part, &self.path).is_ok() {
             return Ok(self.path.clone());
         }
@@ -302,6 +321,16 @@ fn audio_worker(shared: Arc<Shared>, rx: flume::Receiver<AudioChunk>) {
         }
 
         if stopping && !received && !wrote {
+            // Whether a source ever reached the mix is the one thing the file
+            // itself cannot tell us — a screen share nobody can hear in the
+            // recording looks identical to one that was never tapped.
+            let mixed = mixer.contributions();
+            tracing::info!(
+                "the call recording mixed {} remote, {} mic and {} screen frames",
+                mixed.remote,
+                mixed.mic,
+                mixed.screen
+            );
             return;
         }
         if !received && !wrote {

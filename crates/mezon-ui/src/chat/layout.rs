@@ -8,8 +8,8 @@ use gpui::{
 };
 use mezon_store::{
     AuthState, AutoUpdateStatus, AutoUpdateStore, CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED,
-    Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList, ClanMembersStore,
-    DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
+    CallStore, Channel, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
+    ClanMembersStore, DirectChannel, DirectKind, DirectMessageStore, GroupMembersStore, InboxStore,
     MessageSearchEvent, MessageSearchStore, MessagesStore, PinnedEvent, PinnedMessagesStore,
     Settings, StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent,
     TopicsStore, UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
@@ -19,6 +19,7 @@ use ui::PopoverMenuHandle;
 
 use crate::app::shell::Shell;
 use crate::chat::area::ChatArea;
+use crate::chat::call_window::{CallPanelView, render_call_mini_bar};
 use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::message::{ReactionPicker, ReactionPickerEvent};
 use crate::chat::message_search::{
@@ -52,6 +53,7 @@ pub struct ChatLayout {
     auth_state: Entity<AuthState>,
     settings: Entity<Settings>,
     voice_store: Entity<VoiceStore>,
+    call_panel: Entity<CallPanelView>,
     stream_store: Entity<StreamStore>,
     voice_strip_scroll: ScrollHandle,
     voice_strip_width: Pixels,
@@ -268,6 +270,10 @@ impl ChatLayout {
         })
         .detach();
 
+        let call_panel = cx.new(CallPanelView::new);
+        cx.observe(&CallStore::global(cx), |_, _, cx| cx.notify())
+            .detach();
+
         let stream_store = StreamStore::global(cx);
         cx.observe(&stream_store, |this, store, cx| {
             let store = store.read(cx);
@@ -483,6 +489,7 @@ impl ChatLayout {
             chat_area,
             settings,
             voice_store,
+            call_panel,
             stream_store,
             voice_strip_scroll: ScrollHandle::new(),
             voice_strip_width: px(0.),
@@ -1712,6 +1719,7 @@ impl Render for ChatLayout {
             chat_content
         };
         let voice_mini_bar = self.render_voice_mini_bar(cx);
+        let call_mini_bar = render_call_mini_bar(cx.theme(), cx);
         let stream_connected_bar = crate::chat::stream::render_stream_connected_bar(
             cx.theme(),
             self.stream_store.read(cx),
@@ -1943,6 +1951,7 @@ impl Render for ChatLayout {
                                     .overflow_y_scroll()
                                     .children(stream_connected_bar)
                                     .children(voice_mini_bar)
+                                    .children(call_mini_bar)
                                     .children(update_available_pill)
                                     .children(update_pill)
                                     .children(manual_install_pill),
@@ -2735,7 +2744,7 @@ impl ChatLayout {
                     dm.peer_user_id
                         .and_then(|user_id| self.channel_list.read(cx).in_voice_status(user_id))
                 };
-                return self
+                let dm_chat = self
                     .chat_area
                     .render(
                         &locale,
@@ -2768,6 +2777,18 @@ impl ChatLayout {
                         false,
                         cx,
                     )
+                    .into_any_element();
+                return div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .w_full()
+                    .h_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.call_panel.clone())
+                    .child(dm_chat)
                     .into_any_element();
             }
             if matches!(

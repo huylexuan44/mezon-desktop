@@ -981,6 +981,7 @@ fn open_main_window(
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::StreamStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
+    mezon_store::CallStore::init(api.clone(), cx);
     mezon_store::ClanMembersStore::init(api.clone(), cx);
     mezon_store::EmojiStore::init(api.clone(), cx);
     mezon_store::StickerStore::init(api.clone(), cx);

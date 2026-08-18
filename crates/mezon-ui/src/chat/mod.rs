@@ -1,5 +1,6 @@
 pub mod area;
 pub use mezon_canvas::{CanvasPopoverPanel, CanvasView, canvas_popover_on_open};
+pub mod call_window;
 pub mod channel_app_bar;
 pub mod channel_header;
 pub mod channel_settings;

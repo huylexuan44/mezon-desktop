@@ -7,6 +7,7 @@ members = [
     "crates/mezon-store",
     "crates/mezon-voice",
     "crates/mezon-stream",
+    "crates/mezon-call",
     "crates/mezon-video",
     "crates/mezon-record",
     "crates/mezon-audio",
@@ -119,6 +120,7 @@ mezon-ui      = { path = "crates/mezon-ui" }
 mezon-client  = { path = "crates/mezon-client" }
 mezon-store   = { path = "crates/mezon-store" }
 mezon-voice   = { path = "crates/mezon-voice" }
+mezon-call    = { path = "crates/mezon-call" }
 mezon-stream  = { path = "crates/mezon-stream" }
 mezon-video   = { path = "crates/mezon-video" }
 mezon-audio   = { path = "crates/mezon-audio" }
@@ -337,6 +339,7 @@ base64                = "0.22"
 
 # ---------- Util ----------
 anyhow                = "1"
+flate2                = "1"
 thiserror             = "2"
 dirs                  = "5"
 dunce                 = "1.0"

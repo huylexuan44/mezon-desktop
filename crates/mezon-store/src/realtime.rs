@@ -65,6 +65,7 @@ pub enum RealtimeKind {
     UnblockFriend,
     TokenSent,
     RoleEvent,
+    WebrtcSignaling,
 }
 
 impl RealtimeKind {
@@ -118,6 +119,7 @@ impl RealtimeKind {
             RealtimeEvent::UnblockFriend(_) => Self::UnblockFriend,
             RealtimeEvent::TokenSent(_) => Self::TokenSent,
             RealtimeEvent::Unhandled(realtime::envelope::Message::RoleEvent(_)) => Self::RoleEvent,
+            RealtimeEvent::WebrtcSignaling(_) => Self::WebrtcSignaling,
             _ => return None,
         })
     }

@@ -120,13 +120,18 @@ impl Track {
         }
     }
 
-    fn mix_into(&mut self, out: &mut [i16]) {
+    /// Returns how many samples this track actually contributed, so a source
+    /// that never reaches the mix can be told apart from one the mixer dropped.
+    fn mix_into(&mut self, out: &mut [i16]) -> u64 {
+        let mut mixed = 0;
         for slot in out.iter_mut() {
             let Some(sample) = self.buf.pop_front() else {
                 break;
             };
             *slot = (*slot as i32 + sample as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            mixed += 1;
         }
+        mixed
     }
 
     fn frames(&self) -> u64 {
@@ -134,10 +139,20 @@ impl Track {
     }
 }
 
+/// Frames each source contributed to the recording, in the order remote, mic,
+/// screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Contributions {
+    pub remote: u64,
+    pub mic: u64,
+    pub screen: u64,
+}
+
 pub struct AudioMixer {
     remote: Track,
     mic: Track,
     screen: Track,
+    mixed: Contributions,
 }
 
 impl AudioMixer {
@@ -146,6 +161,7 @@ impl AudioMixer {
             remote: Track::new(),
             mic: Track::new(),
             screen: Track::new(),
+            mixed: Contributions::default(),
         }
     }
 
@@ -165,9 +181,14 @@ impl AudioMixer {
     pub fn drain_block(&mut self, frames: usize, out: &mut Vec<i16>) {
         out.clear();
         out.resize(frames * RECORD_CHANNELS as usize, 0);
-        self.remote.mix_into(out);
-        self.mic.mix_into(out);
-        self.screen.mix_into(out);
+        let channels = RECORD_CHANNELS as u64;
+        self.mixed.remote += self.remote.mix_into(out) / channels;
+        self.mixed.mic += self.mic.mix_into(out) / channels;
+        self.mixed.screen += self.screen.mix_into(out) / channels;
+    }
+
+    pub fn contributions(&self) -> Contributions {
+        self.mixed
     }
 }
 

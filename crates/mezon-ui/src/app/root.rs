@@ -1,6 +1,8 @@
+use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
+use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
 use crate::clan::settings::{ClanSettingScreen, ClanSettingsPage};
@@ -26,11 +28,13 @@ pub struct RootView {
     settings_screen: Entity<SettingsScreen>,
     clan_setting_screen: Entity<ClanSettingScreen>,
     channel_setting_screen: Entity<ChannelSettingScreen>,
+    shell: Entity<Shell>,
     applied_theme: String,
     cached_locale: String,
     image_cache: Entity<LruImageCache>,
     connecting_since: Option<Instant>,
     network_online: bool,
+    call_overlay: Entity<CallOverlay>,
     _splash_delay: Option<Task<()>>,
     _recording_toasts: Option<gpui::Subscription>,
 }
@@ -95,8 +99,7 @@ impl RootView {
     ) -> Self {
         // App shell: owns the cross-cutting overlay layers (toasts + modal). Init before child
         // views so any of them can surface a toast/modal via `Shell::global`.
-        let shell = crate::app::shell::Shell::init(cx);
-        cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+        let shell = Shell::init(cx);
 
         let recording_toasts = mezon_store::VoiceStore::try_global(cx)
             .map(|voice| cx.subscribe(&voice, surface_recording_toast));
@@ -161,7 +164,7 @@ impl RootView {
             if this.network_online != online {
                 this.network_online = online;
                 let locale = this.cached_locale.clone();
-                crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                Shell::global(cx).update(cx, |shell, cx| {
                     if online {
                         shell.dismiss(NETWORK_OFFLINE_TOAST_KEY, cx);
                     } else {
@@ -253,7 +256,9 @@ impl RootView {
         } else {
             (None, None)
         };
+        let call_overlay = cx.new(CallOverlay::new);
         Self {
+            call_overlay,
             title_bar,
             auth_state,
             login_view,
@@ -261,6 +266,7 @@ impl RootView {
             settings_screen,
             clan_setting_screen,
             channel_setting_screen,
+            shell,
             applied_theme,
             cached_locale,
             image_cache,
@@ -382,14 +388,10 @@ impl Render for RootView {
                     Route::NotFound { .. } => render_not_found(theme, locale),
                     Route::AddFriend { .. } => render_placeholder(theme, "Add Friend"),
                     Route::Invite { .. } => render_placeholder(theme, "Accept Invite"),
-                    _ => uncached_fill(self.chat_layout.clone()),
+                    _ => cached_fill(self.chat_layout.clone()),
                 }
             }
         };
-
-        let overlay = crate::app::shell::Shell::global(cx)
-            .read(cx)
-            .render_overlay();
 
         div()
             .relative()
@@ -420,7 +422,8 @@ impl Render for RootView {
             .when(window_controls::is_edge_resizable(), |this| {
                 this.child(window_controls::render_resize_edges(window))
             })
-            .child(overlay)
+            .child(self.shell.clone())
+            .child(self.call_overlay.clone())
     }
 }
 

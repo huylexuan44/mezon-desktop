@@ -1181,7 +1181,7 @@ impl VoiceStore {
         };
         let Some((giver_id, receiver_id, timestamp, _)) = flower_event_from_payload(
             msg.event_type,
-            msg.user_id,
+            msg.sender_id,
             msg.voice_channel_id,
             &msg.params,
             joined_channel,
@@ -1769,6 +1769,9 @@ impl VoiceStore {
         let Ok(receiver_id) = identity.parse::<UserId>() else {
             return;
         };
+        let Ok(receiver_i64) = identity.parse::<i64>() else {
+            return;
+        };
         let Ok(giver_i64) = local_id.parse::<i64>() else {
             return;
         };
@@ -1906,6 +1909,7 @@ impl VoiceStore {
                         clan_i64,
                         channel_i64,
                         giver_i64,
+                        receiver_i64,
                         VoiceInteractiveEventType::Gift as i32,
                         params,
                     )
@@ -2761,7 +2765,9 @@ impl VoiceStore {
         match self.recording {
             RecordingState::Idle => self.start_recording(window_id, cx),
             RecordingState::Recording => self.stop_recording(cx),
-            RecordingState::Starting | RecordingState::Stopping => {}
+            // Nothing to do, but a button that looks dead is worth a line in the
+            // log — a finalize that never returns lands here every time.
+            state => tracing::warn!("ignoring the record button while the recorder is {state:?}"),
         }
     }
 
@@ -2861,6 +2867,7 @@ impl VoiceStore {
             let path = match receiver.await {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) => {
+                    tracing::info!("the recording save dialog was cancelled");
                     let _ = this.update(cx, |this, cx| {
                         this.recording = RecordingState::Idle;
                         cx.notify();
