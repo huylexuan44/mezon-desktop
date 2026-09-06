@@ -5351,14 +5351,10 @@ impl MezonTransport {
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
-        let cid = self.generate_cid();
-
-        let api_name = "SendChannelMessage";
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
         tracing::debug!(
-            "send_channel_message: cid={} clan_id={} channel_id={} is_public={} content_len={} attachments={}",
-            cid,
+            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
             parsed_clan_id,
             parsed_channel_id,
             is_public,
@@ -5403,7 +5399,7 @@ impl MezonTransport {
             .collect();
         // No client `id`: the server generates the message Snowflake (mezon-js omits it).
         // Sending a client-side id made the server reject with code 13 (INTERNAL).
-        let body = realtime::ChannelMessageSend {
+        let message = realtime::ChannelMessageSend {
             clan_id: parsed_clan_id,
             channel_id: parsed_channel_id,
             content: content_json.clone(),
@@ -5417,18 +5413,9 @@ impl MezonTransport {
             anonymous_message: flags.anonymous_message,
             code: flags.message_code,
             ..Default::default()
-        }
-        .encode_to_vec();
+        };
 
-        let (code, response) = self
-            .send_api_request_with_http_fallback(cid, api_name, body)
-            .await?;
-
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
-        }
-
-        let ack = realtime::ChannelMessageAck::decode(response.as_slice())?;
+        let ack = self.write_or_http_channel_message(message).await?;
         tracing::debug!(
             "send_channel_message ack: message_id={} channel_id={} code={}",
             ack.message_id,
@@ -6351,14 +6338,13 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
-        let cid = self.generate_cid();
         let content_json = forward_content_json(content_raw, text);
         let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         let proto_mentions: Vec<api::MessageMention> = mentions
             .iter()
             .filter_map(OutgoingMention::to_proto)
             .collect();
-        let body = realtime::ChannelMessageSend {
+        let message = realtime::ChannelMessageSend {
             clan_id,
             channel_id,
             content: content_json,
@@ -6368,13 +6354,10 @@ impl MezonTransport {
             is_public,
             mention_everyone,
             ..Default::default()
-        }
-        .encode_to_vec();
-        let (code, _response) = self
-            .send_api_request_with_http_fallback(cid, "SendChannelMessage", body)
-            .await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+        };
+        let ack = self.write_or_http_channel_message(message).await?;
+        if ack.message_id == 0 {
+            return Err(anyhow::anyhow!("forward returned no message id"));
         }
         Ok(())
     }
@@ -8049,6 +8032,79 @@ impl MezonTransport {
             return Err(anyhow::anyhow!("API error: code={}", code));
         }
         Ok(())
+    }
+
+    fn channel_message_ack_from_write_response(
+        response: &[u8],
+    ) -> Result<realtime::ChannelMessageAck> {
+        let envelope = realtime::Envelope::decode(response)
+            .context("failed to decode channel_message_ack envelope")?;
+        match envelope.message {
+            Some(realtime::envelope::Message::ChannelMessageAck(ack)) => Ok(ack),
+            Some(realtime::envelope::Message::Error(error)) => Err(anyhow::anyhow!(
+                "API error: code={} {}",
+                error.code,
+                error.message.trim()
+            )),
+            _ => Err(anyhow::anyhow!(
+                "unexpected writeChatMessage reply (missing channel_message_ack)"
+            )),
+        }
+    }
+
+    async fn write_chat_message(
+        &self,
+        message: realtime::ChannelMessageSend,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let cid = self.generate_cid();
+        let envelope = realtime::Envelope {
+            cid: i32::from(cid),
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        if code != 0 {
+            return Err(anyhow::anyhow!("API error: code={code}"));
+        }
+        Self::channel_message_ack_from_write_response(&response)
+    }
+
+    async fn send_channel_message_http(
+        &self,
+        message: realtime::ChannelMessageSend,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let response = self
+            .send_api_request_over_http("SendChannelMessage", message.encode_to_vec())
+            .await
+            .context("SendChannelMessage HTTP")?;
+        realtime::ChannelMessageAck::decode(response.as_slice())
+            .context("decode ChannelMessageAck from HTTP")
+    }
+
+    async fn write_or_http_channel_message(
+        &self,
+        message: realtime::ChannelMessageSend,
+    ) -> Result<realtime::ChannelMessageAck> {
+        let has_fallback = self.http_fallback.read().is_some();
+        if self.is_open().await {
+            match self.write_chat_message(message.clone()).await {
+                Ok(ack) => return Ok(ack),
+                Err(err) if has_fallback => {
+                    tracing::warn!(
+                        target: "socket",
+                        "write_chat_message failed — HTTP fallback: {err:#}"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        } else if has_fallback {
+            tracing::warn!(
+                target: "socket",
+                "api_socket_closed: action=SendChannelMessage — sending over HTTP"
+            );
+        } else {
+            return self.write_chat_message(message).await;
+        }
+        self.send_channel_message_http(message).await
     }
 
     /// Send an ephemeral message (visible only to `receiver_id`). Sent as the
