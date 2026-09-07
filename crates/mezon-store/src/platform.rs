@@ -171,7 +171,8 @@ pub type CliInstallVisibleFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallStateFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type CliInstallToggleFn = Arc<dyn Fn() -> anyhow::Result<bool> + Send + Sync>;
 pub type McpStatusFn = Arc<dyn Fn() -> McpServerStatus + Send + Sync>;
-pub type McpStartFn = Arc<dyn Fn(bool) -> anyhow::Result<McpServerStatus> + Send + Sync>;
+pub type McpStartFn =
+    Arc<dyn Fn(bool, Option<u16>) -> anyhow::Result<McpServerStatus> + Send + Sync>;
 pub type McpStopFn = Arc<dyn Fn() -> anyhow::Result<McpServerStatus> + Send + Sync>;
 /// Returns whether the OS permits desktop notifications (false only when explicitly denied).
 pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;

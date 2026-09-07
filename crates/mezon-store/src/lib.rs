@@ -369,6 +369,12 @@ pub fn schedule_settings_save(settings: &gpui::Entity<Settings>, cx: &mut gpui::
     cx.default_global::<SettingsSaver>().task = Some(task);
 }
 
+pub const DEFAULT_MCP_PORT: u16 = 3179;
+
+fn default_mcp_port() -> u16 {
+    DEFAULT_MCP_PORT
+}
+
 /// Persistent application settings — written to ~/.config/mezon/settings.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -419,6 +425,10 @@ pub struct Settings {
     #[serde(default)]
     pub mcp_read_only: bool,
     #[serde(default)]
+    pub mcp_enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
+    #[serde(default)]
     pub age_restricted_confirmed: Vec<ChannelId>,
     #[serde(default)]
     pub tour_seen_version: u32,
@@ -450,6 +460,8 @@ impl Default for Settings {
             last_clan_id: None,
             last_channel_id: None,
             mcp_read_only: false,
+            mcp_enabled: false,
+            mcp_port: DEFAULT_MCP_PORT,
             age_restricted_confirmed: Vec::new(),
             tour_seen_version: 0,
             tour_done_tracks: Vec::new(),
