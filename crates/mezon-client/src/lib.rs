@@ -77,9 +77,9 @@ pub use transport::{
     ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
     ApiChannelDesc, ApiFriend, ApiPinMessage, ApiStatusError, ApiThreadDesc, ApiVoiceChannelUser,
     CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, FACEBOOK_LINK_MARKDOWN_KIND,
-    HttpFallbackSession, LINK_MARKDOWN_KIND, RegistrationPasswordError, TIKTOK_LINK_MARKDOWN_KIND,
-    UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND, api_status_from_error,
-    is_channel_limit_api_error, is_link_markdown_kind, link_markdown_kind,
+    HttpFallbackSession, LINK_MARKDOWN_KIND, RegistrationPasswordError, SessionRefreshRejected,
+    TIKTOK_LINK_MARKDOWN_KIND, UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND,
+    api_status_from_error, is_channel_limit_api_error, is_link_markdown_kind, link_markdown_kind,
     parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;

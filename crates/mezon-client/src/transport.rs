@@ -497,6 +497,32 @@ pub struct RenewedTokens {
     pub id_token: String,
 }
 
+/// A `SessionRefresh` the server answered and refused, carrying the status so the reconnect ladder
+/// can tell a throttle apart from a real failure. 429 and 503 are the throttle answers: this route
+/// sits behind an nginx `limit_req` zone, and it is the one API call the client sends with no
+/// per-user credential — `Authorization` is the shared server key and the refresh token travels in
+/// the protobuf body — so the limiter cannot bucket it per user. Retrying it on the reconnect
+/// ladder keeps that bucket saturated for every client at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionRefreshRejected {
+    pub status: u16,
+}
+
+impl SessionRefreshRejected {
+    /// Whether the server is asking for fewer calls rather than reporting a dead session.
+    pub fn is_throttled(self) -> bool {
+        self.status == 429 || self.status == 503
+    }
+}
+
+impl std::fmt::Display for SessionRefreshRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SessionRefresh failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for SessionRefreshRejected {}
+
 impl HttpFallbackSession {
     fn token_expired(&self) -> bool {
         self.token_lifetime().1
@@ -3809,7 +3835,10 @@ impl MezonTransport {
             .await
             .context("failed to read the SessionRefresh response")?;
         if !status.is_success() {
-            anyhow::bail!("SessionRefresh failed with status {}", status.as_u16());
+            return Err(SessionRefreshRejected {
+                status: status.as_u16(),
+            }
+            .into());
         }
 
         let session = api::Session::decode(bytes.as_slice())?;
@@ -11109,6 +11138,39 @@ mod tests {
             is_remember: false,
             server_key: "key".into(),
         }
+    }
+
+    /// The connection store arms this on every confirmed handshake, from whatever session it holds
+    /// — it no longer rotates the token first unless the refresh token is near expiry. That is only
+    /// safe because an older token cannot displace a newer one here; without this guard, a
+    /// handshake landing after a send had already minted a fresher token would put the stale one
+    /// back and cost the next send a needless `SessionRefresh`.
+    #[tokio::test]
+    async fn arming_the_fallback_with_an_older_token_does_not_displace_a_newer_one() {
+        let (port, _hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+
+        let mut fresh = expired_fallback(port);
+        fresh.token = fake_jwt_expiring_in(600);
+        fresh.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fresh.clone()));
+
+        t.set_http_fallback(Some(expired_fallback(port)));
+        assert_eq!(
+            t.http_fallback.read().as_ref().map(|f| f.token.clone()),
+            Some(fresh.token.clone()),
+            "a stale token displaced a live one"
+        );
+
+        // A newer one still replaces it, or the session could never move forward.
+        let mut newer = expired_fallback(port);
+        newer.token = fake_jwt_expiring_in(1200);
+        newer.expires_at = crate::server_clock::now_secs() + 1200;
+        t.set_http_fallback(Some(newer.clone()));
+        assert_eq!(
+            t.http_fallback.read().as_ref().map(|f| f.token.clone()),
+            Some(newer.token)
+        );
     }
 
     /// With the socket down, a send must go out over HTTP rather than block on the connect gate.
