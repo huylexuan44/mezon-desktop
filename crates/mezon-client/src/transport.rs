@@ -5353,14 +5353,6 @@ impl MezonTransport {
     ) -> Result<ApiMessage> {
         let parsed_clan_id: i64 = clan_id;
         let parsed_channel_id: i64 = channel_id;
-        tracing::debug!(
-            "send_channel_message: clan_id={} channel_id={} is_public={} content_len={} attachments={}",
-            parsed_clan_id,
-            parsed_channel_id,
-            is_public,
-            content.len(),
-            attachments.len()
-        );
         let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
         let mentions = if flags.anonymous_message {
             Vec::new()
@@ -5416,15 +5408,6 @@ impl MezonTransport {
         };
 
         let ack = self.write_or_http_channel_message(message).await?;
-        tracing::debug!(
-            "send_channel_message ack: message_id={} channel_id={} code={}",
-            ack.message_id,
-            ack.channel_id,
-            ack.code
-        );
-        if ack.message_id == 0 {
-            return Err(anyhow::anyhow!("send returned no message id"));
-        }
         let mut content_tokens = if content_is_json {
             serde_json::from_str(&content_json).unwrap_or_default()
         } else {
@@ -6355,10 +6338,7 @@ impl MezonTransport {
             mention_everyone,
             ..Default::default()
         };
-        let ack = self.write_or_http_channel_message(message).await?;
-        if ack.message_id == 0 {
-            return Err(anyhow::anyhow!("forward returned no message id"));
-        }
+        let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
 
@@ -8040,7 +8020,12 @@ impl MezonTransport {
         let envelope = realtime::Envelope::decode(response)
             .context("failed to decode channel_message_ack envelope")?;
         match envelope.message {
-            Some(realtime::envelope::Message::ChannelMessageAck(ack)) => Ok(ack),
+            Some(realtime::envelope::Message::ChannelMessageAck(ack)) => {
+                if ack.message_id == 0 {
+                    return Err(anyhow::anyhow!("send returned no message id"));
+                }
+                Ok(ack)
+            }
             Some(realtime::envelope::Message::Error(error)) => Err(anyhow::anyhow!(
                 "API error: code={} {}",
                 error.code,
@@ -8052,20 +8037,45 @@ impl MezonTransport {
         }
     }
 
+    fn channel_message_ack_from_http_response(
+        response: &[u8],
+    ) -> Result<realtime::ChannelMessageAck> {
+        let ack = realtime::ChannelMessageAck::decode(response)
+            .context("decode ChannelMessageAck from HTTP")?;
+        if ack.message_id == 0 {
+            return Err(anyhow::anyhow!("send returned no message id"));
+        }
+        Ok(ack)
+    }
+
     async fn write_chat_message(
         &self,
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
         let cid = self.generate_cid();
+        tracing::debug!(
+            target: "socket",
+            "realtime_send: action=ChannelMessageSend cid={} clan_id={} channel_id={}",
+            cid,
+            message.clan_id,
+            message.channel_id
+        );
+        let started = Instant::now();
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
             message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
         };
-        let (code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
-        if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={code}"));
-        }
-        Self::channel_message_ack_from_write_response(&response)
+        let (_code, response) = self.send(cid, encode_envelope_cid_last(envelope)).await?;
+        let ack = Self::channel_message_ack_from_write_response(&response)?;
+        tracing::debug!(
+            target: "socket",
+            "realtime_ok: action=ChannelMessageSend cid={} message_id={} channel_id={} took={}ms",
+            cid,
+            ack.message_id,
+            ack.channel_id,
+            started.elapsed().as_millis()
+        );
+        Ok(ack)
     }
 
     async fn send_channel_message_http(
@@ -8076,8 +8086,7 @@ impl MezonTransport {
             .send_api_request_over_http("SendChannelMessage", message.encode_to_vec())
             .await
             .context("SendChannelMessage HTTP")?;
-        realtime::ChannelMessageAck::decode(response.as_slice())
-            .context("decode ChannelMessageAck from HTTP")
+        Self::channel_message_ack_from_http_response(&response)
     }
 
     async fn write_or_http_channel_message(
@@ -8085,26 +8094,14 @@ impl MezonTransport {
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
         let has_fallback = self.http_fallback.read().is_some();
-        if self.is_open().await {
-            match self.write_chat_message(message.clone()).await {
-                Ok(ack) => return Ok(ack),
-                Err(err) if has_fallback => {
-                    tracing::warn!(
-                        target: "socket",
-                        "write_chat_message failed — HTTP fallback: {err:#}"
-                    );
-                }
-                Err(err) => return Err(err),
-            }
-        } else if has_fallback {
+        if has_fallback && !self.is_open().await {
             tracing::warn!(
                 target: "socket",
-                "api_socket_closed: action=SendChannelMessage — sending over HTTP"
+                "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
             );
-        } else {
-            return self.write_chat_message(message).await;
+            return self.send_channel_message_http(message).await;
         }
-        self.send_channel_message_http(message).await
+        self.write_chat_message(message).await
     }
 
     /// Send an ephemeral message (visible only to `receiver_id`). Sent as the
@@ -11132,6 +11129,13 @@ mod tests {
                         out.extend_from_slice(jwt.as_bytes());
                         out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
                         out
+                    } else if path.ends_with("SendChannelMessage") {
+                        realtime::ChannelMessageAck {
+                            message_id: 42,
+                            channel_id: 2,
+                            ..Default::default()
+                        }
+                        .encode_to_vec()
                     } else {
                         Vec::new()
                     };
@@ -11185,6 +11189,86 @@ mod tests {
             Some(&1),
             "an expired token must be renewed before the send"
         );
+    }
+
+    #[tokio::test]
+    async fn write_falls_back_to_http_while_the_socket_is_down() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let ack = t
+            .write_or_http_channel_message(realtime::ChannelMessageSend {
+                clan_id: 1,
+                channel_id: 2,
+                content: r#"{"t":"hi"}"#.into(),
+                ..Default::default()
+            })
+            .await
+            .expect("closed socket must use HTTP for ChannelMessageSend");
+
+        assert_eq!(ack.message_id, 42);
+        assert_eq!(ack.channel_id, 2);
+        let hits = hits.lock().clone();
+        assert_eq!(hits.get("/mezon.api.Mezon/SendChannelMessage"), Some(&1));
+        assert_eq!(hits.get("/mezon.api.Mezon/SessionRefresh"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn write_does_not_http_retry_after_a_socket_send_error() {
+        let (port, hits) = fake_api().await;
+        let t = transport(false);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let err = t
+            .write_or_http_channel_message(realtime::ChannelMessageSend {
+                clan_id: 1,
+                channel_id: 2,
+                content: r#"{"t":"hi"}"#.into(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("open socket send failure must not fall back");
+
+        assert!(
+            err.to_string().contains("mock send failed"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            hits.lock().is_empty(),
+            "retrying after the frame left the client would duplicate the message"
+        );
+    }
+
+    #[test]
+    fn write_ack_with_zero_message_id_is_an_error() {
+        let envelope = realtime::Envelope {
+            message: Some(realtime::envelope::Message::ChannelMessageAck(
+                realtime::ChannelMessageAck {
+                    message_id: 0,
+                    channel_id: 2,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let err =
+            MezonTransport::channel_message_ack_from_write_response(&envelope.encode_to_vec())
+                .expect_err("message_id 0 is a failed write");
+        assert!(err.to_string().contains("no message id"));
+    }
+
+    #[test]
+    fn http_ack_with_zero_message_id_is_an_error() {
+        let ack = realtime::ChannelMessageAck {
+            message_id: 0,
+            channel_id: 2,
+            ..Default::default()
+        };
+        let err = MezonTransport::channel_message_ack_from_http_response(&ack.encode_to_vec())
+            .expect_err("message_id 0 is a failed send");
+        assert!(err.to_string().contains("no message id"));
     }
 
     #[tokio::test]
