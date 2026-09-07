@@ -12,7 +12,6 @@ pub mod image_disk_cache;
 pub mod inbox;
 pub mod keychain;
 pub mod network_monitor;
-pub mod network_probe;
 pub mod notification_setting;
 pub mod ogp;
 pub mod search_message;
@@ -53,9 +52,6 @@ pub use inbox::{
     topic_reply_preview, topics_from_list,
 };
 pub use network_monitor::NetworkMonitor;
-pub use network_probe::{
-    RECONNECT_NETWORK_PROBE_TIMEOUT, favicon_probe_url, probe_network_reachability,
-};
 pub use notification_setting::ChannelNotificationSetting;
 pub use notification_setting::NotificationOverride;
 pub use ogp::{OgpResult, fetch_invite_preview, fetch_ogp};

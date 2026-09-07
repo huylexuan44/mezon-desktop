@@ -91,9 +91,24 @@ mod macos {
     use system_configuration::network_reachability::{ReachabilityFlags, SCNetworkReachability};
     use tokio::sync::watch;
 
+    /// Whether the host can be reached without asking the person to do something first.
+    ///
+    /// `CONNECTION_REQUIRED` alone does not mean offline. A VPN configured on demand reports the
+    /// host as reachable *and* as needing a connection, because the tunnel will dial itself the
+    /// moment traffic is sent — reading that as "no network" would park reconnect on a machine one
+    /// packet away from working. It is only offline when nothing will bring the link up on its own,
+    /// or when it needs a human (a captive portal, a password prompt), which is what
+    /// `INTERVENTION_REQUIRED` marks.
     fn flags_online(flags: ReachabilityFlags) -> bool {
-        flags.contains(ReachabilityFlags::REACHABLE)
-            && !flags.contains(ReachabilityFlags::CONNECTION_REQUIRED)
+        if !flags.contains(ReachabilityFlags::REACHABLE) {
+            return false;
+        }
+        if !flags.contains(ReachabilityFlags::CONNECTION_REQUIRED) {
+            return true;
+        }
+        let dials_itself = flags.contains(ReachabilityFlags::CONNECTION_ON_DEMAND)
+            || flags.contains(ReachabilityFlags::CONNECTION_ON_TRAFFIC);
+        dials_itself && !flags.contains(ReachabilityFlags::INTERVENTION_REQUIRED)
     }
 
     pub fn run(tx: watch::Sender<bool>, host: std::ffi::CString) {
@@ -125,6 +140,44 @@ mod macos {
         }
 
         CFRunLoop::run_current();
+    }
+
+    #[cfg(test)]
+    mod flag_tests {
+        use super::*;
+
+        const REACH: ReachabilityFlags = ReachabilityFlags::REACHABLE;
+        const NEEDS: ReachabilityFlags = ReachabilityFlags::CONNECTION_REQUIRED;
+        const ON_DEMAND: ReachabilityFlags = ReachabilityFlags::CONNECTION_ON_DEMAND;
+        const ON_TRAFFIC: ReachabilityFlags = ReachabilityFlags::CONNECTION_ON_TRAFFIC;
+        const NEEDS_HUMAN: ReachabilityFlags = ReachabilityFlags::INTERVENTION_REQUIRED;
+
+        #[test]
+        fn a_plain_reachable_host_is_online() {
+            assert!(flags_online(REACH));
+        }
+
+        #[test]
+        fn nothing_reachable_is_offline() {
+            assert!(!flags_online(ReachabilityFlags::empty()));
+            assert!(!flags_online(NEEDS));
+            assert!(!flags_online(NEEDS | ON_DEMAND));
+        }
+
+        /// The case this predicate got wrong: a VPN that dials on demand reports both reachable and
+        /// connection-required, and a machine one packet away from working must not read as offline.
+        #[test]
+        fn a_vpn_that_dials_itself_is_online() {
+            assert!(flags_online(REACH | NEEDS | ON_DEMAND));
+            assert!(flags_online(REACH | NEEDS | ON_TRAFFIC));
+        }
+
+        /// But not when someone has to type something first — a captive portal or a password.
+        #[test]
+        fn a_link_that_needs_a_human_is_offline() {
+            assert!(!flags_online(REACH | NEEDS | ON_DEMAND | NEEDS_HUMAN));
+            assert!(!flags_online(REACH | NEEDS));
+        }
     }
 }
 

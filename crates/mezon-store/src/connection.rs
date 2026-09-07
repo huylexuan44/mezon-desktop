@@ -14,8 +14,7 @@ use gpui::{
 use mezon_client::{
     AppApi, ConnectionStatus, DEFAULT_WS_HOST, EndpointHealth, HealthyEndpointReason,
     HealthyEndpointSession, HealthyEndpointStatusError, HttpFallbackSession, MezonClient,
-    NetworkMonitor, RECONNECT_NETWORK_PROBE_TIMEOUT, RealtimeEndpoint, RealtimeEvent, Session,
-    TransportClient, favicon_probe_url, keychain, probe_network_reachability,
+    NetworkMonitor, RealtimeEndpoint, RealtimeEvent, Session, TransportClient, keychain,
 };
 use parking_lot::Mutex;
 
@@ -27,19 +26,12 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 const CONNECT_CONFIRM_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const RECONNECT_BACKOFF_CAP_SECS: u64 = 60;
-const NETWORK_PROBE_RETRY_MIN_SECS: u64 = 1;
-const NETWORK_PROBE_RETRY_CAP_SECS: u64 = 15;
 /// How long to leave `SessionRefresh` alone after the server throttled it, and the ceiling that
 /// pacing doubles to. The reconnect ladder retries far faster than this (1s doubling to 60s), and a
 /// JWT-only session asks for a fresh token on every rung, so without a separate cooldown one
 /// throttled client keeps calling ~6 times a minute — and every client does it at once, which is
 /// what holds the shared limiter bucket shut. Pacing from a minute up to five keeps a stale JWT
 /// recoverable without feeding the storm.
-/// How long reconnect may sit on an OS "offline" answer before trying anyway. `NetworkMonitor`'s
-/// thread exits if it cannot register its callback or schedule its run loop, and it exits with the
-/// last value frozen — a frozen `false` read literally would park reconnect forever. Bounding the
-/// trust turns that failure from a hang into a one-minute delay.
-const OS_REACHABILITY_TRUST_SECS: u64 = 60;
 /// Rotate the refresh token once it is this close to expiring. Prod issues it for thirty days, so
 /// a week of runway leaves many launches in which to catch it while costing nothing in between.
 const REFRESH_TOKEN_ROTATE_WITHIN_SECS: u64 = 7 * 24 * 60 * 60;
@@ -190,14 +182,15 @@ impl ConnectionStore {
             move |_, _, _| wake.notify_one()
         });
 
-        // Watch the host this session will actually talk to. The zero address answers
-        // "reachable" off loopback alone, so it never notices an interface going away.
+        // The OS signal drives the "no internet" toast and nothing else. Reconnect reads the
+        // connect outcome instead: an `Unreachable` is the network answering, and a refusal means
+        // we reached something. Keeping it out of that decision is deliberate — twice today a
+        // misread flag would otherwise have parked the app.
         let network = NetworkMonitor::for_host(
             &AppConfig::try_global(cx)
                 .map(|cfg| cfg.api_host.clone())
                 .unwrap_or_default(),
         );
-        let os_signal_available = network.has_os_signal();
         let online = network.is_online();
         let online_watch = {
             let wake = wake.clone();
@@ -238,9 +231,6 @@ impl ConnectionStore {
         let wake_handle = wake.clone();
         let connection_generation_handle = connection_generation.clone();
 
-        let probe_url = AppConfig::try_global(cx)
-            .map(|cfg| favicon_probe_url(&cfg.redirect_uri))
-            .unwrap_or_else(|| favicon_probe_url(""));
         let tcp_default_port = AppConfig::try_global(cx).and_then(|cfg| cfg.tcp_port);
         let configured_api_base = AppConfig::try_global(cx).map(configured_api_base_url);
         let auth_client = crate::login::LoginStore::global(cx).read(cx).client();
@@ -252,7 +242,6 @@ impl ConnectionStore {
             .map(|cfg| cfg.client_base_url())
             .unwrap_or_default();
 
-        let reconnect_online = network.online();
         let manager = cx.spawn(async move |this, cx| {
             let exec = cx.background_executor().clone();
             #[cfg(debug_assertions)]
@@ -261,7 +250,6 @@ impl ConnectionStore {
             let mut retry_backoff_secs = 1u64;
             let mut consecutive_failures = 0u32;
             let mut connect_ack_rx = connect_ack_rx;
-            let mut network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
             let mut refreshed_this_run = false;
             let mut gateway_refusals = 0u32;
             let mut jwt_refusals = 0u32;
@@ -274,7 +262,6 @@ impl ConnectionStore {
             let mut pending_endpoint_refresh: Option<EndpointRefreshRequest> = None;
             let mut last_endpoint_refresh_at: Option<Instant> = None;
             let mut healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
-            let mut os_offline_since: Option<Instant> = None;
             let mut refresh_pacer = RefreshPacer::new();
 
             loop {
@@ -307,7 +294,6 @@ impl ConnectionStore {
                     }
                     retry_backoff_secs = 1;
                     consecutive_failures = 0;
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
@@ -538,80 +524,6 @@ impl ConnectionStore {
                         wake.notified().await;
                     }
                     continue;
-                }
-
-                // Ask the OS first: where it reports reachability the answer is free and instant,
-                // and a "down" answer means every other step here would be wasted — the handshake,
-                // the SessionRefresh it might need, and the probe request that used to be the only
-                // way to find this out. Checking it on every pass, not just after a failure, is
-                // what keeps a machine with no network from spending anything at all.
-                let os_says_offline = os_signal_available && !*reconnect_online.borrow();
-                if os_says_offline {
-                    os_offline_since.get_or_insert_with(Instant::now);
-                } else if os_offline_since.take().is_some() {
-                    tracing::info!("Network is back (OS reachability) — resuming reconnect");
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
-                }
-                // The monitor thread returns early if it cannot register its callback or schedule
-                // its run loop, leaving the sender dropped and the last value frozen. A frozen
-                // `false` would park reconnect for the life of the process, so stop believing it
-                // after a while and fall back to the probe that was here before — a wedged monitor
-                // then costs a delay instead of a permanent outage.
-                let os_signal_wedged = os_reachability_wedged(os_offline_since, Instant::now());
-                if os_says_offline && !os_signal_wedged {
-                    if network_retry_secs == NETWORK_PROBE_RETRY_MIN_SECS {
-                        tracing::warn!(
-                            "Network is down (OS reachability) — pausing reconnect until it is back"
-                        );
-                    }
-                    promote_connecting_to_authenticated(&auth_state, cx);
-                    backoff_wait(&exec, &wake, network_retry_secs).await;
-                    network_retry_secs = next_network_retry_secs(network_retry_secs);
-                    continue;
-                }
-
-                let mut network_confirmed = false;
-                if requires_network_probe(consecutive_failures) {
-                    // Where the OS reports reachability it has already answered this, above, and
-                    // said yes — so there is nothing left to ask the API host. The HTTP probe below
-                    // stays for the platforms whose monitor is a constant `true`, and for a monitor
-                    // that wedged; without it those would keep hammering a network that is gone.
-                    if os_signal_available && !os_signal_wedged {
-                        network_confirmed = true;
-                    } else {
-                        // Probe the deployment this session actually belongs to; the baked config can
-                        // point somewhere else entirely.
-                        let target = session
-                            .api_url
-                            .as_deref()
-                            .filter(|url| !url.is_empty())
-                            .map(favicon_probe_url)
-                            .unwrap_or_else(|| probe_url.clone());
-                        let reachable =
-                            probe_network_reachability(&target, RECONNECT_NETWORK_PROBE_TIMEOUT).await;
-                        let _ = this.update(cx, |store, cx| {
-                            if store.online != reachable {
-                                store.online = reachable;
-                                cx.notify();
-                            }
-                        });
-                        if !reachable {
-                            if network_retry_secs == NETWORK_PROBE_RETRY_MIN_SECS {
-                                tracing::warn!(
-                                    "Network unreachable ({target} did not answer) — pausing reconnect until it is back"
-                                );
-                            }
-                            promote_connecting_to_authenticated(&auth_state, cx);
-                            backoff_wait(&exec, &wake, network_retry_secs).await;
-                            network_retry_secs = next_network_retry_secs(network_retry_secs);
-                            continue;
-                        }
-                        network_confirmed = true;
-                        if network_retry_secs != NETWORK_PROBE_RETRY_MIN_SECS {
-                            tracing::info!("Network reachable again — resuming reconnect");
-                            network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
-                        }
-                    }
                 }
 
                 // Two credentials authenticate the same session. SID handshake failures (including
@@ -966,7 +878,6 @@ impl ConnectionStore {
                         last_endpoint_refresh_at = None;
                         healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
                     }
-                    network_retry_secs = NETWORK_PROBE_RETRY_MIN_SECS;
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
                     #[cfg(debug_assertions)]
@@ -1074,13 +985,11 @@ impl ConnectionStore {
                         ConnectOutcome::ExplicitReject | ConnectOutcome::SilentDrop,
                         true,
                     ) => {
-                        if network_confirmed {
-                            jwt_refusals += 1;
-                        } else {
-                            tracing::info!(
-                                "JWT handshake failed without a confirmed network — not counting it against the session"
-                            );
-                        }
+                        // A refusal means we reached something that answered, so it counts.
+                        // Logout stays behind `SessionProbe::Rejected` from an authenticated call,
+                        // which a dead network answers `Inconclusive` and a captive portal answers
+                        // `Alive` — neither can end a session on its own.
+                        jwt_refusals += 1;
                         false
                     }
                     (ConnectOutcome::Unreachable | ConnectOutcome::Confirmed, _) => false,
@@ -1665,10 +1574,6 @@ fn http_fallback_session(
     })
 }
 
-fn requires_network_probe(consecutive_failures: u32) -> bool {
-    consecutive_failures >= 1
-}
-
 fn reached_failure_limit(consecutive_failures: u32) -> bool {
     consecutive_failures >= MAX_CONSECUTIVE_FAILURES
 }
@@ -1744,14 +1649,6 @@ impl RefreshPacer {
     }
 }
 
-/// Whether the OS reachability signal has been claiming "offline" long enough to be suspected of
-/// having wedged rather than reporting. Past this point the caller stops trusting it.
-fn os_reachability_wedged(offline_since: Option<Instant>, now: Instant) -> bool {
-    offline_since.is_some_and(|since| {
-        now.saturating_duration_since(since) >= Duration::from_secs(OS_REACHABILITY_TRUST_SECS)
-    })
-}
-
 /// How long `SessionRefresh` stays parked, or zero once the cooldown has run out.
 fn refresh_hold_in(hold_until: Option<Instant>, now: Instant) -> Duration {
     hold_until
@@ -1763,10 +1660,6 @@ fn next_refresh_retry_secs(current: u64) -> u64 {
     current
         .saturating_mul(2)
         .min(SESSION_REFRESH_THROTTLED_CAP_SECS)
-}
-
-fn next_network_retry_secs(current: u64) -> u64 {
-    current.saturating_mul(2).min(NETWORK_PROBE_RETRY_CAP_SECS)
 }
 
 fn next_healthy_endpoint_retry_secs(current: u64) -> u64 {
@@ -2272,137 +2165,9 @@ mod tests {
         );
     }
 
-    /// A reachability signal that never says "offline" is never suspected, and one that has only
-    /// just started saying it is still believed — pausing is the whole point while it is healthy.
-    #[test]
-    fn a_healthy_offline_signal_is_believed() {
-        let now = Instant::now();
-        assert!(!os_reachability_wedged(None, now));
-        assert!(!os_reachability_wedged(Some(now), now));
-        assert!(!os_reachability_wedged(
-            Some(now),
-            now + Duration::from_secs(OS_REACHABILITY_TRUST_SECS - 1)
-        ));
-    }
-
-    /// `NetworkMonitor`'s thread returns early on a callback or run-loop failure and leaves the
-    /// last value frozen. Reconnect must stop believing a stuck "offline" or it parks forever.
-    #[test]
-    fn a_stuck_offline_signal_stops_being_believed() {
-        let now = Instant::now();
-        assert!(os_reachability_wedged(
-            Some(now),
-            now + Duration::from_secs(OS_REACHABILITY_TRUST_SECS)
-        ));
-        assert!(os_reachability_wedged(
-            Some(now),
-            now + Duration::from_secs(OS_REACHABILITY_TRUST_SECS * 100)
-        ));
-    }
-
     /// What one pass of the loop decided to do about reachability, so an outage can be walked as a
     /// timeline. Mirrors the loop: latch when the answer first turns offline, clear on the edge
     /// back, and stop believing an answer that never changes.
-    #[derive(Debug, PartialEq, Eq)]
-    enum ReachabilityStep {
-        Paused,
-        HttpProbe,
-        Proceed,
-    }
-
-    fn reachability_step(
-        offline_since: &mut Option<Instant>,
-        os_says_offline: bool,
-        now: Instant,
-    ) -> ReachabilityStep {
-        if os_says_offline {
-            offline_since.get_or_insert(now);
-        } else {
-            *offline_since = None;
-        }
-        let wedged = os_reachability_wedged(*offline_since, now);
-        if os_says_offline && !wedged {
-            ReachabilityStep::Paused
-        } else if wedged {
-            ReachabilityStep::HttpProbe
-        } else {
-            ReachabilityStep::Proceed
-        }
-    }
-
-    /// A real outage: the OS answer pauses everything, and the moment it flips back the loop
-    /// proceeds without ever having asked the API host anything.
-    #[test]
-    fn an_offline_answer_pauses_and_the_edge_back_resumes() {
-        let t0 = Instant::now();
-        let mut since = None;
-        assert_eq!(
-            reachability_step(&mut since, false, t0),
-            ReachabilityStep::Proceed
-        );
-        for offset in [0, 1, 30, OS_REACHABILITY_TRUST_SECS - 1] {
-            assert_eq!(
-                reachability_step(&mut since, true, t0 + Duration::from_secs(offset)),
-                ReachabilityStep::Paused,
-                "should still be paused at +{offset}s"
-            );
-        }
-        assert_eq!(
-            reachability_step(&mut since, false, t0 + Duration::from_secs(90)),
-            ReachabilityStep::Proceed
-        );
-        assert!(since.is_none(), "the latch must clear on the edge back");
-    }
-
-    /// A monitor stuck at "offline" must not park the app: past the trust window every pass falls
-    /// through to the HTTP probe, which is exactly the behaviour that existed before it was used.
-    #[test]
-    fn a_monitor_stuck_offline_falls_back_to_the_http_probe() {
-        let t0 = Instant::now();
-        let mut since = None;
-        assert_eq!(
-            reachability_step(&mut since, true, t0),
-            ReachabilityStep::Paused
-        );
-        for minutes in 1..60 {
-            assert_eq!(
-                reachability_step(&mut since, true, t0 + Duration::from_secs(minutes * 60)),
-                ReachabilityStep::HttpProbe,
-                "still parked after {minutes} minutes of a frozen signal"
-            );
-        }
-        // And it recovers cleanly if the monitor ever starts reporting again.
-        assert_eq!(
-            reachability_step(&mut since, false, t0 + Duration::from_secs(3600)),
-            ReachabilityStep::Proceed
-        );
-    }
-
-    /// A signal that flickers must not accumulate towards "wedged": each return to online clears
-    /// the latch, so only an unbroken run of offline answers is ever suspected.
-    #[test]
-    fn a_flickering_signal_never_counts_as_wedged() {
-        let t0 = Instant::now();
-        let mut since = None;
-        for minute in 0..30 {
-            let now = t0 + Duration::from_secs(minute * 60);
-            assert_eq!(
-                reachability_step(&mut since, true, now),
-                ReachabilityStep::Paused
-            );
-            assert_eq!(
-                reachability_step(&mut since, false, now + Duration::from_secs(1)),
-                ReachabilityStep::Proceed
-            );
-        }
-    }
-
-    /// The trust window has to outlast the network-probe ladder it replaces, or a genuine outage
-    /// would flip back to the HTTP probe while the OS is still reporting correctly.
-    #[test]
-    fn os_reachability_trust_outlasts_the_network_probe_ladder() {
-        const { assert!(OS_REACHABILITY_TRUST_SECS >= NETWORK_PROBE_RETRY_CAP_SECS) };
-    }
 
     #[test]
     fn refresh_hold_counts_down_then_releases() {
@@ -2442,24 +2207,6 @@ mod tests {
         assert!(
             err.downcast_ref::<SessionRefreshRejected>()
                 .is_some_and(|r| r.is_throttled())
-        );
-    }
-
-    #[test]
-    fn first_attempt_connects_without_probe_then_probes_every_retry() {
-        assert!(!requires_network_probe(0));
-        assert!(requires_network_probe(1));
-        assert!(requires_network_probe(4));
-    }
-
-    #[test]
-    fn network_retry_backoff_doubles_up_to_its_own_cap() {
-        assert_eq!(next_network_retry_secs(NETWORK_PROBE_RETRY_MIN_SECS), 2);
-        assert_eq!(next_network_retry_secs(4), 8);
-        assert_eq!(next_network_retry_secs(8), NETWORK_PROBE_RETRY_CAP_SECS);
-        assert_eq!(
-            next_network_retry_secs(NETWORK_PROBE_RETRY_CAP_SECS),
-            NETWORK_PROBE_RETRY_CAP_SECS
         );
     }
 
@@ -2852,10 +2599,6 @@ mod tests {
             };
         }
 
-        fn probe_required(&self) -> bool {
-            requires_network_probe(self.consecutive_failures)
-        }
-
         fn uses_jwt(&self) -> bool {
             self.sid_failures >= SSID_REFUSALS_BEFORE_JWT
         }
@@ -2997,19 +2740,6 @@ mod tests {
         assert_eq!(sim.sid_failures, 0);
         assert_eq!(sim.jwt_refusals, 0);
         assert!(!sim.uses_jwt());
-    }
-
-    #[test]
-    fn offline_skips_do_not_consume_attempts_or_log_out() {
-        let mut sim = ReconnectSim::new();
-        sim.record_unreachable();
-        assert!(sim.probe_required());
-
-        for _ in 0..50 {
-            assert!(sim.probe_required());
-            assert_eq!(sim.logout_count, 0);
-            assert_eq!(sim.consecutive_failures, 1);
-        }
     }
 
     #[test]
