@@ -8014,6 +8014,13 @@ impl MezonTransport {
         Ok(())
     }
 
+    /// Decode the socket's reply to `ChannelMessageSend`.
+    ///
+    /// A rejection arrives here as `Envelope::Error`, not as a non-zero frame code: the server
+    /// builds an error envelope (`send_error_to_conn`) and hands it to the same `send_to_conn`
+    /// every other envelope goes through, and that path writes no response code. So this function
+    /// speaks for the whole reply — it is where a socket-side refusal (no permission to post, a
+    /// blocked DM) becomes an `Err` — and the caller has no code left worth checking.
     fn channel_message_ack_from_write_response(
         response: &[u8],
     ) -> Result<realtime::ChannelMessageAck> {
@@ -8037,6 +8044,13 @@ impl MezonTransport {
         }
     }
 
+    /// Decode the HTTP reply to the same send — deliberately not the same shape as above.
+    ///
+    /// The envelope is the socket's framing, not the message's: `/mezon.api.Mezon/<Method>`
+    /// answers with the bare response type, so unwrapping an `Envelope` here would fail on a
+    /// perfectly good ack. Errors need no branch either — `send_api_request_over_http` has already
+    /// turned a non-2xx into an `Err` before this is reached, leaving only the empty-id check the
+    /// two decoders do share.
     fn channel_message_ack_from_http_response(
         response: &[u8],
     ) -> Result<realtime::ChannelMessageAck> {
@@ -11269,6 +11283,47 @@ mod tests {
         let err = MezonTransport::channel_message_ack_from_http_response(&ack.encode_to_vec())
             .expect_err("message_id 0 is a failed send");
         assert!(err.to_string().contains("no message id"));
+    }
+
+    /// The socket reports a refusal inside the envelope, never as a frame code, so this branch is
+    /// the only thing standing between "you may not post here" and a send that looks successful.
+    #[test]
+    fn a_socket_refusal_arrives_as_an_error_envelope() {
+        let envelope = realtime::Envelope {
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 403,
+                message: "User does not have permission to send message".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let err =
+            MezonTransport::channel_message_ack_from_write_response(&envelope.encode_to_vec())
+                .expect_err("a refusal must not read as a successful send");
+        let err = err.to_string();
+        assert!(err.contains("403"), "unexpected error: {err}");
+        assert!(err.contains("permission"), "unexpected error: {err}");
+    }
+
+    /// The two decoders are asymmetric on purpose — envelope on the socket, bare message over
+    /// HTTP — and the asymmetry is a guess about the server that only stays honest if a swap
+    /// fails loudly. Feed each decoder the other transport's bytes: neither may return an ack.
+    #[test]
+    fn the_two_replies_are_not_interchangeable() {
+        let ack = realtime::ChannelMessageAck {
+            message_id: 42,
+            channel_id: 2,
+            ..Default::default()
+        };
+        let envelope = realtime::Envelope {
+            cid: 7,
+            message: Some(realtime::envelope::Message::ChannelMessageAck(ack.clone())),
+        };
+
+        MezonTransport::channel_message_ack_from_write_response(&ack.encode_to_vec())
+            .expect_err("a bare ack is not what the socket sends");
+        MezonTransport::channel_message_ack_from_http_response(&envelope.encode_to_vec())
+            .expect_err("an envelope is not what HTTP returns");
     }
 
     #[tokio::test]

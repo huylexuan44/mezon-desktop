@@ -7174,6 +7174,11 @@ impl MessagesStore {
         tracing::info!("MessagesStore resync — marking message cache stale");
         self.cache.mark_all_stale();
         self.joined_channels.clear();
+        // A reconnect drops every subscription, and the channel the user is looking at has to be
+        // re-joined or it stays silent for the rest of the session. `spawn_join` sends `clan_join`
+        // first and only then `channel_join`, which is the order proto-server needs: joining a
+        // public channel implicitly subscribes the clan stream, so a `clan_join` that arrives
+        // second is a no-op and a private channel or thread never gets its push.
         if let (Some(channel_id), Some(clan_id)) = (self.active_channel_id, self.active_clan_id) {
             self.joined_channels.insert(channel_id);
             self.spawn_join(
