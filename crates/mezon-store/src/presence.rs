@@ -272,7 +272,15 @@ impl PresenceStore {
         }
     }
 
-    pub fn dm_avatar_presence(&self, user_id: UserId, api_online: bool) -> DmAvatarPresence {
+    pub fn dm_avatar_presence(
+        &self,
+        user_id: UserId,
+        api_online: bool,
+        own: Option<(UserId, UserPresence)>,
+    ) -> DmAvatarPresence {
+        if let Some((_, presence)) = own.filter(|(me, _)| *me == user_id) {
+            return presence_badge(presence);
+        }
         let bootstrap = api_online && !self.presence_known.contains(&user_id);
         if !self.is_online(user_id) && !bootstrap {
             return DmAvatarPresence::None;
@@ -1042,7 +1050,7 @@ mod tests {
         store.user_online.insert(user_id);
         store.presence_status.insert(user_id, "Idle".to_string());
         assert_eq!(
-            store.dm_avatar_presence(user_id, false),
+            store.dm_avatar_presence(user_id, false, None),
             DmAvatarPresence::Idle
         );
     }
@@ -1051,7 +1059,7 @@ mod tests {
     fn dm_avatar_presence_falls_back_to_api_online_before_realtime() {
         let store = empty_store();
         assert_eq!(
-            store.dm_avatar_presence(UserId(1), true),
+            store.dm_avatar_presence(UserId(1), true, None),
             DmAvatarPresence::Online
         );
     }
@@ -1064,7 +1072,7 @@ mod tests {
         store.user_online.remove(&user_id);
         store.presence_status.clear();
         assert_eq!(
-            store.dm_avatar_presence(user_id, true),
+            store.dm_avatar_presence(user_id, true, None),
             DmAvatarPresence::None
         );
     }
@@ -1078,7 +1086,7 @@ mod tests {
             .presence_status
             .insert(user_id, "Do Not Disturb".to_string());
         assert_eq!(
-            store.dm_avatar_presence(user_id, false),
+            store.dm_avatar_presence(user_id, false, None),
             DmAvatarPresence::Dnd
         );
     }
@@ -1087,7 +1095,7 @@ mod tests {
     fn dm_avatar_presence_hides_offline_and_invisible_users() {
         let store = empty_store();
         assert_eq!(
-            store.dm_avatar_presence(UserId(1), false),
+            store.dm_avatar_presence(UserId(1), false, None),
             DmAvatarPresence::None
         );
         let mut store = empty_store();
@@ -1096,7 +1104,21 @@ mod tests {
             .presence_status
             .insert(user_id, "Invisible".to_string());
         assert_eq!(
-            store.dm_avatar_presence(user_id, true),
+            store.dm_avatar_presence(user_id, true, None),
+            DmAvatarPresence::None
+        );
+    }
+
+    #[test]
+    fn dm_avatar_presence_prefers_own_account_idle_for_self_dm() {
+        let store = empty_store();
+        let me = UserId(99);
+        assert_eq!(
+            store.dm_avatar_presence(me, true, Some((me, UserPresence::Idle))),
+            DmAvatarPresence::Idle
+        );
+        assert_eq!(
+            store.dm_avatar_presence(me, true, Some((me, UserPresence::Invisible))),
             DmAvatarPresence::None
         );
     }

@@ -76,6 +76,24 @@ pub fn status_icon(presence: UserPresence) -> IconName {
     }
 }
 
+pub fn status_glyph(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    let icon = Icon::new(status_icon(presence)).size(size);
+    match presence {
+        UserPresence::Idle => icon
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+            .text_color(color)
+            .into_any_element(),
+        _ => icon.text_color(color).into_any_element(),
+    }
+}
+
 pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
     match presence {
         UserPresence::Online => theme.status_online,

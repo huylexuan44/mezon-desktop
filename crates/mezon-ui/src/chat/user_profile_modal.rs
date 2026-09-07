@@ -327,7 +327,9 @@ impl Render for UserProfileModal {
                 cx,
             );
         });
-        let (status_icon, status_color) = profile_status(&self.live_status, &theme);
+        let status_presence = mezon_store::UserPresence::from_status(&self.live_status);
+        let show_avatar_status = status_presence.is_visible();
+        let status_color = crate::util::user_status::status_color(status_presence, &theme);
         let friend_state = FriendStore::global(cx)
             .read(cx)
             .friend(self.user_id)
@@ -492,20 +494,22 @@ impl Render for UserProfileModal {
                             .bg(theme.bg_floating)
                             .p(px(6.))
                             .child(avatar_view)
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(5.))
-                                    .bottom(px(5.))
-                                    .p(px(2.))
-                                    .rounded_full()
-                                    .bg(theme.bg_floating)
-                                    .child(
-                                        Icon::new(status_icon)
-                                            .size(px(19.))
-                                            .text_color(status_color),
-                                    ),
-                            )
+                            .when(show_avatar_status, |avatar| {
+                                avatar.child(
+                                    div()
+                                        .absolute()
+                                        .right(px(5.))
+                                        .bottom(px(5.))
+                                        .p(px(2.))
+                                        .rounded_full()
+                                        .bg(theme.bg_floating)
+                                        .child(crate::util::user_status::status_glyph(
+                                            status_presence,
+                                            px(19.),
+                                            status_color,
+                                        )),
+                                )
+                            })
                             .when(!custom_status.is_empty(), |avatar| {
                                 avatar.child(
                                     div()
@@ -909,5 +913,3 @@ fn profile_share_contact_button(
         ))
         .into_any_element()
 }
-
-use crate::util::user_status::status_icon_and_color as profile_status;
