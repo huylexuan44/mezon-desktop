@@ -210,7 +210,10 @@ impl McpRuntime {
                     }
                     McpCommand::SetMcpEnabled { enabled } => {
                         cx.update(|cx| {
-                            settings.update(cx, |settings, _| settings.mcp_enabled = enabled);
+                            settings.update(cx, |settings, cx| {
+                                settings.mcp_enabled = enabled;
+                                cx.notify();
+                            });
                             mezon_store::schedule_settings_save(&settings, cx);
                         });
                     }

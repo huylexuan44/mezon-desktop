@@ -52,7 +52,11 @@ pub struct AdvancedPage {
 
 impl AdvancedPage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&settings, |this, _, cx| {
+            this.refresh_mcp_status(cx);
+            cx.notify();
+        })
+        .detach();
         let mcp_status = PlatformStore::try_global(cx)
             .map(|platform| platform.read(cx).mcp_server_status())
             .unwrap_or_default();
@@ -130,6 +134,16 @@ impl AdvancedPage {
         } else {
             cx.notify();
         }
+    }
+
+    fn refresh_mcp_status(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_busy {
+            return;
+        }
+        let Some(platform) = PlatformStore::try_global(cx) else {
+            return;
+        };
+        self.mcp_status = platform.read(cx).mcp_server_status();
     }
 
     fn resync_mcp_status(&mut self, cx: &mut Context<Self>) {
