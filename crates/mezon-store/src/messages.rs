@@ -7175,10 +7175,13 @@ impl MessagesStore {
         self.cache.mark_all_stale();
         self.joined_channels.clear();
         // A reconnect drops every subscription, and the channel the user is looking at has to be
-        // re-joined or it stays silent for the rest of the session. `spawn_join` sends `clan_join`
-        // first and only then `channel_join`, which is the order proto-server needs: joining a
-        // public channel implicitly subscribes the clan stream, so a `clan_join` that arrives
-        // second is a no-op and a private channel or thread never gets its push.
+        // re-joined or it stays silent for the rest of the session. `spawn_join` awaits
+        // `ensure_clan_joined` so `clan_join` goes out first, which is the order proto-server
+        // needs: joining a public channel implicitly subscribes the clan stream, so a `clan_join`
+        // arriving second is a no-op and a private channel or thread never gets its push. That
+        // await is only worth anything because `ChannelList` clears `joined_clans` when the socket
+        // drops rather than when it comes back — otherwise this runs first often enough to be
+        // asked about the dead session's joins and answered "already joined".
         if let (Some(channel_id), Some(clan_id)) = (self.active_channel_id, self.active_clan_id) {
             self.joined_channels.insert(channel_id);
             self.spawn_join(
