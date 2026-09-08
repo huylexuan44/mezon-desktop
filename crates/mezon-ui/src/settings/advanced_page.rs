@@ -100,14 +100,18 @@ impl AdvancedPage {
         let Some(input) = self.mcp_port_input.clone() else {
             return;
         };
+        let saved = self.settings.read(cx).mcp_port;
         let typed = input.read(cx).value().to_string();
-        let port = parse_mcp_port(&typed).unwrap_or_else(|| self.settings.read(cx).mcp_port);
-        let normalized = port.to_string();
-        if typed != normalized {
-            input.update(cx, |input, cx| input.set_value(normalized, cx));
-        }
-        if port == self.settings.read(cx).mcp_port {
+        let plan = plan_port_commit(&typed, saved, self.mcp_busy, self.mcp_status.running);
+
+        let PortCommit::Apply { port, restart } = plan else {
+            if typed != saved.to_string() {
+                input.update(cx, |input, cx| input.set_value(saved.to_string(), cx));
+            }
             return;
+        };
+        if typed != port.to_string() {
+            input.update(cx, |input, cx| input.set_value(port.to_string(), cx));
         }
 
         self.settings.update(cx, |settings, _| {
@@ -115,11 +119,26 @@ impl AdvancedPage {
         });
         mezon_store::schedule_settings_save(&self.settings, cx);
 
-        if self.mcp_status.running && !self.mcp_busy {
+        if let Some(platform) = PlatformStore::try_global(cx)
+            && let Some(set_port) = platform.read(cx).mcp_server_set_port_fn()
+        {
+            set_port(port);
+        }
+
+        if restart {
             self.restart_mcp_server(cx);
         } else {
             cx.notify();
         }
+    }
+
+    fn resync_mcp_status(&mut self, cx: &mut Context<Self>) {
+        let Some(platform) = PlatformStore::try_global(cx) else {
+            return;
+        };
+        let status = platform.read(cx).mcp_server_status();
+        self.remember_mcp_enabled(status.running, cx);
+        self.mcp_status = status;
     }
 
     fn remember_mcp_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -164,7 +183,10 @@ impl AdvancedPage {
                 this.mcp_busy = false;
                 match result {
                     Ok(status) => this.mcp_status = status,
-                    Err(error) => tracing::warn!("MCP server restart failed: {error}"),
+                    Err(error) => {
+                        tracing::warn!("MCP server restart failed: {error}");
+                        this.resync_mcp_status(cx);
+                    }
                 }
                 cx.notify();
             })
@@ -197,18 +219,13 @@ impl AdvancedPage {
     }
 
     fn copy_mcp_http_config(&mut self, cx: &mut Context<Self>) {
-        let config = mcp_http_config_content(&self.mcp_status);
+        let config = mcp_http_server(&self.mcp_status);
         cx.write_to_clipboard(ClipboardItem::new_string(config));
         self.mark_mcp_copied(McpCopyTarget::HttpConfig, cx);
     }
 
-    fn copy_mcp_stdio_config(
-        &mut self,
-        read_only: bool,
-        cli_installed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let config = mcp_stdio_config_content(read_only, cli_installed);
+    fn copy_mcp_stdio_config(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        let config = mcp_stdio_server(read_only);
         cx.write_to_clipboard(ClipboardItem::new_string(config));
         self.mark_mcp_copied(McpCopyTarget::StdioConfig, cx);
     }
@@ -293,7 +310,10 @@ impl AdvancedPage {
                         this.remember_mcp_enabled(status.running, cx);
                         this.mcp_status = status;
                     }
-                    Err(error) => tracing::warn!("MCP server toggle failed: {error}"),
+                    Err(error) => {
+                        tracing::warn!("MCP server toggle failed: {error}");
+                        this.resync_mcp_status(cx);
+                    }
                 }
                 cx.notify();
             })
@@ -322,9 +342,31 @@ impl AdvancedPage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortCommit {
+    Keep,
+    Apply { port: u16, restart: bool },
+}
+
+fn plan_port_commit(typed: &str, saved: u16, busy: bool, running: bool) -> PortCommit {
+    if busy {
+        return PortCommit::Keep;
+    }
+    match parse_mcp_port(typed) {
+        Some(port) if port != saved => PortCommit::Apply {
+            port,
+            restart: running,
+        },
+        _ => PortCommit::Keep,
+    }
+}
+
 fn parse_mcp_port(typed: &str) -> Option<u16> {
-    let digits: String = typed.chars().filter(char::is_ascii_digit).collect();
-    digits.parse::<u16>().ok()
+    let typed = typed.trim();
+    if typed.is_empty() || !typed.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    typed.parse::<u16>().ok()
 }
 
 fn mcp_server_url(status: &McpServerStatus) -> Option<String> {
@@ -338,12 +380,9 @@ fn mcp_server_url(status: &McpServerStatus) -> Option<String> {
     })
 }
 
-fn mcp_stdio_command(cli_installed: bool) -> &'static str {
-    if cli_installed {
-        return QUOTED_CLI_NAME;
-    }
+fn mcp_stdio_command() -> &'static str {
     STDIO_COMMAND_PATH.get_or_init(|| {
-        let Some(exe) = std::env::current_exe().ok() else {
+        let Ok(exe) = std::env::current_exe() else {
             return QUOTED_CLI_NAME.to_string();
         };
         serde_json::to_string(&exe.display().to_string())
@@ -351,14 +390,14 @@ fn mcp_stdio_command(cli_installed: bool) -> &'static str {
     })
 }
 
-fn mcp_stdio_server(read_only: bool, cli_installed: bool) -> String {
+fn mcp_stdio_server(read_only: bool) -> String {
     let stdio_args = if read_only {
         "[\"mcp\", \"stdio\", \"--read-only\"]"
     } else {
         "[\"mcp\", \"stdio\"]"
     };
     MCP_STDIO_CONFIG
-        .replace("{stdio_command}", mcp_stdio_command(cli_installed))
+        .replace("{stdio_command}", mcp_stdio_command())
         .replace("{stdio_args}", stdio_args)
 }
 
@@ -369,14 +408,6 @@ fn mcp_http_server(status: &McpServerStatus) -> String {
         .map(|port| port.to_string())
         .unwrap_or_else(|| "{port}".to_string());
     MCP_HTTP_CONFIG.replace("{port}", &port)
-}
-
-fn mcp_stdio_config_content(read_only: bool, cli_installed: bool) -> String {
-    mcp_stdio_server(read_only, cli_installed)
-}
-
-fn mcp_http_config_content(status: &McpServerStatus) -> String {
-    mcp_http_server(status)
 }
 
 fn render_mcp_copy_button(
@@ -695,7 +726,7 @@ impl Render for AdvancedPage {
                     )
                     .child(render_mcp_config_box(
                         &theme,
-                        &mcp_http_config_content(&self.mcp_status),
+                        &mcp_http_server(&self.mcp_status),
                         &locale,
                         "mcp-http-config-template",
                         http_config_copied,
@@ -717,12 +748,12 @@ impl Render for AdvancedPage {
                 )
                 .child(render_mcp_config_box(
                     &theme,
-                    &mcp_stdio_config_content(mcp_read_only, cli_installed),
+                    &mcp_stdio_server(mcp_read_only),
                     &locale,
                     "mcp-stdio-config-template",
                     stdio_config_copied,
                     cx.listener(move |this, _, _, cx| {
-                        this.copy_mcp_stdio_config(mcp_read_only, cli_installed, cx);
+                        this.copy_mcp_stdio_config(mcp_read_only, cx);
                     }),
                 ));
 
@@ -743,20 +774,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_typed_port_survives_stray_characters_and_rejects_the_rest() {
+    fn only_a_run_of_digits_is_accepted_as_a_port() {
         assert_eq!(parse_mcp_port("3179"), Some(3179));
         assert_eq!(parse_mcp_port(" 8080 "), Some(8080));
         assert_eq!(parse_mcp_port("0"), Some(0));
         assert_eq!(parse_mcp_port(""), None);
         assert_eq!(parse_mcp_port("abc"), None);
         assert_eq!(parse_mcp_port("70000"), None);
+        assert_eq!(parse_mcp_port("80.80"), None);
+        assert_eq!(parse_mcp_port("-1"), None);
+    }
+
+    #[test]
+    fn a_stopped_server_still_applies_the_port_so_the_cli_start_agrees() {
+        assert_eq!(
+            plan_port_commit("4100", 3179, false, false),
+            PortCommit::Apply {
+                port: 4100,
+                restart: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_running_server_is_rebound_onto_the_new_port() {
+        assert_eq!(
+            plan_port_commit("4100", 3179, false, true),
+            PortCommit::Apply {
+                port: 4100,
+                restart: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_commit_is_ignored_while_a_start_or_stop_is_still_in_flight() {
+        assert_eq!(plan_port_commit("4100", 3179, true, true), PortCommit::Keep);
+    }
+
+    #[test]
+    fn an_unparsable_or_unchanged_port_is_left_alone() {
+        assert_eq!(
+            plan_port_commit("80.80", 3179, false, true),
+            PortCommit::Keep
+        );
+        assert_eq!(plan_port_commit("", 3179, false, true), PortCommit::Keep);
+        assert_eq!(
+            plan_port_commit("3179", 3179, false, true),
+            PortCommit::Keep
+        );
     }
 
     #[test]
     fn both_config_snippets_are_valid_json() {
         for config in [
-            mcp_stdio_server(false, true),
-            mcp_stdio_server(true, false),
+            mcp_stdio_server(false),
+            mcp_stdio_server(true),
             mcp_http_server(&McpServerStatus {
                 running: true,
                 port: Some(3179),
@@ -770,21 +843,14 @@ mod tests {
     }
 
     #[test]
-    fn the_stdio_command_is_quoted_so_a_windows_path_stays_valid_json() {
-        let command = mcp_stdio_command(false);
+    fn the_stdio_command_is_an_absolute_path_quoted_as_valid_json() {
+        let command = mcp_stdio_command();
         assert!(command.starts_with('"') && command.ends_with('"'));
-        assert!(!command[1..command.len() - 1].contains('\\') || command.contains("\\\\"));
-        assert_eq!(mcp_stdio_command(true), "\"mezon\"");
-    }
-
-    #[test]
-    fn a_stopped_server_leaves_the_http_port_as_a_placeholder() {
-        let config = mcp_http_server(&McpServerStatus {
-            running: false,
-            port: Some(3179),
-            read_only: false,
-            url: None,
-        });
-        assert!(config.contains("{port}"), "{config}");
+        let path = &command[1..command.len() - 1];
+        assert_ne!(
+            path, "mezon",
+            "the shim name would not resolve from a GUI host"
+        );
+        assert!(!path.contains('\\') || command.contains("\\\\"));
     }
 }

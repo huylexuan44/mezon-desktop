@@ -64,6 +64,9 @@ pub enum McpCommand {
         value: Value,
         reply: oneshot::Sender<anyhow::Result<()>>,
     },
+    SetMcpEnabled {
+        enabled: bool,
+    },
     SetCliEnabled {
         enabled: bool,
         reply: oneshot::Sender<anyhow::Result<bool>>,

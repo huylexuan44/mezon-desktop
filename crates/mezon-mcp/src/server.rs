@@ -216,12 +216,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_named_port_is_honoured_so_the_url_does_not_move() {
-        let listener = bind_listener(Some(0)).await.expect("bind any port");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
+        for attempt in 1..=5 {
+            let listener = bind_listener(Some(0)).await.expect("bind any port");
+            let port = listener.local_addr().expect("addr").port();
+            drop(listener);
 
-        let listener = bind_listener(Some(port)).await.expect("bind named port");
-        assert_eq!(listener.local_addr().expect("addr").port(), port);
+            let listener = bind_listener(Some(port)).await.expect("bind named port");
+            let bound = listener.local_addr().expect("addr").port();
+            if bound == port {
+                return;
+            }
+            assert!(attempt < 5, "port {port} was taken on every attempt");
+        }
     }
 
     #[tokio::test]

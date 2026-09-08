@@ -564,7 +564,12 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let (mcp_cmd_tx, mcp_cmd_rx) = futures::channel::mpsc::unbounded::<mezon_mcp::McpCommand>();
 
-    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx) {
+    let mcp_launch = mcp::McpLaunch {
+        enabled: settings.mcp_enabled,
+        read_only: settings.mcp_read_only,
+        port: settings.mcp_port,
+    };
+    let mcp_runtime = match mcp::McpRuntime::start(api.clone(), mcp_cmd_tx, mcp_launch) {
         Ok(runtime) => Some((runtime, mcp_cmd_rx)),
         Err(error) => {
             tracing::warn!("MCP control server disabled: {error}");
@@ -716,10 +721,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 settings_for_mcp,
                 mcp_cmd_rx,
             );
-            register_mcp_server_hooks(cx, runtime.controller(), &settings);
-            if settings.mcp_enabled {
-                start_mcp_server_on_launch(runtime.controller(), settings.mcp_read_only);
-            }
+            register_mcp_server_hooks(cx, runtime.controller());
             Some(runtime)
         } else {
             None
@@ -1145,14 +1147,9 @@ fn open_main_window(
     (auth_state, window_handle.into())
 }
 
-fn register_mcp_server_hooks(
-    cx: &mut App,
-    controller: Arc<mezon_mcp::McpController>,
-    settings: &Settings,
-) {
+fn register_mcp_server_hooks(cx: &mut App, controller: Arc<mezon_mcp::McpController>) {
     let runtime = mezon_client::transport_runtime::handle();
     let platform = mezon_store::PlatformStore::global(cx);
-    controller.set_preferred_port(settings.mcp_port);
     mezon_store::PlatformStore::set_mcp_server(
         &platform,
         mezon_store::McpServerHooks {
@@ -1180,18 +1177,13 @@ fn register_mcp_server_hooks(
                     Ok(mcp_status_snapshot(&runtime, &controller))
                 }
             }),
+            set_port: Arc::new({
+                let controller = controller.clone();
+                move |port| controller.set_preferred_port(port)
+            }),
         },
         cx,
     );
-}
-
-fn start_mcp_server_on_launch(controller: Arc<mezon_mcp::McpController>, read_only: bool) {
-    mezon_client::transport_runtime::handle().spawn(async move {
-        match controller.start(read_only, None).await {
-            Ok(result) => tracing::info!("MCP server listening at {}", result.url),
-            Err(error) => tracing::warn!("Failed to start the MCP server on launch: {error}"),
-        }
-    });
 }
 
 fn mcp_status_snapshot(
