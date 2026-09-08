@@ -329,7 +329,8 @@ impl Render for UserProfileModal {
         });
         let status_presence = mezon_store::UserPresence::from_status(&self.live_status);
         let show_avatar_status = status_presence.is_visible();
-        let status_color = crate::util::user_status::status_color(status_presence, &theme);
+        let status_color = crate::util::user_status::avatar_status_color(status_presence)
+            .unwrap_or_else(|| crate::util::user_status::status_color(status_presence, &theme));
         let friend_state = FriendStore::global(cx)
             .read(cx)
             .friend(self.user_id)
@@ -503,7 +504,7 @@ impl Render for UserProfileModal {
                                         .p(px(2.))
                                         .rounded_full()
                                         .bg(theme.bg_floating)
-                                        .child(crate::util::user_status::status_glyph(
+                                        .child(crate::util::user_status::avatar_status_mark(
                                             status_presence,
                                             px(19.),
                                             status_color,

@@ -117,6 +117,9 @@ impl ProfilePage {
                     cx.notify();
                 } else if !this.is_dirty() {
                     let next = ProfileState::from_account(account);
+                    let text_changed = this.profile.as_ref().is_none_or(|prev| {
+                        prev.display_name != next.display_name || prev.about_me != next.about_me
+                    });
                     let changed = this.profile.as_ref().is_none_or(|prev| {
                         prev.avatar_url != next.avatar_url
                             || prev.display_name != next.display_name
@@ -128,9 +131,11 @@ impl ProfilePage {
                     });
                     if changed {
                         this.profile = Some(next);
-                        this.display_name_input = None;
-                        this.about_me_input = None;
-                        this._subscriptions.clear();
+                        if text_changed {
+                            this.display_name_input = None;
+                            this.about_me_input = None;
+                            this._subscriptions.clear();
+                        }
                         this.refresh_banner_color(cx);
                         cx.notify();
                     }
@@ -1236,7 +1241,8 @@ impl ProfilePage {
             .map_or_else(SharedString::default, |p| p.custom_status.clone());
         let status_presence = mezon_store::UserPresence::from_status(status);
         let show_avatar_status = status_presence.is_visible();
-        let status_color = crate::util::user_status::status_color(status_presence, theme);
+        let status_color = crate::util::user_status::avatar_status_color(status_presence)
+            .unwrap_or_else(|| crate::util::user_status::status_color(status_presence, theme));
         let banner_color = self
             .banner_color
             .map(gpui::Hsla::from)
@@ -1348,7 +1354,7 @@ impl ProfilePage {
                                         .p(px(2.))
                                         .rounded_full()
                                         .bg(theme.bg_secondary)
-                                        .child(crate::util::user_status::status_glyph(
+                                        .child(crate::util::user_status::avatar_status_mark(
                                             status_presence,
                                             px(15.),
                                             status_color,

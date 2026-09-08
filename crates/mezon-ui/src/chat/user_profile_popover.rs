@@ -759,7 +759,9 @@ impl Render for UserProfilePopover {
                 avatar,
                 status_presence.is_visible().then_some((
                     status_presence,
-                    crate::util::user_status::status_color(status_presence, theme),
+                    crate::util::user_status::avatar_status_color(status_presence).unwrap_or_else(
+                        || crate::util::user_status::status_color(status_presence, theme),
+                    ),
                 )),
                 custom_status,
                 theme,
@@ -1341,7 +1343,11 @@ fn render_avatar_row(
                 )
                 .when_some(status, |el, (presence, status_color)| {
                     el.child(div().absolute().bottom(px(4.)).right(px(8.)).child(
-                        crate::util::user_status::status_glyph(presence, px(16.), status_color),
+                        crate::util::user_status::avatar_status_mark(
+                            presence,
+                            px(16.),
+                            status_color,
+                        ),
                     ))
                 }),
         )

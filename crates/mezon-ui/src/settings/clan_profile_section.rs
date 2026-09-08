@@ -711,7 +711,8 @@ impl ClanProfileSection {
         };
         let status_presence = mezon_store::UserPresence::from_status(status);
         let show_avatar_status = status_presence.is_visible();
-        let status_color = crate::util::user_status::status_color(status_presence, theme);
+        let status_color = crate::util::user_status::avatar_status_color(status_presence)
+            .unwrap_or_else(|| crate::util::user_status::status_color(status_presence, theme));
         let banner_color = banner_color
             .map(gpui::Hsla::from)
             .unwrap_or(theme.tokens.bg_secondary.into());
@@ -809,7 +810,7 @@ impl ClanProfileSection {
                                         .p(px(2.))
                                         .rounded_full()
                                         .bg(theme.bg_secondary)
-                                        .child(crate::util::user_status::status_glyph(
+                                        .child(crate::util::user_status::avatar_status_mark(
                                             status_presence,
                                             px(15.),
                                             status_color,

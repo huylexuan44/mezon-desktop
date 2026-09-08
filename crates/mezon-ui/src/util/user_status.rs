@@ -16,6 +16,10 @@ pub fn presence_badge_color(presence: DmAvatarPresence) -> Option<Rgba> {
     }
 }
 
+pub fn avatar_status_color(presence: UserPresence) -> Option<Rgba> {
+    presence_badge_color(presence.into())
+}
+
 /// The presence dot drawn over a DM avatar: a filled circle for online/dnd and
 /// the crescent glyph for idle, nothing when the peer reads as offline. Expects
 /// a `relative()` parent sized to the avatar; `surface` is the background the
@@ -94,13 +98,23 @@ pub fn status_glyph(
     }
 }
 
-pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+pub fn avatar_status_mark(
+    presence: UserPresence,
+    size: Pixels,
+    color: impl Into<gpui::Hsla>,
+) -> AnyElement {
+    let color = color.into();
     match presence {
-        UserPresence::Online => theme.status_online,
-        UserPresence::Idle => theme.status_idle,
-        UserPresence::Dnd => theme.status_dnd,
-        UserPresence::Invisible => theme.status_offline,
+        UserPresence::Idle => status_glyph(UserPresence::Idle, size, color),
+        UserPresence::Online | UserPresence::Dnd => {
+            div().size(size).rounded_full().bg(color).into_any_element()
+        }
+        UserPresence::Invisible => div().size(size).into_any_element(),
     }
+}
+
+pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
+    presence_badge_color(presence.into()).unwrap_or(theme.status_offline)
 }
 
 pub fn status_label_key(presence: UserPresence) -> &'static str {
