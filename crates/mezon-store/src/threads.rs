@@ -401,6 +401,15 @@ impl ThreadsStore {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn simulate_active_channel_changed_for_test(
+        &mut self,
+        channel_id: Option<ChannelId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_active_channel_changed(channel_id, cx);
+    }
+
     pub fn thread_active(&self, channel_id: &str) -> Option<i32> {
         self.find_thread(channel_id).map(|t| t.active)
     }

@@ -3920,7 +3920,14 @@ impl ChannelList {
         label: String,
         cx: &mut Context<Self>,
     ) -> Option<ClanId> {
-        self.ensure_thread_channel_with_active(thread_id, label, CHANNEL_ACTIVE_JOINED, false, cx)
+        self.ensure_thread_channel_with_active(
+            thread_id,
+            label,
+            CHANNEL_ACTIVE_JOINED,
+            false,
+            None,
+            cx,
+        )
     }
 
     pub fn ensure_thread_channel_with_active(
@@ -3929,19 +3936,34 @@ impl ChannelList {
         label: String,
         active: i32,
         active_confirmed: bool,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Option<ClanId> {
         if let Some(clan_id) = self.active_clan_id
             && let Some(existing) = self.channel_mut(clan_id, thread_id)
         {
-            if sync_thread_active_status(existing, active, active_confirmed) {
+            let mut changed = sync_thread_active_status(existing, active, active_confirmed);
+            if let Some(private) = private
+                && existing.private != private
+            {
+                existing.private = private;
+                changed = true;
+            }
+            if changed {
                 cx.notify();
             }
             return Some(clan_id);
         }
         let clan_id = self.active_clan_id?;
         let parent_id = self.active_channel_id?;
-        let channel = thread_channel_from_context(thread_id, label, clan_id, parent_id, active);
+        let channel = thread_channel_from_context(
+            thread_id,
+            label,
+            clan_id,
+            parent_id,
+            active,
+            private.unwrap_or(false),
+        );
         let inserted = if let Some(categories) = self.cache.get_mut(&clan_id) {
             insert_channel(categories, channel)
         } else {
@@ -3969,6 +3991,7 @@ impl ChannelList {
             label,
             CHANNEL_ACTIVE_JOINED,
             false,
+            None,
             cx,
         );
     }
@@ -3981,21 +4004,34 @@ impl ChannelList {
         label: String,
         active: i32,
         active_confirmed: bool,
+        private: Option<bool>,
         cx: &mut Context<Self>,
     ) {
         if let Some(existing) = self.channel_mut(clan_id, thread_id) {
-            if sync_thread_active_status(existing, active, active_confirmed) {
-                if !label.is_empty() {
-                    existing.name = label;
-                }
-                cx.notify();
-            } else if !label.is_empty() && existing.name != label {
+            let mut changed = sync_thread_active_status(existing, active, active_confirmed);
+            if let Some(private) = private
+                && existing.private != private
+            {
+                existing.private = private;
+                changed = true;
+            }
+            if !label.is_empty() && existing.name != label {
                 existing.name = label;
+                changed = true;
+            }
+            if changed {
                 cx.notify();
             }
             return;
         }
-        let channel = thread_channel_from_context(thread_id, label, clan_id, parent_id, active);
+        let channel = thread_channel_from_context(
+            thread_id,
+            label,
+            clan_id,
+            parent_id,
+            active,
+            private.unwrap_or(false),
+        );
         let inserted = if let Some(categories) = self.cache.get_mut(&clan_id) {
             insert_channel(categories, channel)
         } else {
@@ -4077,14 +4113,29 @@ impl ChannelList {
         let Some(ch) = self.channel_mut(clan_id, channel_id) else {
             return;
         };
-        if ts <= ch.last_sent_timestamp {
-            return;
+        let mut changed = false;
+        if ts > ch.last_sent_timestamp {
+            ch.last_sent_timestamp = ts;
+            if !message_id.is_zero() {
+                ch.last_sent_message_id = message_id;
+            }
+            changed = true;
         }
-        ch.last_sent_timestamp = ts;
-        if !message_id.is_zero() {
-            ch.last_sent_message_id = message_id;
+        if ts > ch.last_seen_timestamp {
+            ch.last_seen_timestamp = ts;
+            if !message_id.is_zero() {
+                ch.last_seen_message_id = message_id;
+            }
+            changed = true;
         }
-        cx.notify();
+        if ch.last_seen_timestamp < ch.last_sent_timestamp {
+            ch.last_seen_timestamp = ch.last_sent_timestamp;
+            ch.last_seen_message_id = ch.last_sent_message_id;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn apply_thread_reactivated(
@@ -4113,18 +4164,29 @@ impl ChannelList {
             if now > ch.last_sent_timestamp {
                 ch.last_sent_timestamp = now;
             }
+            if ch.last_seen_timestamp < ch.last_sent_timestamp {
+                ch.last_seen_timestamp = ch.last_sent_timestamp;
+                ch.last_seen_message_id = ch.last_sent_message_id;
+            }
             if !name.is_empty() {
                 ch.name = name;
             }
         } else if let Some(parent_id) = parent_id {
+            let private = crate::threads::ThreadsStore::global(cx)
+                .read(cx)
+                .thread_channel_private(&channel_id.to_string())
+                .map(|p| p != 0)
+                .unwrap_or(false);
             let mut channel = thread_channel_from_context(
                 channel_id,
                 name,
                 clan_id,
                 parent_id,
                 CHANNEL_ACTIVE_JOINED,
+                private,
             );
             channel.last_sent_timestamp = now;
+            channel.last_seen_timestamp = now;
             if let Some(cats) = self.cache.get_mut(&clan_id)
                 && insert_channel(cats, channel)
             {
@@ -4532,6 +4594,7 @@ impl ChannelList {
                 label.clone(),
                 CHANNEL_ACTIVE_JOINED,
                 true,
+                Some(e.channel_private),
                 cx,
             );
             if let Some(ch) = self.channel_mut(clan_id, channel_id) {
@@ -4852,12 +4915,13 @@ impl ChannelList {
         let channel_key = channel_id.to_string();
         let threads = crate::threads::ThreadsStore::global(cx).read(cx);
         let threads_archived = threads.thread_active(&channel_key) == Some(CHANNEL_ACTIVE_ARCHIVED);
+        let locally_archived = self.is_locally_archived(channel_id);
+        let channel = self.channel(clan_id, channel_id);
         let is_public = threads
             .thread_channel_private(&channel_key)
             .map(|private| private == 0)
+            .or_else(|| channel.map(|ch| !ch.private))
             .unwrap_or(false);
-        let locally_archived = self.is_locally_archived(channel_id);
-        let channel = self.channel(clan_id, channel_id);
 
         let (is_thread, channel_archived, sync_cached_archived) = match channel {
             Some(ch) => (
@@ -4883,12 +4947,13 @@ fn thread_channel_from_context(
     clan_id: ClanId,
     parent_id: ChannelId,
     active: i32,
+    private: bool,
 ) -> Channel {
     Channel {
         id: thread_id,
         name: label,
         channel_type: ChannelType::Thread,
-        private: false,
+        private,
         clan_id,
         clan_name: String::new(),
         category_name: String::new(),
@@ -6417,6 +6482,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_JOINED,
+            false,
         );
         assert_eq!(thread.id, ChannelId(500));
         assert_eq!(thread.channel_type, ChannelType::Thread);
@@ -6435,6 +6501,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_JOINED,
+            false,
         );
         assert!(insert_channel(&mut cats, thread));
         let ids: Vec<ChannelId> = cats[0].channels.iter().map(|c| c.id).collect();
@@ -10447,6 +10514,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_ARCHIVED,
+            false,
         );
         assert!(insert_channel(&mut cats, archived));
         let archived_row = cats[0]
@@ -10476,6 +10544,7 @@ mod tests {
             ClanId(1),
             ChannelId(10),
             CHANNEL_ACTIVE_JOINED,
+            false,
         );
         assert!(insert_channel(&mut cats, thread));
         assert!(remove_channel(&mut cats, ChannelId(500)));
@@ -10836,9 +10905,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn public_pre_send_uses_threads_store_privacy_after_local_archive(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn public_pre_send_survives_threads_store_clear_after_navigate(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list_with_threads(cx);
             crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
@@ -10848,6 +10915,39 @@ mod tests {
                 channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
                 channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
                 assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                let private = crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .map(|p| p != 0);
+                assert_eq!(private, Some(false));
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(9),
+                    ChannelId(1),
+                    ClanId(1),
+                    "thread".into(),
+                    CHANNEL_ACTIVE_ARCHIVED,
+                    true,
+                    private,
+                    cx,
+                );
+                channels.select_channel(ChannelId(9), cx);
+            });
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.simulate_active_channel_changed_for_test(Some(ChannelId(9)), cx);
+            });
+            assert!(
+                crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .is_none(),
+                "active channel change must clear ThreadsStore privacy"
+            );
+            channels.update(cx, |channels, cx| {
+                let ch = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("seeded before ThreadsStore clear");
+                assert!(!ch.private);
+                assert!(ch.is_archived());
                 assert!(channels.begin_public_pre_send_reactivate(
                     ChannelId(9),
                     ClanId(1),
@@ -10874,6 +10974,39 @@ mod tests {
                     ch.private = false;
                     ch.active = CHANNEL_ACTIVE_ARCHIVED;
                 }
+                let private = crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .map(|p| p != 0);
+                assert_eq!(private, Some(true));
+                channels.ensure_thread_with_parent_active(
+                    ChannelId(9),
+                    ChannelId(1),
+                    ClanId(1),
+                    "thread".into(),
+                    CHANNEL_ACTIVE_ARCHIVED,
+                    true,
+                    private,
+                    cx,
+                );
+                channels.select_channel(ChannelId(9), cx);
+            });
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.simulate_active_channel_changed_for_test(Some(ChannelId(9)), cx);
+            });
+            assert!(
+                crate::threads::ThreadsStore::global(cx)
+                    .read(cx)
+                    .thread_channel_private("9")
+                    .is_none()
+            );
+            channels.update(cx, |channels, cx| {
+                assert!(
+                    channels
+                        .channel(ClanId(1), ChannelId(9))
+                        .expect("thread")
+                        .private
+                );
                 assert!(!channels.begin_public_pre_send_reactivate(
                     ChannelId(9),
                     ClanId(1),
@@ -10937,6 +11070,12 @@ mod tests {
                     .expect("unix time")
                     .as_secs() as i64;
                 channels.note_own_send_confirmed(ClanId(1), ChannelId(9), now, MessageId(99), cx);
+                let ch = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("thread after own send");
+                assert!(!ch.is_unread());
+                assert_eq!(ch.last_seen_timestamp, now);
+                assert_eq!(ch.last_seen_message_id, MessageId(99));
                 assert!(!channels.begin_reactivate_for_send(
                     ChannelId(9),
                     ClanId(1),
