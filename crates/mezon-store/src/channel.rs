@@ -575,6 +575,11 @@ pub struct ChannelList {
     badge_seeded: HashSet<ClanId>,
     joined_clans: HashSet<ClanId>,
     joining_clans: HashMap<ClanId, Shared<Task<()>>>,
+    /// Set the moment the socket drops, cleared by the `resync` that follows.
+    /// It records that the joins above already belong to the new session, so the
+    /// reconnect does not bump the generation a second time and cancel the join
+    /// another store started in the meantime.
+    forgot_socket_session: bool,
     /// Bumped by `resync` only. Every fetch that owns an in-flight guard captures
     /// it and abandons its bookkeeping when it no longer matches, so a reconnect
     /// can drop those guards and re-issue without a task from the dead socket
@@ -859,6 +864,7 @@ impl ChannelList {
             badge_seeded: HashSet::new(),
             joined_clans: HashSet::new(),
             joining_clans: HashMap::new(),
+            forgot_socket_session: false,
             socket_generation: 0,
             forgotten_clans: HashSet::new(),
             user_channels: HashMap::new(),
@@ -1258,8 +1264,17 @@ impl ChannelList {
                     if this.update(cx, |this, cx| this.resync(cx)).is_err() {
                         break;
                     }
-                } else if !connected {
+                } else if !connected && was_connected {
+                    // Only the falling edge. The status flaps once per failed
+                    // reconnect attempt — measured 4 to 12 times in a single
+                    // outage — and the session is lost once, not once per try.
                     was_connected = false;
+                    if this
+                        .update(cx, |this, _| this.forget_socket_session())
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         })
@@ -3661,14 +3676,46 @@ impl ChannelList {
         }
     }
 
-    fn resync(&mut self, cx: &mut Context<Self>) {
-        tracing::info!("ChannelList resync — invalidating channel cache");
+    /// Forget the joins that died with the socket, the moment it goes down.
+    ///
+    /// This is what keeps `clan_join` ahead of `channel_join`. This store and
+    /// `MessagesStore` resync off the same status watch in an order nobody
+    /// controls, and when `MessagesStore` won that race it asked
+    /// `ensure_clan_joined` a question answered by the *previous* session's
+    /// `joined_clans` — "already joined" — and sent `channel_join` straight
+    /// away. On a public channel the server folds that join into the clan
+    /// stream, so the `clan_join` arriving behind it is a no-op and every
+    /// private channel and thread goes without push for the rest of the
+    /// session. Measured 08/09/2026 on three reconnects out of four before
+    /// this ran at the drop.
+    ///
+    /// Only the joins and the generation move this early. The cache and the
+    /// fetch guards stay behind in `resync`: marking them stale here would have
+    /// `load_for_clan` firing requests into an outage that cannot answer them.
+    fn forget_socket_session(&mut self) {
         // Everything issued on the socket that just died is abandoned: the
         // adapter drops its pending waiters, so those tasks resolve as failures
         // whose only remaining effect would be to clear the guard belonging to
         // their replacement. Bumping the generation makes them no-ops, which is
-        // what lets the guards below be cleared safely.
+        // what lets `resync` clear those guards safely.
         self.socket_generation = self.socket_generation.wrapping_add(1);
+        // A reconnect is a new gateway session: every `clan_join` we sent is gone
+        // with the old one, so the clans have to be re-subscribed from scratch.
+        self.joined_clans.clear();
+        self.joining_clans.clear();
+        self.forgot_socket_session = true;
+    }
+
+    fn resync(&mut self, cx: &mut Context<Self>) {
+        tracing::info!("ChannelList resync — invalidating channel cache");
+        // Normally the drop already did this. A `lagged` resync arrives on a live
+        // socket and has no drop behind it, and an outage short enough that the
+        // status watch only ever reports the reconnect leaves nothing behind
+        // either; both still need the old session's joins gone.
+        if !self.forgot_socket_session {
+            self.forget_socket_session();
+        }
+        self.forgot_socket_session = false;
         self.cache.mark_all_stale();
         self.invalidate_channel_index_all();
         self.badge_seeded.clear();
@@ -3676,10 +3723,6 @@ impl ChannelList {
         self.extras_loaded.clear();
         self.extras_loading.clear();
         self.loading.clear();
-        // A reconnect is a new gateway session: every `clan_join` we sent is gone
-        // with the old one, so the clans have to be re-subscribed from scratch.
-        self.joined_clans.clear();
-        self.joining_clans.clear();
         self.user_channels_generation = self.user_channels_generation.wrapping_add(1);
         self.user_channels_loading = false;
         self.fetch_user_channels(cx);
@@ -8847,6 +8890,57 @@ mod tests {
                     "a reconnect starts a new gateway session, so every clan has to be \
                      re-subscribed"
                 );
+            });
+        });
+    }
+
+    /// The ordering guarantee `MessagesStore::spawn_join` leans on. Both stores resync off the
+    /// same status watch in an order nobody controls, so the dead session's `joined_clans` has to
+    /// be gone before either of them runs — otherwise the one that wins asks "is the clan joined?",
+    /// is told yes by state belonging to a socket that no longer exists, and sends `channel_join`
+    /// with no `clan_join` ahead of it.
+    #[gpui::test]
+    fn losing_the_socket_clears_the_clan_joins_before_anything_resyncs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
+                channels.joined_clans.insert(ClanId(1));
+                let before = channels.socket_generation;
+
+                channels.forget_socket_session();
+                assert!(
+                    channels.joined_clans.is_empty() && channels.joining_clans.is_empty(),
+                    "the joins died with the socket and must not answer for the new one"
+                );
+                assert!(
+                    channels.cache.is_fresh(&ClanId(1), crate::CACHE_TTL),
+                    "the cache must survive the outage — marking it stale here would have \
+                     `load_for_clan` firing requests the outage cannot answer"
+                );
+                assert_ne!(
+                    channels.socket_generation, before,
+                    "tasks from the dead socket have to become no-ops at the drop"
+                );
+
+                // And the reconnect must not invalidate a second time: a join started between the
+                // drop and here carries the generation set above, and bumping it again would make
+                // that join a no-op and leave `channel_join` unordered all over again.
+                let joining = channels.ensure_clan_joined(ClanId(1), cx);
+                let after_loss = channels.socket_generation;
+                channels.resync(cx);
+                assert_eq!(
+                    channels.socket_generation, after_loss,
+                    "the drop already opened the new session"
+                );
+                drop(joining);
             });
         });
     }

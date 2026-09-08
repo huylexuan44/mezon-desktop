@@ -614,6 +614,7 @@ pub struct MessagesStore {
     is_public: bool,
     is_dm: bool,
     mode: i32,
+    join_channel_type: i32,
     loading: bool,
     loading_more: bool,
     /// Throttle state for older-history paging: when the backend answers very
@@ -1001,6 +1002,7 @@ impl MessagesStore {
         self.is_public = true;
         self.is_dm = false;
         self.mode = STREAM_MODE_CHANNEL;
+        self.join_channel_type = CHANNEL_TYPE_CHANNEL;
         self.loading = false;
         self.loading_more = false;
         self.last_load_more = None;
@@ -1075,6 +1077,7 @@ impl MessagesStore {
             is_public: true,
             is_dm: false,
             mode: STREAM_MODE_CHANNEL,
+            join_channel_type: CHANNEL_TYPE_CHANNEL,
             loading: false,
             loading_more: false,
             last_load_more: None,
@@ -5739,6 +5742,7 @@ impl MessagesStore {
         self.is_public = is_public;
         self.is_dm = is_dm;
         self.mode = mode;
+        self.join_channel_type = join_type;
         self.viewing_older_by_channel.insert(channel_id, false);
         self.pending_below_by_channel.clear();
         self.loading_more = false;
@@ -7170,6 +7174,24 @@ impl MessagesStore {
         tracing::info!("MessagesStore resync — marking message cache stale");
         self.cache.mark_all_stale();
         self.joined_channels.clear();
+        // A reconnect drops every subscription, and the channel the user is looking at has to be
+        // re-joined or it stays silent for the rest of the session. `spawn_join` awaits
+        // `ensure_clan_joined` so `clan_join` goes out first, which is the order proto-server
+        // needs: joining a public channel implicitly subscribes the clan stream, so a `clan_join`
+        // arriving second is a no-op and a private channel or thread never gets its push. That
+        // await is only worth anything because `ChannelList` clears `joined_clans` when the socket
+        // drops rather than when it comes back — otherwise this runs first often enough to be
+        // asked about the dead session's joins and answered "already joined".
+        if let (Some(channel_id), Some(clan_id)) = (self.active_channel_id, self.active_clan_id) {
+            self.joined_channels.insert(channel_id);
+            self.spawn_join(
+                clan_id,
+                channel_id,
+                self.join_channel_type,
+                self.is_public,
+                cx,
+            );
+        }
         self.refetch_current_messages(cx);
     }
 
@@ -9747,6 +9769,57 @@ mod tests {
                     store.load_more_topic_bottom(cx),
                     "a trimmed tail must page newer replies back in"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn resync_rejoins_the_active_private_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let channel = ChannelId(99);
+            store.update(cx, |store, cx| {
+                store.activate(clan, channel, false, false, CHANNEL_TYPE_CHANNEL, 2, cx);
+                assert!(store.joined_channels.contains(&channel));
+                store.resync(cx);
+                assert!(
+                    store.joined_channels.contains(&channel),
+                    "proto-server requires channel_join after reconnect"
+                );
+                assert_eq!(store.join_channel_type, CHANNEL_TYPE_CHANNEL);
+                assert!(!store.is_public);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn resync_rejoins_the_active_dm(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let dm = ChannelId(11);
+            store.update(cx, |store, cx| {
+                store.activate(ClanId(0), dm, false, true, 3, 4, cx);
+                store.resync(cx);
+                assert!(store.joined_channels.contains(&dm));
+                assert_eq!(store.join_channel_type, 3);
+                assert!(store.is_dm);
             });
         });
     }
