@@ -5192,7 +5192,15 @@ impl MessagesStore {
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
-                maybe_reactivate_archived_thread(&this, channel_id, clan_id, mode, cx);
+                note_own_send_and_maybe_reactivate(
+                    &this,
+                    channel_id,
+                    clan_id,
+                    mode,
+                    i64::from(create_time_seconds),
+                    MessageId(real_message_id),
+                    cx,
+                );
                 let (on_complete, mut completions) =
                     tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
                 let drain_this = this.clone();
@@ -5260,18 +5268,32 @@ impl MessagesStore {
                 };
                 match result {
                     Ok(sent) => {
-                        let _ = this.update(cx, |this, cx| {
-                            let mut confirmed = message_from_api(
-                                sent,
-                                AppConfig::try_global(cx),
-                                viewer_user_id(cx),
-                            );
-                            if anonymous {
-                                let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
-                            }
-                            this.reconcile_temp(channel_id, temp_id, confirmed, cx);
-                        });
-                        maybe_reactivate_archived_thread(&this, channel_id, clan_id, mode, cx);
+                        let (create_time, message_id) = this
+                            .update(cx, |this, cx| {
+                                let mut confirmed = message_from_api(
+                                    sent,
+                                    AppConfig::try_global(cx),
+                                    viewer_user_id(cx),
+                                );
+                                if anonymous {
+                                    let _ =
+                                        anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                                }
+                                let create_time = confirmed.create_time;
+                                let message_id = confirmed.id;
+                                this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                                (create_time, message_id)
+                            })
+                            .unwrap_or((0, MessageId(0)));
+                        note_own_send_and_maybe_reactivate(
+                            &this,
+                            channel_id,
+                            clan_id,
+                            mode,
+                            create_time,
+                            message_id,
+                            cx,
+                        );
                     }
                     Err(e) => {
                         tracing::error!("send_channel_message failed: {e}");
@@ -5549,15 +5571,31 @@ impl MessagesStore {
                 .await;
             match result {
                 Ok(sent) => {
-                    let _ = this.update(cx, |this, cx| {
-                        let mut confirmed =
-                            message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-                        if anonymous {
-                            let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
-                        }
-                        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
-                    });
-                    maybe_reactivate_archived_thread(&this, channel_id, clan_id, mode, cx);
+                    let (create_time, message_id) = this
+                        .update(cx, |this, cx| {
+                            let mut confirmed = message_from_api(
+                                sent,
+                                AppConfig::try_global(cx),
+                                viewer_user_id(cx),
+                            );
+                            if anonymous {
+                                let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                            }
+                            let create_time = confirmed.create_time;
+                            let message_id = confirmed.id;
+                            this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+                            (create_time, message_id)
+                        })
+                        .unwrap_or((0, MessageId(0)));
+                    note_own_send_and_maybe_reactivate(
+                        &this,
+                        channel_id,
+                        clan_id,
+                        mode,
+                        create_time,
+                        message_id,
+                        cx,
+                    );
                 }
                 Err(e) => {
                     tracing::error!("send url attachment failed: {e}");
@@ -6725,10 +6763,7 @@ async fn ensure_public_archived_thread_reactivated(
     let needs = this
         .update(cx, |_this, cx| {
             ChannelList::global(cx).update(cx, |list, cx| {
-                if !list.needs_public_pre_send_reactivate(channel_id, clan_id, mode, cx) {
-                    return false;
-                }
-                list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
+                list.begin_public_pre_send_reactivate(channel_id, clan_id, mode, cx)
             })
         })
         .ok()
@@ -6736,26 +6771,24 @@ async fn ensure_public_archived_thread_reactivated(
     if !needs {
         return;
     }
-    match api
+    invoke_active_archived_thread(api, this, channel_id, clan_id, cx).await;
+}
+
+async fn invoke_active_archived_thread(
+    api: &AppApi,
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    cx: &mut AsyncApp,
+) {
+    let result = api
         .active_archived_thread(clan_id.get(), channel_id.get())
-        .await
-    {
-        Ok(()) => {
-            let _ = this.update(cx, |_this, cx| {
-                ChannelList::global(cx).update(cx, |list, cx| {
-                    list.apply_thread_reactivated(clan_id, channel_id, None, cx);
-                });
-            });
-        }
-        Err(e) => {
-            let _ = this.update(cx, |_this, cx| {
-                ChannelList::global(cx).update(cx, |list, _cx| {
-                    list.finish_reactivating(channel_id);
-                });
-            });
-            tracing::error!("active_archived_thread before send (public) failed: {e}");
-        }
-    }
+        .await;
+    let _ = this.update(cx, |_this, cx| {
+        ChannelList::global(cx).update(cx, |list, cx| {
+            list.complete_reactivate(clan_id, channel_id, result, cx);
+        });
+    });
 }
 
 fn maybe_reactivate_archived_thread(
@@ -6765,11 +6798,40 @@ fn maybe_reactivate_archived_thread(
     mode: i32,
     cx: &mut AsyncApp,
 ) {
+    let api = this
+        .update(cx, |this, cx| {
+            let started = ChannelList::global(cx).update(cx, |list, cx| {
+                list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
+            });
+            started.then(|| this.api.clone())
+        })
+        .ok()
+        .flatten();
+    let Some(api) = api else {
+        return;
+    };
+    let this = this.clone();
+    cx.spawn(async move |cx| {
+        invoke_active_archived_thread(&api, &this, channel_id, clan_id, cx).await;
+    })
+    .detach();
+}
+
+fn note_own_send_and_maybe_reactivate(
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    mode: i32,
+    create_time: i64,
+    message_id: MessageId,
+    cx: &mut AsyncApp,
+) {
     let _ = this.update(cx, |_this, cx| {
         ChannelList::global(cx).update(cx, |list, cx| {
-            list.maybe_reactivate_after_send(channel_id, clan_id, mode, cx);
+            list.note_own_send_confirmed(clan_id, channel_id, create_time.max(0), message_id, cx);
         });
     });
+    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
 }
 
 pub(crate) fn plan_thread_membership(
@@ -7928,20 +7990,33 @@ async fn send_anonymous_attachment_message(
         }
     };
     let real_message_id = sent.message_id;
-    let _ = this.update(cx, |this, cx| {
-        let mut confirmed = message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-        let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
-        this.reconcile_temp(channel_id, temp_id, confirmed, cx);
-        for key in keys {
-            this.mark_channel_attachment_outcome(
-                channel_id,
-                MessageId(real_message_id),
-                AttachmentUploadOutcome::Uploaded(key),
-                cx,
-            );
-        }
-    });
-    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
+    let create_time = this
+        .update(cx, |this, cx| {
+            let mut confirmed =
+                message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
+            let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+            let create_time = confirmed.create_time;
+            this.reconcile_temp(channel_id, temp_id, confirmed, cx);
+            for key in keys {
+                this.mark_channel_attachment_outcome(
+                    channel_id,
+                    MessageId(real_message_id),
+                    AttachmentUploadOutcome::Uploaded(key),
+                    cx,
+                );
+            }
+            create_time
+        })
+        .unwrap_or(0);
+    note_own_send_and_maybe_reactivate(
+        this,
+        channel_id,
+        clan_id,
+        mode,
+        create_time,
+        MessageId(real_message_id),
+        cx,
+    );
 }
 
 pub(crate) async fn upload_attachments_now(

@@ -4015,6 +4015,30 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) -> bool {
         let state = self.reactivate_state_for_send(channel_id, clan_id, mode, cx);
+        self.begin_reactivate_with_state(channel_id, clan_id, state, cx)
+    }
+
+    pub fn begin_public_pre_send_reactivate(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        mode: i32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let state = self.reactivate_state_for_send(channel_id, clan_id, mode, cx);
+        if !(state.should_reactivate && state.is_public) {
+            return false;
+        }
+        self.begin_reactivate_with_state(channel_id, clan_id, state, cx)
+    }
+
+    fn begin_reactivate_with_state(
+        &mut self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        state: ThreadReactivateState,
+        _cx: &mut Context<Self>,
+    ) -> bool {
         if !state.should_reactivate {
             return false;
         }
@@ -4026,44 +4050,41 @@ impl ChannelList {
         self.reactivating.insert(channel_id)
     }
 
-    pub fn needs_public_pre_send_reactivate(
-        &self,
-        channel_id: ChannelId,
-        clan_id: ClanId,
-        mode: i32,
-        cx: &App,
-    ) -> bool {
-        let state = self.reactivate_state_for_send(channel_id, clan_id, mode, cx);
-        state.should_reactivate && state.is_public
-    }
-
-    pub fn maybe_reactivate_after_send(
+    pub fn complete_reactivate(
         &mut self,
-        channel_id: ChannelId,
         clan_id: ClanId,
-        mode: i32,
+        channel_id: ChannelId,
+        result: Result<(), anyhow::Error>,
         cx: &mut Context<Self>,
     ) {
-        if !self.begin_reactivate_for_send(channel_id, clan_id, mode, cx) {
+        match result {
+            Ok(()) => self.apply_thread_reactivated(clan_id, channel_id, None, cx),
+            Err(e) => {
+                self.finish_reactivating(channel_id);
+                tracing::error!("active_archived_thread failed: {e}");
+            }
+        }
+    }
+
+    pub fn note_own_send_confirmed(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        ts: i64,
+        message_id: MessageId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ch) = self.channel_mut(clan_id, channel_id) else {
+            return;
+        };
+        if ts <= ch.last_sent_timestamp {
             return;
         }
-
-        let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
-            let result = api
-                .active_archived_thread(clan_id.get(), channel_id.get())
-                .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    this.apply_thread_reactivated(clan_id, channel_id, None, cx);
-                }
-                Err(e) => {
-                    this.finish_reactivating(channel_id);
-                    tracing::error!("active_archived_thread after send failed: {e}");
-                }
-            });
-        })
-        .detach();
+        ch.last_sent_timestamp = ts;
+        if !message_id.is_zero() {
+            ch.last_sent_message_id = message_id;
+        }
+        cx.notify();
     }
 
     pub fn apply_thread_reactivated(
@@ -4082,20 +4103,28 @@ impl ChannelList {
             .map(|ch| ch.name.clone())
             .unwrap_or_default();
         let name = label.filter(|s| !s.is_empty()).unwrap_or(existing_label);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
 
         if let Some(ch) = self.channel_mut(clan_id, channel_id) {
             ch.active = CHANNEL_ACTIVE_JOINED;
+            if now > ch.last_sent_timestamp {
+                ch.last_sent_timestamp = now;
+            }
             if !name.is_empty() {
                 ch.name = name;
             }
         } else if let Some(parent_id) = parent_id {
-            let channel = thread_channel_from_context(
+            let mut channel = thread_channel_from_context(
                 channel_id,
                 name,
                 clan_id,
                 parent_id,
                 CHANNEL_ACTIVE_JOINED,
             );
+            channel.last_sent_timestamp = now;
             if let Some(cats) = self.cache.get_mut(&clan_id)
                 && insert_channel(cats, channel)
             {
@@ -4820,21 +4849,23 @@ impl ChannelList {
             };
         }
 
-        let threads_archived = crate::threads::ThreadsStore::global(cx)
-            .read(cx)
-            .thread_active(&channel_id.to_string())
-            == Some(CHANNEL_ACTIVE_ARCHIVED);
+        let channel_key = channel_id.to_string();
+        let threads = crate::threads::ThreadsStore::global(cx).read(cx);
+        let threads_archived = threads.thread_active(&channel_key) == Some(CHANNEL_ACTIVE_ARCHIVED);
+        let is_public = threads
+            .thread_channel_private(&channel_key)
+            .map(|private| private == 0)
+            .unwrap_or(false);
         let locally_archived = self.is_locally_archived(channel_id);
         let channel = self.channel(clan_id, channel_id);
 
-        let (is_thread, is_public, channel_archived, sync_cached_archived) = match channel {
+        let (is_thread, channel_archived, sync_cached_archived) = match channel {
             Some(ch) => (
                 ch.is_thread(),
-                !ch.private,
                 thread_needs_reactivate(ch),
                 threads_archived && !ch.is_archived(),
             ),
-            None => (true, false, false, false),
+            None => (true, false, false),
         };
 
         let archived = threads_archived || locally_archived || channel_archived;
@@ -10239,25 +10270,24 @@ mod tests {
         thread.channel_type = ChannelType::Thread;
         thread.active = CHANNEL_ACTIVE_ARCHIVED;
         assert!(should_reactivate_thread_after_send(
-            6,
-            true,
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
         assert!(!should_reactivate_thread_after_send(
             2,
-            true,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
         thread.active = CHANNEL_ACTIVE_JOINED;
         assert!(!should_reactivate_thread_after_send(
-            6,
-            true,
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
-        assert!(should_reactivate_thread_after_send(6, true, true));
         let parent = make_channel(10, "parent", "cat1");
         assert!(!should_reactivate_thread_after_send(
-            6,
+            STREAM_MODE_THREAD,
             parent.is_thread(),
             thread_needs_reactivate(&parent)
         ));
@@ -10276,8 +10306,8 @@ mod tests {
             - 1;
         assert!(thread_needs_reactivate(&thread));
         assert!(should_reactivate_thread_after_send(
-            6,
-            true,
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
             thread_needs_reactivate(&thread)
         ));
     }
@@ -10397,11 +10427,15 @@ mod tests {
         assert!(thread.is_archived());
         assert!(!thread.visible_in_sidebar());
         assert!(should_reactivate_thread_after_send(
-            6,
+            STREAM_MODE_THREAD,
             true,
             thread_needs_reactivate(&thread)
         ));
-        assert!(should_reactivate_thread_after_send(6, true, true));
+        assert!(should_reactivate_thread_after_send(
+            STREAM_MODE_THREAD,
+            thread.is_thread(),
+            true
+        ));
     }
 
     #[test]
@@ -10778,6 +10812,157 @@ mod tests {
                 channels.apply_thread_reactivated(ClanId(1), ChannelId(9), None, cx);
                 assert!(!channels.is_locally_archived(ChannelId(9)));
                 assert!(channels.channel_in_clan(ClanId(1), ChannelId(9)));
+            });
+        });
+    }
+
+    fn seed_archived_thread_summary(channel_private: i32) -> crate::threads::ThreadSummary {
+        crate::threads::ThreadSummary {
+            channel_id: "9".into(),
+            channel_label: "thread".into(),
+            clan_id: "1".into(),
+            parent_id: "1".into(),
+            channel_private,
+            active: crate::threads::THREAD_STATUS_ARCHIVED,
+            creator_id: String::new(),
+            last_message_content: String::new(),
+            last_message_preview: String::new(),
+            last_message_sender_id: String::new(),
+            last_message_sender_name: String::new(),
+            last_message_sender_avatar: String::new(),
+            last_sent_timestamp: 0,
+            member_count: 0,
+        }
+    }
+
+    #[gpui::test]
+    fn public_pre_send_uses_threads_store_privacy_after_local_archive(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.seed_threads_for_test("1", vec![seed_archived_thread_summary(0)], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(!channels.channel_in_clan(ClanId(1), ChannelId(9)));
+                assert!(channels.begin_public_pre_send_reactivate(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn private_thread_skips_public_pre_send_even_when_cache_says_public(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            crate::threads::ThreadsStore::global(cx).update(cx, |store, cx| {
+                store.seed_threads_for_test("1", vec![seed_archived_thread_summary(1)], cx);
+            });
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.private = false;
+                    ch.active = CHANNEL_ACTIVE_ARCHIVED;
+                }
+                assert!(!channels.begin_public_pre_send_reactivate(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                assert!(channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn locally_archived_none_cache_still_reactivates_after_send(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                channels.apply_local_archive(ClanId(1), ChannelId(9), ChannelId(1), cx);
+                assert!(channels.is_locally_archived(ChannelId(9)));
+                assert!(channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn note_own_send_clears_stale_so_second_reactivate_skips(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.active = CHANNEL_ACTIVE_JOINED;
+                    ch.last_sent_timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("unix time")
+                        .as_secs() as i64
+                        - THREAD_ARCHIVE_DURATION_SECONDS
+                        - 1;
+                }
+                assert!(channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+                channels.finish_reactivating(ChannelId(9));
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("unix time")
+                    .as_secs() as i64;
+                channels.note_own_send_confirmed(ClanId(1), ChannelId(9), now, MessageId(99), cx);
+                assert!(!channels.begin_reactivate_for_send(
+                    ChannelId(9),
+                    ClanId(1),
+                    STREAM_MODE_THREAD,
+                    cx
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn apply_thread_reactivated_bumps_stale_last_sent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_a_thread(), None, cx);
+                if let Some(ch) = channels.channel_mut(ClanId(1), ChannelId(9)) {
+                    ch.active = CHANNEL_ACTIVE_ARCHIVED;
+                    ch.last_sent_timestamp = 1;
+                }
+                channels.apply_thread_reactivated(ClanId(1), ChannelId(9), None, cx);
+                let ch = channels
+                    .channel(ClanId(1), ChannelId(9))
+                    .expect("thread restored");
+                assert_eq!(ch.active, CHANNEL_ACTIVE_JOINED);
+                assert!(!thread_is_stale(ch));
             });
         });
     }
