@@ -5099,7 +5099,8 @@ impl MessagesStore {
             }
         });
         cx.spawn(async move |this, cx| {
-            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
+            ensure_public_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx)
+                .await;
             ensure_thread_membership_for_send(
                 &api,
                 &this,
@@ -5191,6 +5192,7 @@ impl MessagesStore {
                         message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
                     this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                 });
+                maybe_reactivate_archived_thread(&this, channel_id, clan_id, mode, cx);
                 let (on_complete, mut completions) =
                     tokio::sync::mpsc::unbounded_channel::<AttachmentUploadOutcome>();
                 let drain_this = this.clone();
@@ -5269,6 +5271,7 @@ impl MessagesStore {
                             }
                             this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                         });
+                        maybe_reactivate_archived_thread(&this, channel_id, clan_id, mode, cx);
                     }
                     Err(e) => {
                         tracing::error!("send_channel_message failed: {e}");
@@ -5522,7 +5525,8 @@ impl MessagesStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
+            ensure_public_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx)
+                .await;
             let result = api
                 .send_message_with_attachment_urls_reply(
                     clan_id.get(),
@@ -5553,6 +5557,7 @@ impl MessagesStore {
                         }
                         this.reconcile_temp(channel_id, temp_id, confirmed, cx);
                     });
+                    maybe_reactivate_archived_thread(&this, channel_id, clan_id, mode, cx);
                 }
                 Err(e) => {
                     tracing::error!("send url attachment failed: {e}");
@@ -6709,7 +6714,7 @@ impl MessagesStore {
     }
 }
 
-async fn ensure_archived_thread_reactivated(
+async fn ensure_public_archived_thread_reactivated(
     api: &AppApi,
     this: &WeakEntity<MessagesStore>,
     channel_id: ChannelId,
@@ -6720,6 +6725,9 @@ async fn ensure_archived_thread_reactivated(
     let needs = this
         .update(cx, |_this, cx| {
             ChannelList::global(cx).update(cx, |list, cx| {
+                if !list.needs_public_pre_send_reactivate(channel_id, clan_id, mode, cx) {
+                    return false;
+                }
                 list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
             })
         })
@@ -6745,9 +6753,23 @@ async fn ensure_archived_thread_reactivated(
                     list.finish_reactivating(channel_id);
                 });
             });
-            tracing::error!("active_archived_thread before send failed: {e}");
+            tracing::error!("active_archived_thread before send (public) failed: {e}");
         }
     }
+}
+
+fn maybe_reactivate_archived_thread(
+    this: &WeakEntity<MessagesStore>,
+    channel_id: ChannelId,
+    clan_id: ClanId,
+    mode: i32,
+    cx: &mut AsyncApp,
+) {
+    let _ = this.update(cx, |_this, cx| {
+        ChannelList::global(cx).update(cx, |list, cx| {
+            list.maybe_reactivate_after_send(channel_id, clan_id, mode, cx);
+        });
+    });
 }
 
 pub(crate) fn plan_thread_membership(
@@ -7919,6 +7941,7 @@ async fn send_anonymous_attachment_message(
             );
         }
     });
+    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
 }
 
 pub(crate) async fn upload_attachments_now(
