@@ -2131,10 +2131,9 @@ impl ChatLayout {
         self.dismiss_threads_popover(cx);
         let label = label.to_string();
         let parent = parent_id.parse::<ChannelId>().ok();
-        let (active, active_confirmed) = match ThreadsStore::global(cx)
-            .read(cx)
-            .thread_active(&channel_id.to_string())
-        {
+        let channel_key = channel_id.to_string();
+        let threads = ThreadsStore::global(cx).read(cx);
+        let (active, active_confirmed) = match threads.thread_active(&channel_key) {
             Some(status) => (
                 if status == THREAD_STATUS_ARCHIVED {
                     CHANNEL_ACTIVE_ARCHIVED
@@ -2145,6 +2144,7 @@ impl ChatLayout {
             ),
             None => (CHANNEL_ACTIVE_JOINED, false),
         };
+        let private = threads.thread_channel_private(&channel_key).map(|p| p != 0);
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
@@ -2154,6 +2154,7 @@ impl ChatLayout {
                     label.clone(),
                     active,
                     active_confirmed,
+                    private,
                     cx,
                 );
             } else {
@@ -2162,6 +2163,7 @@ impl ChatLayout {
                     label.clone(),
                     active,
                     active_confirmed,
+                    private,
                     cx,
                 );
             }
