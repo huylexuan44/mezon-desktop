@@ -134,12 +134,7 @@ impl UserInfoBar {
 impl Render for UserInfoBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let presence_badge = match self.status {
-            UserPresence::Online => DmAvatarPresence::Online,
-            UserPresence::Idle => DmAvatarPresence::Idle,
-            UserPresence::Dnd => DmAvatarPresence::Dnd,
-            UserPresence::Invisible => DmAvatarPresence::None,
-        };
+        let presence_badge = DmAvatarPresence::from(self.status);
         let subtitle: SharedString = if self.user_status.is_empty() {
             let locale = self
                 .settings
@@ -229,7 +224,7 @@ impl Render for UserInfoBar {
                                     .child(avatar)
                                     .children(presence_badge_element(
                                         presence_badge,
-                                        theme.bg_secondary,
+                                        theme.tokens.bg_surface,
                                         theme,
                                     )),
                             )

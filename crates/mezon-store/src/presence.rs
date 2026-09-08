@@ -90,6 +90,17 @@ impl UserPresence {
     }
 }
 
+impl From<UserPresence> for DmAvatarPresence {
+    fn from(presence: UserPresence) -> Self {
+        match presence {
+            UserPresence::Online => Self::Online,
+            UserPresence::Idle => Self::Idle,
+            UserPresence::Dnd => Self::Dnd,
+            UserPresence::Invisible => Self::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberStatus {
     pub presence: UserPresence,
@@ -640,12 +651,7 @@ impl PresenceStore {
 }
 
 fn presence_badge(presence: UserPresence) -> DmAvatarPresence {
-    match presence {
-        UserPresence::Online => DmAvatarPresence::Online,
-        UserPresence::Idle => DmAvatarPresence::Idle,
-        UserPresence::Dnd => DmAvatarPresence::Dnd,
-        UserPresence::Invisible => DmAvatarPresence::None,
-    }
+    presence.into()
 }
 
 fn dm_presence_from_status(status: &str) -> DmAvatarPresence {

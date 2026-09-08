@@ -103,11 +103,6 @@ pub fn status_color(presence: UserPresence, theme: &Theme) -> Rgba {
     }
 }
 
-pub fn status_icon_and_color(status: &str, theme: &Theme) -> (IconName, Rgba) {
-    let presence = UserPresence::from_status(status);
-    (status_icon(presence), status_color(presence, theme))
-}
-
 pub fn status_label_key(presence: UserPresence) -> &'static str {
     match presence {
         UserPresence::Online => "userProfile.statusProfile.statusOptions.online",

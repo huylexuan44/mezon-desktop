@@ -345,7 +345,7 @@ impl Render for FooterProfilePopup {
                             .absolute()
                             .bottom(px(4.))
                             .right(px(6.))
-                            .size(px(18.))
+                            .size(px(20.))
                             .rounded_full()
                             .border_2()
                             .border_color(bg_card)

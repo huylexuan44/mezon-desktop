@@ -128,6 +128,9 @@ impl ProfilePage {
                     });
                     if changed {
                         this.profile = Some(next);
+                        this.display_name_input = None;
+                        this.about_me_input = None;
+                        this._subscriptions.clear();
                         this.refresh_banner_color(cx);
                         cx.notify();
                     }
@@ -185,7 +188,6 @@ impl ProfilePage {
                     if let Some(state) = &mut this.profile {
                         state.avatar_url = Some(url.clone().into());
                     }
-                    this.avatar_local_preview = None;
                     this.refresh_banner_color(cx);
                     cx.notify();
                 }
@@ -495,15 +497,9 @@ impl ProfilePage {
                     .filter(|url| !url.is_empty())
                     .map(SharedString::from)
             });
-        let avatar_display = avatar_raw.as_ref().map(|url| {
-            SharedString::from(crate::util::imgproxy::proxied(
-                cx,
-                url.as_ref(),
-                300,
-                300,
-                "fit",
-            ))
-        });
+        let avatar_display = avatar_raw
+            .as_ref()
+            .map(|url| SharedString::from(crate::util::imgproxy::profile_url(cx, url.as_ref())));
         let custom_status = self
             .profile
             .as_ref()
