@@ -240,6 +240,8 @@ pub use user_profile::{
     resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
+#[cfg(debug_assertions)]
+pub use voice::SimulatedCall;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{

@@ -79,6 +79,15 @@ pub enum McpCommand {
     LeaveVoice {
         reply: oneshot::Sender<anyhow::Result<Value>>,
     },
+    #[cfg(debug_assertions)]
+    SimulateParticipants {
+        count: usize,
+        screenshare: bool,
+        focus: bool,
+        fullscreen: bool,
+        member_strip: bool,
+        reply: oneshot::Sender<anyhow::Result<Value>>,
+    },
     GetRecordingState {
         reply: oneshot::Sender<Value>,
     },
