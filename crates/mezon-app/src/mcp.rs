@@ -235,6 +235,26 @@ impl McpRuntime {
                         let result = cx.update(mezon_ui::app::capture::leave_voice);
                         let _ = reply.send(result);
                     }
+                    #[cfg(debug_assertions)]
+                    McpCommand::SimulateParticipants {
+                        count,
+                        screenshare,
+                        focus,
+                        fullscreen,
+                        member_strip,
+                        reply,
+                    } => {
+                        let options = mezon_store::SimulatedCall {
+                            screenshare,
+                            focus,
+                            fullscreen,
+                            member_strip,
+                        };
+                        let result = cx.update(|cx| {
+                            mezon_ui::app::capture::simulate_participants(count, options, cx)
+                        });
+                        let _ = reply.send(result);
+                    }
                     McpCommand::GetRecordingState { reply } => {
                         let value = cx.update(mezon_ui::app::capture::recording_state);
                         let _ = reply.send(value);
