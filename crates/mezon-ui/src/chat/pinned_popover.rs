@@ -1,27 +1,38 @@
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, ListAlignment, ListState, MouseDownEvent, ObjectFit, SharedString, Window, div,
-    img, list, prelude::*, px, rems,
+    App, ClickEvent, ClipboardItem, Context, DismissEvent, DispatchPhase, Element, ElementId,
+    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, HighlightStyle,
+    Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, IntoElement, KeyDownEvent,
+    LayoutId, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, SharedString, StyledText, TextLayout, UnderlineStyle, WeakEntity, Window, div, img,
+    list, prelude::*, px, rems, rgba,
 };
 use mezon_store::{
-    AccountStore, ChannelId, ClanMembersStore, DirectMessageStore, Embed, Message,
-    MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage, PinnedMessagesStore,
-    PollData, RichLayout, Settings, UsersByUserStore, strip_code_fence,
+    AccountStore, AttachmentSeedInput, ChannelId, ClanMembersStore, DirectMessageStore, Embed,
+    Message, MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage,
+    PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
+    strip_code_fence,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
 
+use crate::app::shell::Shell;
 use crate::chat::file_type_icon::file_type_icon_for;
 use crate::chat::message::parts::{
-    effective_clan_id, resolve_pin_avatar_url, resolve_pin_sender_label_with_message,
+    effective_clan_id, open_viewer_from_message, resolve_pin_avatar_url,
+    resolve_pin_sender_label_with_message,
+};
+use crate::chat::message::selection::{
+    MessageSelectionState, SelPoint, SharedSelection, merge_selection_background, word_range,
 };
 use crate::chat::message::{
-    ConfirmUnpinMessageModal, code_block_copy_overlay, heading_line_height, heading_size,
-    pin_link_element, render_ogp_preview, render_pin_rich_layout_element,
-    render_poll_card_readonly, resolve_message_link_url, text_wrap_children,
+    ConfirmUnpinMessageModal, SELECTION_BG, open_message_link, pin_link_element,
+    render_ogp_preview, render_pin_rich_layout_element, render_poll_card_readonly,
+    resolve_message_link_url,
 };
+use crate::components::primitives::text_actions::Copy;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, Spinner, h_flex, v_flex,
 };
@@ -54,6 +65,7 @@ struct PinCardVm {
     avatar_fallback: Option<SharedString>,
     pin: Arc<PinnedMessage>,
     text_spans: Arc<[MessageSpan]>,
+    selectable_text: SharedString,
     poll: Option<Arc<PollData>>,
     poll_my_vote: Arc<[i32]>,
 }
@@ -75,6 +87,8 @@ impl PinCardVm {
         );
         let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(msg, clan_id, channel_id, cx);
         let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
+        let text_spans = prepare_pin_text_spans(msg);
+        let selectable_text = pin_selectable_text(msg, &text_spans, cx);
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
@@ -84,7 +98,8 @@ impl PinCardVm {
             avatar_src,
             avatar_fallback,
             pin: Arc::new(msg.clone()),
-            text_spans: prepare_pin_text_spans(msg),
+            text_spans,
+            selectable_text,
             poll,
             poll_my_vote,
         }
@@ -121,15 +136,19 @@ pub(crate) fn render_pinned_message_preview(
     ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let text_spans = prepare_pin_text_spans(pin);
+    let selectable_text = pin_spans_plain_text(&text_spans);
     let poll = pin.poll.as_deref().map(|poll| (poll, &[] as &[i32]));
     render_pin_body(
         pin,
         &text_spans,
+        &selectable_text,
         poll,
         theme,
         locale,
         image_cache,
         ogp_cache,
+        None,
+        None,
     )
 }
 
@@ -178,6 +197,7 @@ pub struct PinnedPopoverPanel {
     message_image_cache: Entity<LruImageCache>,
     ogp_image_cache: Entity<LruImageCache>,
     pin_cards: Vec<PinCardVm>,
+    selection: SharedSelection,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -185,12 +205,10 @@ impl PinnedPopoverPanel {
     pub fn new(
         settings: Entity<Settings>,
         popover_handle: PopoverMenuHandle<PinnedPopoverPanel>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        cx.on_blur(&focus_handle, window, |_, _, cx| cx.emit(DismissEvent))
-            .detach();
 
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
@@ -234,6 +252,7 @@ impl PinnedPopoverPanel {
             message_image_cache,
             ogp_image_cache,
             pin_cards: Vec::new(),
+            selection: MessageSelectionState::new_shared(),
             _subs: subs,
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
@@ -280,6 +299,330 @@ impl PinnedPopoverPanel {
             .map(|msg| PinCardVm::resolve(msg, clan_id, channel_id, cx))
             .collect()
     }
+
+    fn sync_selection_order(&self) {
+        let mut state = self.selection.borrow_mut();
+        state.order_map.clear();
+        for (index, vm) in self.pin_cards.iter().enumerate() {
+            if let Ok(message_id) = vm.message_id.parse::<MessageId>() {
+                state.order_map.insert(message_id, index);
+            }
+        }
+    }
+
+    fn pin_point_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<SelPoint> {
+        let state = self.selection.borrow();
+        state.registry.iter().find_map(|(id, layout)| {
+            text_layout_offset_at(layout, position).map(|offset| SelPoint {
+                message_id: *id,
+                offset,
+            })
+        })
+    }
+
+    fn selectable_text_for(&self, message_id: MessageId) -> SharedString {
+        self.pin_cards
+            .iter()
+            .find(|vm| vm.message_id.parse::<MessageId>().ok() == Some(message_id))
+            .map(|vm| vm.selectable_text.clone())
+            .unwrap_or_default()
+    }
+
+    fn on_selection_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        self.sync_selection_order();
+        let hit = self.pin_point_at(event.position);
+        match hit {
+            Some(point) => {
+                let text = self.selectable_text_for(point.message_id);
+                let range = if event.click_count >= 2 {
+                    let offset = point.offset.min(text.len());
+                    if event.click_count >= 3 {
+                        0..text.len()
+                    } else {
+                        word_range(&text, offset)
+                    }
+                } else {
+                    point.offset..point.offset
+                };
+                let mut state = self.selection.borrow_mut();
+                state.selecting = true;
+                state.anchor = Some(SelPoint {
+                    message_id: point.message_id,
+                    offset: range.start,
+                });
+                state.head = Some(SelPoint {
+                    message_id: point.message_id,
+                    offset: range.end,
+                });
+                cx.notify();
+            }
+            None => {
+                if self.selection.borrow().has_selection() {
+                    self.selection.borrow_mut().clear();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn on_selection_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .selection
+            .try_borrow()
+            .is_ok_and(|selection| selection.selecting)
+        {
+            return;
+        }
+        self.sync_selection_order();
+        let Some(point) = self.pin_point_at(event.position) else {
+            return;
+        };
+        let changed = self.selection.try_borrow_mut().is_ok_and(|mut state| {
+            let changed = state.head != Some(point);
+            state.head = Some(point);
+            changed
+        });
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn on_selection_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection.try_borrow_mut().is_ok_and(|mut state| {
+            let was = state.selecting;
+            state.selecting = false;
+            was
+        }) {
+            cx.notify();
+        }
+    }
+
+    fn copy_selection(&mut self, cx: &mut App) -> bool {
+        self.sync_selection_order();
+        let text = {
+            let state = self.selection.borrow();
+            if !state.has_selection() {
+                return false;
+            }
+            let mut parts = Vec::new();
+            for vm in &self.pin_cards {
+                let Ok(message_id) = vm.message_id.parse::<MessageId>() else {
+                    continue;
+                };
+                if !state.includes_message(message_id) {
+                    continue;
+                }
+                let full = state
+                    .registry
+                    .get(&message_id)
+                    .and_then(TextLayout::try_text)
+                    .unwrap_or_else(|| vm.selectable_text.to_string());
+                let Some(range) = state.range_for_message(message_id, &full) else {
+                    continue;
+                };
+                if range.start < range.end {
+                    parts.push(full[range].to_string());
+                }
+            }
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
+    fn on_pin_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        if event.keystroke.key == "c" {
+            let modifiers = &event.keystroke.modifiers;
+            let copy_combo = if cfg!(target_os = "macos") {
+                modifiers.platform
+            } else {
+                modifiers.control
+            };
+            if copy_combo && !modifiers.alt && self.copy_selection(cx) {
+                cx.stop_propagation();
+            }
+        }
+    }
+}
+
+fn text_layout_offset_at(
+    layout: &TextLayout,
+    position: gpui::Point<gpui::Pixels>,
+) -> Option<usize> {
+    let bounds = layout.try_bounds()?;
+    if bounds.contains(&position) {
+        Some(
+            layout
+                .try_index_for_position(position)?
+                .unwrap_or_else(|err| err),
+        )
+    } else {
+        None
+    }
+}
+
+fn register_pin_selection_listeners(
+    window: &mut Window,
+    host: WeakEntity<PinnedPopoverPanel>,
+    selection: SharedSelection,
+    hitbox: Hitbox,
+) {
+    let down_host = host.clone();
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture
+            || event.button != MouseButton::Left
+            || !hitbox.is_hovered(window)
+        {
+            return;
+        }
+        let event = event.clone();
+        let host = down_host.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.on_selection_down(&event, window, cx));
+            }
+        });
+    });
+    let move_host = host.clone();
+    let move_selection = selection.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture
+            || !move_selection
+                .try_borrow()
+                .is_ok_and(|selection| selection.selecting)
+        {
+            return;
+        }
+        let event = event.clone();
+        let host = move_host.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.on_selection_move(&event, window, cx));
+            }
+        });
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+        if phase != DispatchPhase::Capture
+            || event.button != MouseButton::Left
+            || !selection
+                .try_borrow()
+                .is_ok_and(|selection| selection.selecting)
+        {
+            return;
+        }
+        let event = event.clone();
+        let host = host.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(view) = host.upgrade() {
+                view.update(cx, |this, cx| this.on_selection_up(&event, window, cx));
+            }
+        });
+    });
+}
+
+struct PinSelectionCapture {
+    child: gpui::AnyElement,
+    host: WeakEntity<PinnedPopoverPanel>,
+    selection: SharedSelection,
+}
+
+impl PinSelectionCapture {
+    fn new(
+        child: gpui::AnyElement,
+        host: WeakEntity<PinnedPopoverPanel>,
+        selection: SharedSelection,
+    ) -> Self {
+        Self {
+            child,
+            host,
+            selection,
+        }
+    }
+}
+
+impl Element for PinSelectionCapture {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        register_pin_selection_listeners(
+            window,
+            self.host.clone(),
+            self.selection.clone(),
+            hitbox.clone(),
+        );
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for PinSelectionCapture {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 impl Focusable for PinnedPopoverPanel {
@@ -294,6 +637,8 @@ impl Render for PinnedPopoverPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.message_image_cache
             .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
+        self.selection.borrow_mut().begin_render();
+        self.sync_selection_order();
         let theme = cx.theme().clone();
         let locale = self.settings.read(cx).language.clone();
         let store = PinnedMessagesStore::global(cx);
@@ -304,6 +649,8 @@ impl Render for PinnedPopoverPanel {
         let avatar_cache = self.avatar_image_cache.clone();
         let message_cache = self.message_image_cache.clone();
         let ogp_cache = self.ogp_image_cache.clone();
+        let selection = self.selection.clone();
+        let settings = self.settings.clone();
         let tokens = &theme.tokens;
 
         if let Some(clan_id) = clan_id {
@@ -321,6 +668,13 @@ impl Render for PinnedPopoverPanel {
         let list_state = self.list_state.clone();
         let viewport_h = f32::from(window.viewport_size().height);
         let panel_max_h = (viewport_h - PANEL_MAX_VIEWPORT_OFFSET).max(PANEL_MIN_HEIGHT);
+        let host = cx.entity().downgrade();
+        let key_listener = cx.listener(Self::on_pin_key);
+        let copy_listener = cx.listener(|this, _: &Copy, window, cx| {
+            if this.focus_handle.is_focused(window) && this.copy_selection(cx) {
+                cx.stop_propagation();
+            }
+        });
 
         v_flex()
             .key_context("menu")
@@ -328,7 +682,12 @@ impl Render for PinnedPopoverPanel {
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
                 cx.emit(DismissEvent);
             }))
+            .on_action(copy_listener)
+            .on_key_down(key_listener)
             .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, _window, cx| {
+                if Shell::global(cx).read(cx).has_modal() {
+                    return;
+                }
                 cx.emit(DismissEvent);
             }))
             .w(px(POPOVER_WIDTH))
@@ -341,19 +700,26 @@ impl Render for PinnedPopoverPanel {
             .bg(tokens.theme_setting_primary)
             .text_color(tokens.text_theme_message)
             .child(render_header(&theme, &locale))
-            .child(render_body(
-                cards,
-                loading,
-                theme.clone(),
-                locale,
-                handle,
-                list_state,
-                avatar_cache,
-                message_cache,
-                ogp_cache,
-                panel_max_h,
-                window,
-                cx,
+            .child(PinSelectionCapture::new(
+                render_body(
+                    cards,
+                    loading,
+                    theme.clone(),
+                    locale,
+                    handle,
+                    list_state,
+                    avatar_cache,
+                    message_cache,
+                    ogp_cache,
+                    selection.clone(),
+                    settings,
+                    panel_max_h,
+                    window,
+                    cx,
+                )
+                .into_any_element(),
+                host,
+                selection,
             ))
     }
 }
@@ -398,6 +764,8 @@ fn render_body(
     avatar_cache: Entity<LruImageCache>,
     message_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
+    selection: SharedSelection,
+    settings: Entity<Settings>,
     panel_max_h: f32,
     window: &mut Window,
     cx: &mut Context<PinnedPopoverPanel>,
@@ -438,6 +806,8 @@ fn render_body(
         let avatar_for_list = avatar_cache.clone();
         let message_for_list = message_cache.clone();
         let ogp_for_list = ogp_cache.clone();
+        let selection_for_list = selection.clone();
+        let settings_for_list = settings.clone();
         div()
             .size_full()
             .overflow_hidden()
@@ -463,6 +833,8 @@ fn render_body(
                             avatar_for_list.clone(),
                             message_for_list.clone(),
                             ogp_for_list.clone(),
+                            selection_for_list.clone(),
+                            settings_for_list.clone(),
                         ))
                         .into_any_element()
                 })
@@ -532,6 +904,8 @@ fn pin_card(
     avatar_cache: Entity<LruImageCache>,
     message_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
+    selection: SharedSelection,
+    settings: Entity<Settings>,
 ) -> gpui::AnyElement {
     let tokens = &theme.tokens;
     let group_name = SharedString::from(format!("pin-card-{index}"));
@@ -584,11 +958,14 @@ fn pin_card(
     let content = render_pin_body(
         &vm.pin,
         &vm.text_spans,
+        &vm.selectable_text,
         poll,
         theme,
         locale,
         message_cache,
         ogp_cache,
+        Some(selection),
+        Some(settings),
     );
 
     let jump_message_id = vm.message_id.clone();
@@ -655,6 +1032,7 @@ fn pin_card(
                 .flex_1()
                 .min_w_0()
                 .gap_1()
+                .cursor_text()
                 .child(name_row)
                 .child(content),
         )
@@ -665,11 +1043,14 @@ fn pin_card(
 fn render_pin_body(
     pin: &PinnedMessage,
     text_spans: &[MessageSpan],
+    selectable_text: &SharedString,
     poll: Option<(&PollData, &[i32])>,
     theme: &Theme,
     locale: &str,
     image_cache: Entity<LruImageCache>,
     ogp_cache: Entity<LruImageCache>,
+    selection: Option<SharedSelection>,
+    settings: Option<Entity<Settings>>,
 ) -> gpui::AnyElement {
     let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
     let text_body = match poll {
@@ -681,13 +1062,13 @@ fn render_pin_body(
             mezon_store::message_time::unix_now_seconds(),
             &image_cache,
         ),
-        None => render_pin_text_body(pin, text_spans, theme),
+        None => render_pin_text_body(pin, text_spans, selectable_text, theme, selection.clone()),
     };
     let image_preview = pin
         .attachments
         .iter()
         .find(|att| pin_image_attachment_has_src(att))
-        .map(|att| render_pin_image_attachment(att, image_cache.clone()));
+        .map(|att| render_pin_image_attachment(att, pin, image_cache.clone(), settings.clone()));
     let file_preview = pin
         .attachments
         .iter()
@@ -715,31 +1096,29 @@ fn render_pin_body(
 fn render_pin_text_body(
     pin: &PinnedMessage,
     text_spans: &[MessageSpan],
+    selectable_text: &SharedString,
     theme: &Theme,
+    selection: Option<SharedSelection>,
 ) -> gpui::AnyElement {
     if !text_spans.is_empty() {
-        return render_pin_spans(text_spans, &pin.message_id, theme);
+        return render_pin_spans(
+            text_spans,
+            selectable_text,
+            &pin.message_id,
+            theme,
+            selection,
+        );
     }
     if let Some(layout) = pin.rich_layout.as_ref()
         && !layout.text.is_empty()
         && !layout.text.contains("```")
     {
-        return render_pin_rich_layout(layout, theme);
+        return render_pin_rich_layout_selectable(layout, &pin.message_id, theme, selection);
     }
     if pin.content.is_empty() {
         return div().into_any_element();
     }
-    let mut link_key = 0usize;
-    div()
-        .w_full()
-        .min_w_0()
-        .max_w_full()
-        .child(pin_plain_line(
-            &pin.content,
-            theme.tokens.text_theme_message,
-            &mut link_key,
-        ))
-        .into_any_element()
+    render_pin_plain_selectable(&pin.content, &pin.message_id, theme, selection)
 }
 
 fn prepare_pin_text_spans(pin: &PinnedMessage) -> Arc<[MessageSpan]> {
@@ -862,231 +1241,273 @@ fn render_pin_rich_layout(layout: &RichLayout, theme: &Theme) -> gpui::AnyElemen
     render_pin_rich_layout_element(layout, theme)
 }
 
-fn pin_inline_row() -> gpui::Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .max_w_full()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_baseline()
-        .gap_x(px(4.))
-}
-
 fn pin_is_http_url(text: &str) -> bool {
     let text = text.trim();
     text.starts_with("http://") || text.starts_with("https://")
 }
 
-fn pin_link_row(text: &str, url: &str, color: gpui::Rgba, link_key: usize) -> gpui::AnyElement {
-    pin_link_element(text, url, color, true, link_key)
+fn pin_selectable_text(pin: &PinnedMessage, spans: &[MessageSpan], _cx: &App) -> SharedString {
+    if !spans.is_empty() {
+        return pin_spans_plain_text(spans);
+    }
+    if let Some(layout) = pin.rich_layout.as_ref()
+        && !layout.text.is_empty()
+    {
+        return layout.text.clone();
+    }
+    SharedString::from(pin.content.clone())
 }
 
-fn pin_plain_line(text: &str, color: gpui::Rgba, link_key: &mut usize) -> gpui::AnyElement {
-    if pin_is_http_url(text) {
-        let key = *link_key;
-        *link_key += 1;
-        return pin_link_row(text, text, color, key);
+fn pin_spans_plain_text(spans: &[MessageSpan]) -> SharedString {
+    let mut text = String::new();
+    for span in spans {
+        match span {
+            MessageSpan::Text(value)
+            | MessageSpan::Bold(value)
+            | MessageSpan::Code(value)
+            | MessageSpan::CodeBlock { text: value, .. }
+            | MessageSpan::Link { text: value, .. }
+            | MessageSpan::Mention { display: value, .. }
+            | MessageSpan::Emoji { name: value, .. }
+            | MessageSpan::Heading { text: value, .. }
+            | MessageSpan::Hashtag { display: value, .. }
+            | MessageSpan::Canvas { title: value, .. } => text.push_str(value),
+        }
     }
+    SharedString::from(text)
+}
+
+fn pin_span_highlights(
+    spans: &[MessageSpan],
+    theme: &Theme,
+) -> (
+    SharedString,
+    Vec<(Range<usize>, HighlightStyle)>,
+    Vec<(Range<usize>, String)>,
+) {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    let mut links = Vec::new();
+    let mention_bg: gpui::Hsla = theme.tokens.mention_primary.into();
+    let mention_color: gpui::Hsla = theme.tokens.mention_color.into();
+    let code_bg: gpui::Hsla = theme.tokens.bg_markdown_code.into();
+    let link_color: gpui::Hsla = theme.tokens.mention_color.into();
+
+    for span in spans {
+        match span {
+            MessageSpan::Text(value)
+            | MessageSpan::Emoji { name: value, .. }
+            | MessageSpan::Canvas { title: value, .. } => {
+                text.push_str(value);
+            }
+            MessageSpan::Bold(value) | MessageSpan::Heading { text: value, .. } => {
+                let start = text.len();
+                text.push_str(value);
+                highlights.push((
+                    start..text.len(),
+                    HighlightStyle {
+                        font_weight: Some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                ));
+            }
+            MessageSpan::Code(value) | MessageSpan::CodeBlock { text: value, .. } => {
+                let start = text.len();
+                text.push_str(value);
+                highlights.push((
+                    start..text.len(),
+                    HighlightStyle {
+                        background_color: Some(code_bg),
+                        ..Default::default()
+                    },
+                ));
+            }
+            MessageSpan::Link {
+                text: value, url, ..
+            } => {
+                let start = text.len();
+                text.push_str(value);
+                let range = start..text.len();
+                highlights.push((
+                    range.clone(),
+                    HighlightStyle {
+                        color: Some(link_color),
+                        underline: Some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(link_color),
+                            wavy: false,
+                        }),
+                        ..Default::default()
+                    },
+                ));
+                links.push((range, resolve_message_link_url(url, value)));
+            }
+            MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
+                let start = text.len();
+                text.push_str(display);
+                highlights.push((
+                    start..text.len(),
+                    HighlightStyle {
+                        color: Some(mention_color),
+                        background_color: Some(mention_bg),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+    }
+    (SharedString::from(text), highlights, links)
+}
+
+fn register_pin_text_layout(
+    message_id: &str,
+    text: &SharedString,
+    layout: TextLayout,
+    selection: &SharedSelection,
+) {
+    let Ok(message_id) = message_id.parse::<MessageId>() else {
+        return;
+    };
+    let mut state = selection.borrow_mut();
+    state.registry.insert(message_id, layout);
+    if !state.order_map.contains_key(&message_id) {
+        let next = state.order_map.len();
+        state.order_map.insert(message_id, next);
+    }
+    let _ = text;
+}
+
+fn render_pin_selectable_styled(
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, String)>,
+    message_id: &str,
+    theme: &Theme,
+    selection: Option<SharedSelection>,
+) -> gpui::AnyElement {
+    let body_color = theme.tokens.text_theme_message;
+    let selected = selection.as_ref().and_then(|state| {
+        let message_id = message_id.parse::<MessageId>().ok()?;
+        state.borrow().range_for_message(message_id, &text)
+    });
+    let styled = if let Some(range) = selected {
+        StyledText::new(text.clone()).with_highlights(merge_selection_background(
+            &highlights,
+            range,
+            rgba(SELECTION_BG).into(),
+        ))
+    } else if highlights.is_empty() {
+        StyledText::new(text.clone())
+    } else {
+        StyledText::new(text.clone()).with_highlights(highlights)
+    };
+
+    if let Some(selection) = &selection {
+        register_pin_text_layout(message_id, &text, styled.layout().clone(), selection);
+    }
+
+    let content = if links.is_empty() {
+        styled.into_any_element()
+    } else {
+        let link_ranges: Vec<Range<usize>> = links.iter().map(|(range, _)| range.clone()).collect();
+        let actions: Arc<[(Range<usize>, SharedString)]> = links
+            .into_iter()
+            .map(|(range, url)| (range, SharedString::from(url)))
+            .collect::<Vec<_>>()
+            .into();
+        let selection_gate = selection.clone();
+        InteractiveText::new(SharedString::from(format!("pin-text-{message_id}")), styled)
+            .on_click(link_ranges, move |range_ix, _, cx| {
+                if selection_gate
+                    .as_ref()
+                    .is_some_and(|state| state.borrow().has_selection())
+                {
+                    return;
+                }
+                if let Some((_, url)) = actions.get(range_ix) {
+                    open_message_link(url.to_string(), cx);
+                }
+            })
+            .into_any_element()
+    };
+
     div()
         .w_full()
         .min_w_0()
         .max_w_full()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_baseline()
+        .cursor_text()
         .text_sm()
         .line_height(rems(1.25))
-        .text_color(color)
-        .gap_x(px(4.))
-        .children(text_wrap_children(text, color))
+        .text_color(body_color)
+        .child(content)
         .into_any_element()
 }
 
-fn render_pin_spans(spans: &[MessageSpan], message_id: &str, theme: &Theme) -> gpui::AnyElement {
-    let link_color = theme.tokens.mention_color;
-    let mention_bg = theme.tokens.mention_primary;
-    let mention_color = theme.tokens.mention_color;
-    let code_bg = theme.tokens.bg_markdown_code;
-    let body_color = theme.tokens.text_theme_message;
-    let mut col = v_flex().w_full().min_w_0().max_w_full();
-    let mut row = pin_inline_row();
-    let mut has_inline = false;
-    let mut link_key = 0usize;
-    let mut code_key = 0usize;
+fn render_pin_spans(
+    spans: &[MessageSpan],
+    _selectable_text: &SharedString,
+    message_id: &str,
+    theme: &Theme,
+    selection: Option<SharedSelection>,
+) -> gpui::AnyElement {
+    let (text, highlights, links) = pin_span_highlights(spans, theme);
+    render_pin_selectable_styled(text, highlights, links, message_id, theme, selection)
+}
 
-    for span in spans {
-        match span {
-            MessageSpan::Text(text) => {
-                for (line_index, line) in text.split('\n').enumerate() {
-                    if line_index > 0 {
-                        if has_inline {
-                            col = col.child(row);
-                            row = pin_inline_row();
-                            has_inline = false;
-                        } else if line.is_empty() {
-                            col = col.child(div().w_full().h(px(8.)));
-                            continue;
-                        }
-                    }
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if has_inline {
-                        for child in text_wrap_children(line, body_color) {
-                            row = row.child(child);
-                        }
-                    } else if pin_is_http_url(line) {
-                        col = col.child(pin_link_row(line, line, link_color, link_key));
-                        link_key += 1;
-                    } else {
-                        col = col.child(pin_plain_line(line, body_color, &mut link_key));
-                    }
-                }
-            }
-            MessageSpan::Bold(text) => {
-                has_inline = true;
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(body_color)
-                        .child(text.clone()),
-                );
-            }
-            MessageSpan::Code(text) => {
-                has_inline = true;
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .px_1()
-                        .rounded_sm()
-                        .bg(code_bg)
-                        .text_color(body_color)
-                        .child(text.clone()),
-                );
-            }
-            MessageSpan::Link { text, url, .. } => {
-                has_inline = true;
-                let resolved = resolve_message_link_url(url, text);
-                row = row.child(pin_link_element(
-                    text, &resolved, link_color, false, link_key,
-                ));
-                link_key += 1;
-            }
-            MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
-                has_inline = true;
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .px_1()
-                        .rounded_sm()
-                        .bg(mention_bg)
-                        .text_color(mention_color)
-                        .child(display.to_string()),
-                );
-            }
-            MessageSpan::Emoji { name, .. } => {
-                has_inline = true;
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .text_color(body_color)
-                        .child(name.to_string()),
-                );
-            }
-            MessageSpan::Canvas { title, .. } => {
-                has_inline = true;
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(link_color)
-                        .child(title.to_string()),
-                );
-            }
-            MessageSpan::Heading { level, text } => {
-                if has_inline {
-                    col = col.child(row);
-                    row = pin_inline_row();
-                    has_inline = false;
-                }
-                col = col.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .max_w_full()
-                        .overflow_hidden()
-                        .my(px(2.))
-                        .text_size(heading_size(*level))
-                        .line_height(heading_line_height(*level))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(body_color)
-                        .child(text.clone()),
-                );
-            }
-            MessageSpan::CodeBlock {
-                text,
-                fenced_source,
-                ..
-            } => {
-                if has_inline {
-                    col = col.child(row);
-                    row = pin_inline_row();
-                    has_inline = false;
-                }
-                let mut code_col = v_flex().w_full().min_w_0().overflow_hidden();
-                for (i, line) in text.split('\n').enumerate() {
-                    if i > 0 && line.is_empty() {
-                        code_col = code_col.child(div().w_full().h(px(8.)));
-                        continue;
-                    }
-                    code_col = code_col.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_size(px(14.))
-                            .line_height(rems(1.25))
-                            .text_color(body_color)
-                            .child(line.to_string()),
-                    );
-                }
-                let copy_id = SharedString::from(format!("pin-code-copy-{message_id}-{code_key}"));
-                code_key += 1;
-                col = col.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .max_w_full()
-                        .overflow_hidden()
-                        .mt(px(4.))
-                        .p_3()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(theme.tokens.border_primary)
-                        .bg(code_bg)
-                        .child(code_col)
-                        .child(code_block_copy_overlay(
-                            copy_id,
-                            fenced_source.clone(),
-                            theme,
-                        )),
-                );
-            }
-        }
+fn render_pin_plain_selectable(
+    content: &str,
+    message_id: &str,
+    theme: &Theme,
+    selection: Option<SharedSelection>,
+) -> gpui::AnyElement {
+    if pin_is_http_url(content) && selection.is_none() {
+        return pin_link_element(content, content, theme.tokens.mention_color, true, 0);
     }
-    if has_inline {
-        col = col.child(row);
+    let mut highlights = Vec::new();
+    let mut links = Vec::new();
+    if pin_is_http_url(content) {
+        let link_color: gpui::Hsla = theme.tokens.mention_color.into();
+        highlights.push((
+            0..content.len(),
+            HighlightStyle {
+                color: Some(link_color),
+                underline: Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(link_color),
+                    wavy: false,
+                }),
+                ..Default::default()
+            },
+        ));
+        links.push((0..content.len(), content.to_string()));
     }
-    col.into_any_element()
+    render_pin_selectable_styled(
+        SharedString::from(content.to_string()),
+        highlights,
+        links,
+        message_id,
+        theme,
+        selection,
+    )
+}
+
+fn render_pin_rich_layout_selectable(
+    layout: &RichLayout,
+    message_id: &str,
+    theme: &Theme,
+    selection: Option<SharedSelection>,
+) -> gpui::AnyElement {
+    if selection.is_none() {
+        return render_pin_rich_layout(layout, theme);
+    }
+    render_pin_selectable_styled(
+        layout.text.clone(),
+        Vec::new(),
+        Vec::new(),
+        message_id,
+        theme,
+        selection,
+    )
 }
 
 fn pin_image_attachment_has_src(att: &MessageAttachment) -> bool {
@@ -1095,20 +1516,35 @@ fn pin_image_attachment_has_src(att: &MessageAttachment) -> bool {
 
 fn render_pin_image_attachment(
     att: &MessageAttachment,
+    pin: &PinnedMessage,
     image_cache: Entity<LruImageCache>,
+    settings: Option<Entity<Settings>>,
 ) -> gpui::AnyElement {
     let src = if att.proxied_src.is_empty() {
         SharedString::from(att.url.clone())
     } else {
         att.proxied_src.clone()
     };
+    let seed = AttachmentSeedInput::from_message(att);
+    let message_id = pin.message_id.parse::<MessageId>().unwrap_or(MessageId(0));
+    let create_time = pin.create_time;
+    let uploader_id = pin
+        .sender_id
+        .parse::<i64>()
+        .ok()
+        .map(UserId)
+        .unwrap_or(UserId(0));
+    let image_id = SharedString::from(format!("pin-image-{}", att.url));
+
     div()
+        .id(image_id)
         .mt_1()
         .w(px(ATTACHMENT_PREVIEW_SIZE))
         .h(px(ATTACHMENT_PREVIEW_SIZE))
         .flex_shrink_0()
         .overflow_hidden()
         .rounded(px(4.))
+        .cursor_pointer()
         .child(
             img(src)
                 .image_cache(&image_cache)
@@ -1116,6 +1552,21 @@ fn render_pin_image_attachment(
                 .h_full()
                 .object_fit(ObjectFit::Cover),
         )
+        .on_click(move |_: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            let Some(settings) = settings.clone().or_else(|| Settings::try_global(cx)) else {
+                return;
+            };
+            open_viewer_from_message(
+                &settings,
+                seed.clone(),
+                message_id,
+                create_time,
+                uploader_id,
+                window,
+                cx,
+            );
+        })
         .into_any_element()
 }
 
