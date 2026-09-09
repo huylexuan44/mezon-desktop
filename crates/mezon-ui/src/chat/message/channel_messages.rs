@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1282,7 +1284,13 @@ pub struct ChannelMessages {
     embed_input_subs: HashMap<(MessageId, SharedString), Subscription>,
     embed_date_pickers: Rc<HashMap<(MessageId, SharedString), Entity<DatePicker>>>,
     embed_date_picker_subs: HashMap<(MessageId, SharedString), Subscription>,
-    embed_input_fingerprint: Option<(Option<ChannelId>, usize, Option<MessageId>)>,
+    /// Hash of every embed form field currently in the source, so an EDIT that
+    /// replaces the fields (bot wizard stepping through one message) re-runs the
+    /// reconcile — `item_count` alone never changes on an edit.
+    embed_input_fingerprint: Option<u64>,
+    /// Per-field identity hash; a field whose definition changed is rebuilt even
+    /// when it kept its id.
+    embed_field_specs: HashMap<(MessageId, SharedString), u64>,
     embed_select_seeded: HashSet<(MessageId, SharedString)>,
     sprite_atlases: Rc<HashMap<SharedString, Arc<SpriteAtlas>>>,
     sprite_atlas_pending: HashSet<SharedString>,
@@ -1671,6 +1679,7 @@ impl ChannelMessages {
                     this.embed_date_picker_subs
                         .retain(|(id, _), _| id != message_id);
                     this.embed_select_seeded.retain(|(id, _)| id != message_id);
+                    this.embed_field_specs.retain(|(id, _), _| id != message_id);
                     this.embed_input_fingerprint = None;
                     let at = usize::from(this.header_shown) + *index;
                     if at < this.list_state.item_count() {
@@ -1933,6 +1942,7 @@ impl ChannelMessages {
             embed_date_pickers: Rc::new(HashMap::new()),
             embed_date_picker_subs: HashMap::new(),
             embed_input_fingerprint: None,
+            embed_field_specs: HashMap::new(),
             embed_select_seeded: HashSet::new(),
             sprite_atlases: Rc::new(HashMap::new()),
             sprite_atlas_pending: HashSet::new(),
@@ -3006,22 +3016,34 @@ impl ChannelMessages {
     }
 
     fn apply_embed_input_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tail = if self.is_topic_box {
-            self.topic_messages.last().map(|message| message.id)
-        } else {
-            MessagesStore::global(cx)
-                .read(cx)
-                .viewport_messages()
-                .last()
-                .map(|message| message.id)
+        let source = self.topic_embed_source();
+        let specs: Vec<((MessageId, SharedString), u64)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            collect_embed_field_specs(embed_source(source.as_deref(), store))
         };
-        let fingerprint = (self.cached_for_channel, self.list_state.item_count(), tail);
+
+        let fingerprint = {
+            let mut hasher = DefaultHasher::new();
+            self.cached_for_channel.hash(&mut hasher);
+            for ((message_id, field_id), spec) in &specs {
+                message_id.hash(&mut hasher);
+                field_id.hash(&mut hasher);
+                spec.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
         if self.embed_input_fingerprint == Some(fingerprint) {
             return;
         }
         self.embed_input_fingerprint = Some(fingerprint);
 
-        let source = self.topic_embed_source();
+        // What earlier steps of a wizard collected is deliberately KEPT: the form
+        // state belongs to the message, and the submit is expected to carry every
+        // answer the user gave (same as the web, whose `formDataEmbed` is keyed by
+        // message id and never pruned). Only a field the edit *redefined* loses
+        // its value, below — that one would show up as the previous step's text
+        // inside the new field.
         let desired: Vec<(MessageId, EmbedTextInput)> = {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
@@ -3048,6 +3070,70 @@ impl ChannelMessages {
             .map(|(id, input)| (*id, input.id.clone()))
             .collect();
 
+        // A field whose definition changed under the same id — one wizard step
+        // replacing another — is re-pointed at the new question. Reusing the
+        // entity keeps the element mounted: dropping it would unmount the input
+        // and the row would blink through the stand-in box for a frame.
+        let live_specs: HashMap<(MessageId, SharedString), u64> = specs.iter().cloned().collect();
+        let redefined: Vec<(MessageId, SharedString)> = live_specs
+            .iter()
+            .filter(|(key, spec)| {
+                self.embed_field_specs
+                    .get(key)
+                    .is_some_and(|previous| previous != *spec)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.embed_field_specs = live_specs;
+        if !redefined.is_empty() {
+            let by_key: HashMap<(MessageId, SharedString), &EmbedTextInput> = desired
+                .iter()
+                .map(|(message_id, input)| ((*message_id, input.id.clone()), input))
+                .collect();
+            for key in &redefined {
+                self.embed_select_seeded.remove(key);
+                match (self.embed_inputs.get(key).cloned(), by_key.get(key)) {
+                    (Some(state), Some(input)) => {
+                        let placeholder = embed_input_placeholder(input);
+                        let value = input.default_value.clone();
+                        let multiline = input.multiline;
+                        let numeric = input.numeric;
+                        state.update(cx, |state, cx| {
+                            state.set_placeholder_text(placeholder, cx);
+                            state.set_single_line(!multiline, cx);
+                            state.set_numeric(numeric, cx);
+                            state.set_min_height(embed_input_min_height(multiline), cx);
+                            state.reset_content(value, cx);
+                        });
+                    }
+                    _ => {
+                        Rc::make_mut(&mut self.embed_inputs).remove(key);
+                        self.embed_input_subs.remove(key);
+                        Rc::make_mut(&mut self.embed_date_pickers).remove(key);
+                        self.embed_date_picker_subs.remove(key);
+                    }
+                }
+            }
+            MessagesStore::global(cx).update(cx, |store, _cx| {
+                for key in &redefined {
+                    let (message_id, field_id) = key;
+                    match by_key.get(key) {
+                        // `reset_content` stays silent on purpose, so the store is
+                        // written here: the new default is the field's value, and a
+                        // field without one starts unanswered (React seeds no key
+                        // for an empty default either).
+                        Some(input) if !input.default_value.is_empty() => store
+                            .set_embed_form_value(
+                                *message_id,
+                                field_id.clone(),
+                                input.default_value.clone(),
+                            ),
+                        _ => store.forget_embed_value(*message_id, field_id),
+                    }
+                }
+            });
+        }
+
         let mut changed = false;
         if self.embed_inputs.keys().any(|key| !wanted.contains(key)) {
             Rc::make_mut(&mut self.embed_inputs).retain(|key, _| wanted.contains(key));
@@ -3067,13 +3153,9 @@ impl ChannelMessages {
                 .embed_form_value(message_id, &input.id)
                 .cloned();
             let initial = restored.unwrap_or_else(|| input.default_value.clone());
-            let placeholder = if input.required {
-                SharedString::from(format!("{}*", input.placeholder))
-            } else {
-                input.placeholder.clone()
-            };
+            let placeholder = embed_input_placeholder(&input);
             let multiline = input.multiline;
-            let min_height = if multiline { px(72.) } else { px(36.) };
+            let min_height = embed_input_min_height(multiline);
             let input_state = cx.new(|cx| {
                 TextArea::new(window, cx)
                     .placeholder(placeholder)
@@ -3460,6 +3542,7 @@ impl ChannelMessages {
         Rc::make_mut(&mut self.animation_starts).clear();
         self.animation_tick = None;
         self.embed_input_fingerprint = None;
+        self.embed_field_specs.clear();
         self.embed_select_seeded.clear();
     }
 
@@ -4925,6 +5008,91 @@ fn embed_source<'a>(topic: Option<&'a Vec<Message>>, store: &'a MessagesStore) -
         Some(messages) => messages.as_slice(),
         None => store.viewport_messages(),
     }
+}
+
+/// The placeholder a `TextArea` for this field renders, `*` for required included.
+fn embed_input_placeholder(input: &EmbedTextInput) -> SharedString {
+    if input.required {
+        SharedString::from(format!("{}*", input.placeholder))
+    } else {
+        input.placeholder.clone()
+    }
+}
+
+fn embed_input_min_height(multiline: bool) -> Pixels {
+    if multiline { px(72.) } else { px(36.) }
+}
+
+/// Identity of every embed form field in `messages`: the key the entities and
+/// the store are indexed by, plus a hash of the field's definition.
+///
+/// The hash carries what a rebuild depends on — kind, and for text inputs the
+/// placeholder/default/flags — so a bot editing one message through wizard
+/// steps is detected even when the new step reuses the previous field id. It
+/// deliberately leaves out what the user can change (the typed value), so an
+/// unrelated edit of the same message never wipes what they are typing.
+fn collect_embed_field_specs(messages: &[Message]) -> Vec<((MessageId, SharedString), u64)> {
+    fn spec(kind: u8, hash_fields: impl FnOnce(&mut DefaultHasher)) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        kind.hash(&mut hasher);
+        hash_fields(&mut hasher);
+        hasher.finish()
+    }
+
+    messages
+        .iter()
+        .flat_map(|message| {
+            let message_id = message.id;
+            message.embeds.iter().flat_map(move |embed| {
+                embed.fields.iter().filter_map(move |field| {
+                    let (id, spec) = match field.input.as_ref()? {
+                        EmbedInput::Text(input) => (
+                            input.id.clone(),
+                            spec(0, |hasher| {
+                                input.placeholder.hash(hasher);
+                                input.default_value.hash(hasher);
+                                input.multiline.hash(hasher);
+                                input.required.hash(hasher);
+                                input.disabled.hash(hasher);
+                                input.numeric.hash(hasher);
+                            }),
+                        ),
+                        EmbedInput::Select(select) => (
+                            select.id.clone()?,
+                            spec(1, |hasher| {
+                                select.value_selected.hash(hasher);
+                                for option in &select.options {
+                                    option.value.hash(hasher);
+                                    option.default.hash(hasher);
+                                }
+                            }),
+                        ),
+                        EmbedInput::DatePicker(picker) => (
+                            picker.id.clone(),
+                            spec(2, |hasher| picker.value.hash(hasher)),
+                        ),
+                        EmbedInput::Radio(radio) => (
+                            radio.id.clone(),
+                            spec(3, |hasher| {
+                                radio.max_options.hash(hasher);
+                                for option in &radio.options {
+                                    option.value.hash(hasher);
+                                    option.name.hash(hasher);
+                                }
+                            }),
+                        ),
+                        // Not a form field, but its presence still has to reach
+                        // the reconcile so the sprite atlas gets fetched.
+                        EmbedInput::Animation(animation) => (
+                            animation.id.clone(),
+                            spec(4, |hasher| animation.url_position.hash(hasher)),
+                        ),
+                    };
+                    Some(((message_id, id), spec))
+                })
+            })
+        })
+        .collect()
 }
 
 impl EventEmitter<ChannelMessagesEvent> for ChannelMessages {}
