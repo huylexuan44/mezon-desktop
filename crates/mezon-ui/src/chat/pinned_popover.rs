@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,12 +26,13 @@ use crate::chat::message::parts::{
     resolve_pin_sender_label_with_message,
 };
 use crate::chat::message::selection::{
-    MessageSelectionState, SelPoint, SharedSelection, merge_selection_background, word_range,
+    MessageSelectionState, SelPoint, SelectableRegion, SharedSelection, TextSegment,
+    merge_selection_background, word_range,
 };
 use crate::chat::message::{
-    ConfirmUnpinMessageModal, SELECTION_BG, open_message_link, pin_link_element,
-    render_ogp_preview, render_pin_rich_layout_element, render_poll_card_readonly,
-    resolve_message_link_url,
+    ConfirmUnpinMessageModal, SELECTION_BG, code_block_copy_overlay, heading_line_height,
+    heading_size, open_message_link, pin_link_element, render_ogp_preview,
+    render_pin_rich_layout_element, render_poll_card_readonly, resolve_message_link_url,
 };
 use crate::components::primitives::text_actions::Copy;
 use crate::components::primitives::{
@@ -88,7 +90,7 @@ impl PinCardVm {
         let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(msg, clan_id, channel_id, cx);
         let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
         let text_spans = prepare_pin_text_spans(msg);
-        let selectable_text = pin_selectable_text(msg, &text_spans, cx);
+        let selectable_text = pin_canonical_text(msg, &text_spans);
         Self {
             pin_id: msg.id.clone().into(),
             message_id: msg.message_id.clone().into(),
@@ -136,7 +138,7 @@ pub(crate) fn render_pinned_message_preview(
     ogp_cache: Entity<LruImageCache>,
 ) -> gpui::AnyElement {
     let text_spans = prepare_pin_text_spans(pin);
-    let selectable_text = pin_spans_plain_text(&text_spans);
+    let selectable_text = pin_canonical_text(pin, &text_spans);
     let poll = pin.poll.as_deref().map(|poll| (poll, &[] as &[i32]));
     render_pin_body(
         pin,
@@ -312,12 +314,41 @@ impl PinnedPopoverPanel {
 
     fn pin_point_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<SelPoint> {
         let state = self.selection.borrow();
-        state.registry.iter().find_map(|(id, layout)| {
-            text_layout_offset_at(layout, position).map(|offset| SelPoint {
-                message_id: *id,
-                offset,
+        state
+            .registry
+            .iter()
+            .find_map(|(id, layout)| {
+                text_layout_offset_at(layout, position).map(|offset| SelPoint {
+                    message_id: *id,
+                    offset,
+                })
             })
-        })
+            .or_else(|| {
+                state.segment_registry.iter().find_map(|(id, entry)| {
+                    entry.segments.iter().find_map(|segment| {
+                        segment.offset_at(position).map(|offset| SelPoint {
+                            message_id: *id,
+                            offset,
+                        })
+                    })
+                })
+            })
+            .or_else(|| {
+                state.segment_registry.iter().find_map(|(id, entry)| {
+                    let mut best: Option<(gpui::Pixels, usize)> = None;
+                    for segment in &entry.segments {
+                        if let Some((distance, offset)) = segment.snapped_offset(position) {
+                            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+                                best = Some((distance, offset));
+                            }
+                        }
+                    }
+                    best.map(|(_, offset)| SelPoint {
+                        message_id: *id,
+                        offset,
+                    })
+                })
+            })
     }
 
     fn selectable_text_for(&self, message_id: MessageId) -> SharedString {
@@ -429,9 +460,15 @@ impl PinnedPopoverPanel {
                     continue;
                 }
                 let full = state
-                    .registry
+                    .segment_registry
                     .get(&message_id)
-                    .and_then(TextLayout::try_text)
+                    .map(|entry| entry.text.to_string())
+                    .or_else(|| {
+                        state
+                            .registry
+                            .get(&message_id)
+                            .and_then(TextLayout::try_text)
+                    })
                     .unwrap_or_else(|| vm.selectable_text.to_string());
                 let Some(range) = state.range_for_message(message_id, &full) else {
                     continue;
@@ -1032,7 +1069,6 @@ fn pin_card(
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .cursor_text()
                 .child(name_row)
                 .child(content),
         )
@@ -1246,9 +1282,9 @@ fn pin_is_http_url(text: &str) -> bool {
     text.starts_with("http://") || text.starts_with("https://")
 }
 
-fn pin_selectable_text(pin: &PinnedMessage, spans: &[MessageSpan], _cx: &App) -> SharedString {
+fn pin_canonical_text(pin: &PinnedMessage, spans: &[MessageSpan]) -> SharedString {
     if !spans.is_empty() {
-        return pin_spans_plain_text(spans);
+        return pin_spans_canonical_text(spans);
     }
     if let Some(layout) = pin.rich_layout.as_ref()
         && !layout.text.is_empty()
@@ -1258,7 +1294,7 @@ fn pin_selectable_text(pin: &PinnedMessage, spans: &[MessageSpan], _cx: &App) ->
     SharedString::from(pin.content.clone())
 }
 
-fn pin_spans_plain_text(spans: &[MessageSpan]) -> SharedString {
+fn pin_spans_canonical_text(spans: &[MessageSpan]) -> SharedString {
     let mut text = String::new();
     for span in spans {
         match span {
@@ -1277,94 +1313,45 @@ fn pin_spans_plain_text(spans: &[MessageSpan]) -> SharedString {
     SharedString::from(text)
 }
 
-fn pin_span_highlights(
-    spans: &[MessageSpan],
-    theme: &Theme,
-) -> (
-    SharedString,
-    Vec<(Range<usize>, HighlightStyle)>,
-    Vec<(Range<usize>, String)>,
-) {
-    let mut text = String::new();
-    let mut highlights = Vec::new();
-    let mut links = Vec::new();
-    let mention_bg: gpui::Hsla = theme.tokens.mention_primary.into();
-    let mention_color: gpui::Hsla = theme.tokens.mention_color.into();
-    let code_bg: gpui::Hsla = theme.tokens.bg_markdown_code.into();
-    let link_color: gpui::Hsla = theme.tokens.mention_color.into();
-
-    for span in spans {
-        match span {
-            MessageSpan::Text(value)
-            | MessageSpan::Emoji { name: value, .. }
-            | MessageSpan::Canvas { title: value, .. } => {
-                text.push_str(value);
-            }
-            MessageSpan::Bold(value) | MessageSpan::Heading { text: value, .. } => {
-                let start = text.len();
-                text.push_str(value);
-                highlights.push((
-                    start..text.len(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::BOLD),
-                        ..Default::default()
-                    },
-                ));
-            }
-            MessageSpan::Code(value) | MessageSpan::CodeBlock { text: value, .. } => {
-                let start = text.len();
-                text.push_str(value);
-                highlights.push((
-                    start..text.len(),
-                    HighlightStyle {
-                        background_color: Some(code_bg),
-                        ..Default::default()
-                    },
-                ));
-            }
-            MessageSpan::Link {
-                text: value, url, ..
-            } => {
-                let start = text.len();
-                text.push_str(value);
-                let range = start..text.len();
-                highlights.push((
-                    range.clone(),
-                    HighlightStyle {
-                        color: Some(link_color),
-                        underline: Some(UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(link_color),
-                            wavy: false,
-                        }),
-                        ..Default::default()
-                    },
-                ));
-                links.push((range, resolve_message_link_url(url, value)));
-            }
-            MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
-                let start = text.len();
-                text.push_str(display);
-                highlights.push((
-                    start..text.len(),
-                    HighlightStyle {
-                        color: Some(mention_color),
-                        background_color: Some(mention_bg),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
-    }
-    (SharedString::from(text), highlights, links)
+fn pin_inline_row() -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .max_w_full()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+        .gap_x(px(4.))
 }
 
-fn register_pin_text_layout(
-    message_id: &str,
-    text: &SharedString,
-    layout: TextLayout,
-    selection: &SharedSelection,
+fn pin_selectable_segment(text: &str, base: usize, selected: Option<&Range<usize>>) -> StyledText {
+    let Some(selected) = selected else {
+        return StyledText::new(text.to_string());
+    };
+    let start = selected.start.max(base);
+    let end = selected.end.min(base + text.len());
+    if start >= end {
+        return StyledText::new(text.to_string());
+    }
+    StyledText::new(text.to_string()).with_highlights(merge_selection_background(
+        &[],
+        start - base..end - base,
+        rgba(SELECTION_BG).into(),
+    ))
+}
+
+fn push_pin_text_segment(
+    segments: &mut Option<Vec<TextSegment>>,
+    styled: &StyledText,
+    range: Range<usize>,
 ) {
+    if let Some(segments) = segments {
+        segments.push(TextSegment::text(styled.layout().clone(), range));
+    }
+}
+
+fn register_pin_text_layout(message_id: &str, layout: TextLayout, selection: &SharedSelection) {
     let Ok(message_id) = message_id.parse::<MessageId>() else {
         return;
     };
@@ -1374,7 +1361,14 @@ fn register_pin_text_layout(
         let next = state.order_map.len();
         state.order_map.insert(message_id, next);
     }
-    let _ = text;
+}
+
+fn ensure_pin_order(message_id: MessageId, selection: &SharedSelection) {
+    let mut state = selection.borrow_mut();
+    if !state.order_map.contains_key(&message_id) {
+        let next = state.order_map.len();
+        state.order_map.insert(message_id, next);
+    }
 }
 
 fn render_pin_selectable_styled(
@@ -1403,7 +1397,7 @@ fn render_pin_selectable_styled(
     };
 
     if let Some(selection) = &selection {
-        register_pin_text_layout(message_id, &text, styled.layout().clone(), selection);
+        register_pin_text_layout(message_id, styled.layout().clone(), selection);
     }
 
     let content = if links.is_empty() {
@@ -1445,13 +1439,307 @@ fn render_pin_selectable_styled(
 
 fn render_pin_spans(
     spans: &[MessageSpan],
-    _selectable_text: &SharedString,
+    selectable_text: &SharedString,
     message_id: &str,
     theme: &Theme,
     selection: Option<SharedSelection>,
 ) -> gpui::AnyElement {
-    let (text, highlights, links) = pin_span_highlights(spans, theme);
-    render_pin_selectable_styled(text, highlights, links, message_id, theme, selection)
+    let link_color = theme.tokens.mention_color;
+    let mention_bg = theme.tokens.mention_primary;
+    let mention_color = theme.tokens.mention_color;
+    let code_bg = theme.tokens.bg_markdown_code;
+    let body_color = theme.tokens.text_theme_message;
+    let msg_id = message_id.parse::<MessageId>().ok();
+    let selected = selection.as_ref().and_then(|state| {
+        let message_id = msg_id?;
+        state
+            .borrow()
+            .range_for_message(message_id, selectable_text)
+    });
+    let mut segments = selection.as_ref().zip(msg_id).map(|(state, message_id)| {
+        ensure_pin_order(message_id, state);
+        state
+            .borrow_mut()
+            .take_segment_buffer(message_id, selectable_text.clone())
+    });
+
+    let mut col = v_flex().w_full().min_w_0().max_w_full().cursor_text();
+    let mut row = pin_inline_row();
+    let mut has_inline = false;
+    let mut link_key = 0usize;
+    let mut code_key = 0usize;
+    let mut base = 0usize;
+
+    for span in spans {
+        match span {
+            MessageSpan::Text(text) => {
+                let mut line_base = 0usize;
+                for (line_index, line) in text.split('\n').enumerate() {
+                    if line_index > 0 {
+                        if has_inline {
+                            col = col.child(row);
+                            row = pin_inline_row();
+                            has_inline = false;
+                        } else if line.is_empty() {
+                            col = col.child(div().w_full().h(px(8.)));
+                            line_base += 1;
+                            continue;
+                        }
+                        line_base += 1;
+                    }
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let start = base + line_base;
+                    let end = start + line.len();
+                    if pin_is_http_url(line) {
+                        let styled = pin_selectable_segment(line, start, selected.as_ref());
+                        push_pin_text_segment(&mut segments, &styled, start..end);
+                        let url = line.to_string();
+                        let selection_gate = selection.clone();
+                        let key = link_key;
+                        link_key += 1;
+                        col = col.child(
+                            div()
+                                .id(("pin-bare-url", key))
+                                .w_full()
+                                .min_w_0()
+                                .cursor_pointer()
+                                .text_sm()
+                                .line_height(rems(1.25))
+                                .text_color(link_color)
+                                .on_click(move |_, _, cx| {
+                                    if selection_gate
+                                        .as_ref()
+                                        .is_some_and(|state| state.borrow().has_selection())
+                                    {
+                                        return;
+                                    }
+                                    open_message_link(url.clone(), cx);
+                                })
+                                .child(styled),
+                        );
+                    } else if has_inline {
+                        let styled = pin_selectable_segment(line, start, selected.as_ref());
+                        push_pin_text_segment(&mut segments, &styled, start..end);
+                        row = row.child(
+                            div()
+                                .text_sm()
+                                .line_height(rems(1.25))
+                                .text_color(body_color)
+                                .child(styled),
+                        );
+                    } else {
+                        let styled = pin_selectable_segment(line, start, selected.as_ref());
+                        push_pin_text_segment(&mut segments, &styled, start..end);
+                        col = col.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_sm()
+                                .line_height(rems(1.25))
+                                .text_color(body_color)
+                                .child(styled),
+                        );
+                    }
+                    line_base += line.len();
+                }
+                base += text.len();
+            }
+            MessageSpan::Bold(text) => {
+                has_inline = true;
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(body_color)
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::Code(text) => {
+                has_inline = true;
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .px_1()
+                        .rounded_sm()
+                        .bg(code_bg)
+                        .text_color(body_color)
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::Link { text, url, .. } => {
+                has_inline = true;
+                let resolved = resolve_message_link_url(url, text);
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                let selection_gate = selection.clone();
+                let target = resolved.clone();
+                let key = link_key;
+                link_key += 1;
+                row = row.child(
+                    div()
+                        .id(("pin-span-link", key))
+                        .cursor_pointer()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .text_color(link_color)
+                        .on_click(move |_, _, cx| {
+                            if selection_gate
+                                .as_ref()
+                                .is_some_and(|state| state.borrow().has_selection())
+                            {
+                                return;
+                            }
+                            open_message_link(target.clone(), cx);
+                        })
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
+                has_inline = true;
+                let end = base + display.len();
+                let is_selected = selected
+                    .as_ref()
+                    .is_some_and(|range| range.start < end && range.end > base);
+                let styled = pin_selectable_segment(display, base, selected.as_ref());
+                let chip = div()
+                    .text_sm()
+                    .line_height(rems(1.25))
+                    .px_1()
+                    .rounded_sm()
+                    .bg(mention_bg)
+                    .text_color(mention_color)
+                    .child(styled);
+                if let Some(segments) = segments.as_mut() {
+                    let bounds = Rc::new(Cell::new(None));
+                    segments.push(TextSegment::bounded(base..end, bounds.clone()));
+                    row = row.child(SelectableRegion::new(
+                        chip.into_any_element(),
+                        bounds,
+                        is_selected.then(|| rgba(SELECTION_BG)),
+                    ));
+                } else {
+                    row = row.child(chip);
+                }
+                base = end;
+            }
+            MessageSpan::Emoji { name, .. } => {
+                has_inline = true;
+                let end = base + name.len();
+                let styled = pin_selectable_segment(name, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .text_color(body_color)
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::Canvas { title, .. } => {
+                has_inline = true;
+                let end = base + title.len();
+                let styled = pin_selectable_segment(title, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(link_color)
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::Heading { level, text } => {
+                if has_inline {
+                    col = col.child(row);
+                    row = pin_inline_row();
+                    has_inline = false;
+                }
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                col = col.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .max_w_full()
+                        .overflow_hidden()
+                        .my(px(2.))
+                        .text_size(heading_size(*level))
+                        .line_height(heading_line_height(*level))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(body_color)
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::CodeBlock {
+                text,
+                fenced_source,
+                ..
+            } => {
+                if has_inline {
+                    col = col.child(row);
+                    row = pin_inline_row();
+                    has_inline = false;
+                }
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                let copy_id = SharedString::from(format!("pin-code-copy-{message_id}-{code_key}"));
+                code_key += 1;
+                col = col.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .max_w_full()
+                        .overflow_hidden()
+                        .mt(px(4.))
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.tokens.border_primary)
+                        .bg(code_bg)
+                        .text_size(px(14.))
+                        .text_color(body_color)
+                        .child(styled)
+                        .child(code_block_copy_overlay(
+                            copy_id,
+                            fenced_source.clone(),
+                            theme,
+                        )),
+                );
+                base = end;
+            }
+        }
+    }
+    if has_inline {
+        col = col.child(row);
+    }
+    if let (Some(selection), Some(message_id), Some(segments)) =
+        (selection.as_ref(), msg_id, segments)
+    {
+        selection
+            .borrow_mut()
+            .store_segment_buffer(message_id, selectable_text.clone(), segments);
+    }
+    col.into_any_element()
 }
 
 fn render_pin_plain_selectable(
@@ -1535,6 +1823,7 @@ fn render_pin_image_attachment(
         .map(UserId)
         .unwrap_or(UserId(0));
     let image_id = SharedString::from(format!("pin-image-{}", att.url));
+    let can_open = settings.is_some();
 
     div()
         .id(image_id)
@@ -1544,7 +1833,7 @@ fn render_pin_image_attachment(
         .flex_shrink_0()
         .overflow_hidden()
         .rounded(px(4.))
-        .cursor_pointer()
+        .when(can_open, |el| el.cursor_pointer())
         .child(
             img(src)
                 .image_cache(&image_cache)
@@ -1552,20 +1841,22 @@ fn render_pin_image_attachment(
                 .h_full()
                 .object_fit(ObjectFit::Cover),
         )
-        .on_click(move |_: &ClickEvent, window, cx| {
-            cx.stop_propagation();
-            let Some(settings) = settings.clone().or_else(|| Settings::try_global(cx)) else {
-                return;
-            };
-            open_viewer_from_message(
-                &settings,
-                seed.clone(),
-                message_id,
-                create_time,
-                uploader_id,
-                window,
-                cx,
-            );
+        .when(can_open, |el| {
+            el.on_click(move |_: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                let Some(settings) = settings.clone() else {
+                    return;
+                };
+                open_viewer_from_message(
+                    &settings,
+                    seed.clone(),
+                    message_id,
+                    create_time,
+                    uploader_id,
+                    window,
+                    cx,
+                );
+            })
         })
         .into_any_element()
 }
