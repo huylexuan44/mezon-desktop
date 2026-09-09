@@ -3017,26 +3017,41 @@ impl ChannelMessages {
 
     fn apply_embed_input_reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = self.topic_embed_source();
-        let specs: Vec<((MessageId, SharedString), u64)> = {
+        // This runs from `render` on every frame that is not scrolling, so the
+        // early-out walks the fields and hashes them without allocating; the
+        // specs are only materialised once the hash says something changed.
+        let fingerprint = {
             let store = MessagesStore::global(cx);
             let store = store.read(cx);
-            collect_embed_field_specs(embed_source(source.as_deref(), store))
-        };
-
-        let fingerprint = {
             let mut hasher = DefaultHasher::new();
             self.cached_for_channel.hash(&mut hasher);
-            for ((message_id, field_id), spec) in &specs {
-                message_id.hash(&mut hasher);
-                field_id.hash(&mut hasher);
-                spec.hash(&mut hasher);
-            }
+            for_each_embed_field_spec(
+                embed_source(source.as_deref(), store),
+                |message_id, field_id, spec| {
+                    message_id.hash(&mut hasher);
+                    field_id.hash(&mut hasher);
+                    spec.hash(&mut hasher);
+                },
+            );
             hasher.finish()
         };
         if self.embed_input_fingerprint == Some(fingerprint) {
             return;
         }
         self.embed_input_fingerprint = Some(fingerprint);
+
+        let specs: Vec<((MessageId, SharedString), u64)> = {
+            let store = MessagesStore::global(cx);
+            let store = store.read(cx);
+            let mut specs = Vec::new();
+            for_each_embed_field_spec(
+                embed_source(source.as_deref(), store),
+                |message_id, field_id, spec| {
+                    specs.push(((message_id, field_id.clone()), spec));
+                },
+            );
+            specs
+        };
 
         // What earlier steps of a wizard collected is deliberately KEPT: the form
         // state belongs to the message, and the submit is expected to carry every
@@ -5023,15 +5038,21 @@ fn embed_input_min_height(multiline: bool) -> Pixels {
     if multiline { px(72.) } else { px(36.) }
 }
 
-/// Identity of every embed form field in `messages`: the key the entities and
-/// the store are indexed by, plus a hash of the field's definition.
+/// Visits the identity of every embed form field in `messages`: the key the
+/// entities and the store are indexed by, plus a hash of the field's definition.
 ///
 /// The hash carries what a rebuild depends on — kind, and for text inputs the
-/// placeholder/default/flags — so a bot editing one message through wizard
-/// steps is detected even when the new step reuses the previous field id. It
+/// placeholder/default/flags — so a bot editing one message through wizard steps
+/// is detected even when the new step reuses the previous field id. It
 /// deliberately leaves out what the user can change (the typed value), so an
 /// unrelated edit of the same message never wipes what they are typing.
-fn collect_embed_field_specs(messages: &[Message]) -> Vec<((MessageId, SharedString), u64)> {
+///
+/// A visitor rather than a `Vec` because the reconcile's per-frame early-out
+/// hashes these without needing to keep them.
+fn for_each_embed_field_spec(
+    messages: &[Message],
+    mut visit: impl FnMut(MessageId, &SharedString, u64),
+) {
     fn spec(kind: u8, hash_fields: impl FnOnce(&mut DefaultHasher)) -> u64 {
         let mut hasher = DefaultHasher::new();
         kind.hash(&mut hasher);
@@ -5039,26 +5060,32 @@ fn collect_embed_field_specs(messages: &[Message]) -> Vec<((MessageId, SharedStr
         hasher.finish()
     }
 
-    messages
-        .iter()
-        .flat_map(|message| {
-            let message_id = message.id;
-            message.embeds.iter().flat_map(move |embed| {
-                embed.fields.iter().filter_map(move |field| {
-                    let (id, spec) = match field.input.as_ref()? {
-                        EmbedInput::Text(input) => (
-                            input.id.clone(),
-                            spec(0, |hasher| {
-                                input.placeholder.hash(hasher);
-                                input.default_value.hash(hasher);
-                                input.multiline.hash(hasher);
-                                input.required.hash(hasher);
-                                input.disabled.hash(hasher);
-                                input.numeric.hash(hasher);
-                            }),
-                        ),
-                        EmbedInput::Select(select) => (
-                            select.id.clone()?,
+    for message in messages {
+        for embed in message.embeds.iter() {
+            for field in embed.fields.iter() {
+                let Some(input) = field.input.as_ref() else {
+                    continue;
+                };
+                match input {
+                    EmbedInput::Text(input) => visit(
+                        message.id,
+                        &input.id,
+                        spec(0, |hasher| {
+                            input.placeholder.hash(hasher);
+                            input.default_value.hash(hasher);
+                            input.multiline.hash(hasher);
+                            input.required.hash(hasher);
+                            input.disabled.hash(hasher);
+                            input.numeric.hash(hasher);
+                        }),
+                    ),
+                    EmbedInput::Select(select) => {
+                        let Some(id) = select.id.as_ref() else {
+                            continue;
+                        };
+                        visit(
+                            message.id,
+                            id,
                             spec(1, |hasher| {
                                 select.value_selected.hash(hasher);
                                 for option in &select.options {
@@ -5066,33 +5093,35 @@ fn collect_embed_field_specs(messages: &[Message]) -> Vec<((MessageId, SharedStr
                                     option.default.hash(hasher);
                                 }
                             }),
-                        ),
-                        EmbedInput::DatePicker(picker) => (
-                            picker.id.clone(),
-                            spec(2, |hasher| picker.value.hash(hasher)),
-                        ),
-                        EmbedInput::Radio(radio) => (
-                            radio.id.clone(),
-                            spec(3, |hasher| {
-                                radio.max_options.hash(hasher);
-                                for option in &radio.options {
-                                    option.value.hash(hasher);
-                                    option.name.hash(hasher);
-                                }
-                            }),
-                        ),
-                        // Not a form field, but its presence still has to reach
-                        // the reconcile so the sprite atlas gets fetched.
-                        EmbedInput::Animation(animation) => (
-                            animation.id.clone(),
-                            spec(4, |hasher| animation.url_position.hash(hasher)),
-                        ),
-                    };
-                    Some(((message_id, id), spec))
-                })
-            })
-        })
-        .collect()
+                        );
+                    }
+                    EmbedInput::DatePicker(picker) => visit(
+                        message.id,
+                        &picker.id,
+                        spec(2, |hasher| picker.value.hash(hasher)),
+                    ),
+                    EmbedInput::Radio(radio) => visit(
+                        message.id,
+                        &radio.id,
+                        spec(3, |hasher| {
+                            radio.max_options.hash(hasher);
+                            for option in &radio.options {
+                                option.value.hash(hasher);
+                                option.name.hash(hasher);
+                            }
+                        }),
+                    ),
+                    // Not a form field, but its presence still has to reach the
+                    // reconcile so the sprite atlas gets fetched.
+                    EmbedInput::Animation(animation) => visit(
+                        message.id,
+                        &animation.id,
+                        spec(4, |hasher| animation.url_position.hash(hasher)),
+                    ),
+                }
+            }
+        }
+    }
 }
 
 impl EventEmitter<ChannelMessagesEvent> for ChannelMessages {}

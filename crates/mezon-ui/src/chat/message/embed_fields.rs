@@ -230,7 +230,11 @@ fn render_embed_text_input(
                     .h(px(height))
                     .w_full()
                     .flex()
-                    .items_center()
+                    // A `TextArea` lays its first line out at the top with py(8),
+                    // so only a one-line box centres; a textarea must not shift
+                    // its text on the swap either.
+                    .when(input.multiline, |el| el.items_start().py(px(8.)))
+                    .when(!input.multiline, |el| el.items_center())
                     .px_3()
                     .rounded(px(4.))
                     .bg(ctx.theme.tokens.bg_markdown_code)
