@@ -3434,6 +3434,8 @@ impl ChannelList {
                 let id = ChannelId(e.channel_id);
                 let label = (!e.channel_label.is_empty()).then_some(e.channel_label.clone());
                 let topic = (!e.topic.is_empty()).then_some(e.topic.clone());
+                let carries_full_channel_state = e.channel_type != 0;
+                let age_restricted = carries_full_channel_state.then_some(e.age_restricted);
                 let mut changed = false;
                 for cats in self.cache.values_mut() {
                     if update_channel(
@@ -3441,7 +3443,7 @@ impl ChannelList {
                         id,
                         label.clone(),
                         topic.clone(),
-                        None,
+                        age_restricted,
                         e.channel_private,
                     ) {
                         changed = true;
@@ -6728,6 +6730,112 @@ mod tests {
             c[0].channels[0].age_restricted, 1,
             "an update that says nothing about the age gate must not clear it"
         );
+    }
+
+    fn channel_updated_event(channel_id: i64, age_restricted: i32) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            channel_type: 1,
+            age_restricted,
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    fn voice_creation_channel_updated_event(channel_id: i64) -> RealtimeEvent {
+        RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+            clan_id: 1,
+            channel_id,
+            channel_label: "normal".into(),
+            status: 1,
+            ..Default::default()
+        })
+    }
+
+    fn age_restricted_of(channels: &ChannelList, channel_id: i64) -> i32 {
+        channels
+            .channel(ClanId(1), ChannelId(channel_id))
+            .expect("channel in clan")
+            .age_restricted
+    }
+
+    #[gpui::test]
+    fn a_remote_age_restricted_change_reaches_the_channel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                assert_eq!(age_restricted_of(channels, 1), 0);
+
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+                assert_eq!(
+                    age_restricted_of(channels, 1),
+                    1,
+                    "an admin turning the flag on elsewhere must reach the age gate now, \
+                     not only after the next full fetch"
+                );
+
+                channels.handle_event(&channel_updated_event(1, 0), cx);
+                assert_eq!(age_restricted_of(channels, 1), 0, "and turning it back off");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_partial_channel_update_leaves_the_age_restricted_flag_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+
+                channels.handle_event(&voice_creation_channel_updated_event(1), cx);
+                assert_eq!(
+                    age_restricted_of(channels, 1),
+                    1,
+                    "an event with no channel type carries no flag, so its zero means \
+                     absent, not off"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_remote_rename_still_carries_topic_privacy_and_the_age_gate(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.handle_event(&channel_updated_event(1, 1), cx);
+
+                channels.handle_event(
+                    &RealtimeEvent::ChannelUpdated(mezon_proto::realtime::ChannelUpdatedEvent {
+                        clan_id: 1,
+                        channel_id: 1,
+                        channel_label: "renamed".into(),
+                        channel_type: 1,
+                        topic: "new topic".into(),
+                        channel_private: true,
+                        age_restricted: 1,
+                        status: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+
+                let channel = channels
+                    .channel(ClanId(1), ChannelId(1))
+                    .expect("channel in clan");
+                assert_eq!(channel.name, "renamed");
+                assert_eq!(channel.topic, "new topic");
+                assert!(channel.private);
+                assert_eq!(channel.age_restricted, 1);
+            });
+        });
     }
 
     #[test]
