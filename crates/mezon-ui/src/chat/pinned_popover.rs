@@ -335,12 +335,18 @@ impl PinnedPopoverPanel {
             })
             .or_else(|| {
                 state.segment_registry.iter().find_map(|(id, entry)| {
+                    let Some((top, bottom)) = entry.vertical_bounds() else {
+                        return None;
+                    };
+                    if position.y < top || position.y > bottom {
+                        return None;
+                    }
                     let mut best: Option<(gpui::Pixels, usize)> = None;
                     for segment in &entry.segments {
-                        if let Some((distance, offset)) = segment.snapped_offset(position) {
-                            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
-                                best = Some((distance, offset));
-                            }
+                        if let Some((distance, offset)) = segment.snapped_offset(position)
+                            && best.is_none_or(|(best_distance, _)| distance < best_distance)
+                        {
+                            best = Some((distance, offset));
                         }
                     }
                     best.map(|(_, offset)| SelPoint {
@@ -348,6 +354,39 @@ impl PinnedPopoverPanel {
                         offset,
                     })
                 })
+            })
+            .or_else(|| {
+                let mut best: Option<(gpui::Pixels, SelPoint)> = None;
+                let mut consider =
+                    |id: MessageId, top: gpui::Pixels, bottom: gpui::Pixels, end: usize| {
+                        let (dy, offset) = if position.y < top {
+                            (top - position.y, 0usize)
+                        } else if position.y > bottom {
+                            (position.y - bottom, end)
+                        } else {
+                            return;
+                        };
+                        if best.as_ref().is_none_or(|(best_dy, _)| dy < *best_dy) {
+                            best = Some((
+                                dy,
+                                SelPoint {
+                                    message_id: id,
+                                    offset,
+                                },
+                            ));
+                        }
+                    };
+                for (id, layout) in &state.registry {
+                    if let (Some(bounds), Some(len)) = (layout.try_bounds(), layout.try_len()) {
+                        consider(*id, bounds.top(), bounds.bottom(), len);
+                    }
+                }
+                for (id, entry) in &state.segment_registry {
+                    if let Some((top, bottom)) = entry.vertical_bounds() {
+                        consider(*id, top, bottom, entry.text.len());
+                    }
+                }
+                best.map(|(_, point)| point)
             })
     }
 
@@ -1104,7 +1143,15 @@ fn render_pin_body(
         .attachments
         .iter()
         .find(|att| pin_image_attachment_has_src(att))
-        .map(|att| render_pin_image_attachment(att, pin, image_cache.clone(), settings.clone()));
+        .map(|att| {
+            render_pin_image_attachment(
+                att,
+                pin,
+                image_cache.clone(),
+                settings.clone(),
+                selection.clone(),
+            )
+        });
     let file_preview = pin
         .attachments
         .iter()
@@ -1325,6 +1372,149 @@ fn pin_inline_row() -> gpui::Div {
         .gap_x(px(4.))
 }
 
+fn pin_selectable_text_chunks(line: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut start = 0usize;
+    std::iter::from_fn(move || {
+        if start >= line.len() {
+            return None;
+        }
+
+        let mut has_non_whitespace = false;
+        let mut previous_was_whitespace = false;
+        for (relative_index, character) in line[start..].char_indices() {
+            let is_whitespace = character.is_whitespace();
+            if !is_whitespace && previous_was_whitespace && has_non_whitespace {
+                let end = start + relative_index;
+                let range = start..end;
+                start = end;
+                return Some(range);
+            }
+            has_non_whitespace |= !is_whitespace;
+            previous_was_whitespace = is_whitespace;
+        }
+
+        let range = start..line.len();
+        start = line.len();
+        Some(range)
+    })
+}
+
+fn pin_split_unbreakable(text: &str) -> Vec<String> {
+    const MAX_SEGMENT_LEN: usize = 32;
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        buf.push(ch);
+        if matches!(
+            ch,
+            '/' | '-' | '_' | '.' | '?' | '&' | '#' | '=' | '@' | ':'
+        ) || buf.chars().count() >= MAX_SEGMENT_LEN
+        {
+            parts.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        parts.push(buf);
+    }
+    parts
+}
+
+fn pin_push_inline_text_chunks(
+    mut row: gpui::Div,
+    line: &str,
+    start: usize,
+    selected: Option<&Range<usize>>,
+    segments: &mut Option<Vec<TextSegment>>,
+    body_color: gpui::Rgba,
+) -> gpui::Div {
+    for range in pin_selectable_text_chunks(line) {
+        let chunk = &line[range.clone()];
+        let trimmed = chunk.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if chunk.chars().any(char::is_whitespace) || trimmed.chars().count() <= 32 {
+            let chunk_start = start + range.start;
+            let chunk_end = start + range.end;
+            let styled = pin_selectable_segment(chunk, chunk_start, selected);
+            push_pin_text_segment(segments, &styled, chunk_start..chunk_end);
+            row = row.child(
+                div()
+                    .text_sm()
+                    .line_height(rems(1.25))
+                    .text_color(body_color)
+                    .child(styled),
+            );
+            continue;
+        }
+        let leading = chunk.len() - chunk.trim_start().len();
+        let mut part_offset = leading;
+        for part in pin_split_unbreakable(trimmed) {
+            let part_len = part.len();
+            let part_start = start + range.start + part_offset;
+            let part_end = part_start + part_len;
+            let styled = pin_selectable_segment(&part, part_start, selected);
+            push_pin_text_segment(segments, &styled, part_start..part_end);
+            row = row.child(
+                div()
+                    .text_sm()
+                    .line_height(rems(1.25))
+                    .text_color(body_color)
+                    .child(styled),
+            );
+            part_offset += part_len;
+        }
+    }
+    row
+}
+
+fn pin_wrap_selectable_link(
+    text: &str,
+    base: usize,
+    selected: Option<&Range<usize>>,
+    segments: &mut Option<Vec<TextSegment>>,
+    url: String,
+    selection_gate: Option<SharedSelection>,
+    link_key: usize,
+    link_color: gpui::Rgba,
+    full_width: bool,
+) -> gpui::AnyElement {
+    let mut row = div()
+        .id(("pin-wrap-link", link_key))
+        .min_w_0()
+        .max_w_full()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_baseline()
+        .cursor_pointer()
+        .text_sm()
+        .line_height(rems(1.25))
+        .text_color(link_color)
+        .on_click(move |_, _, cx| {
+            if selection_gate
+                .as_ref()
+                .is_some_and(|state| state.borrow().has_selection())
+            {
+                return;
+            }
+            open_message_link(url.clone(), cx);
+        });
+    if full_width {
+        row = row.w_full();
+    }
+    let mut part_base = 0usize;
+    for part in pin_split_unbreakable(text) {
+        let part_start = base + part_base;
+        let part_end = part_start + part.len();
+        let styled = pin_selectable_segment(&part, part_start, selected);
+        push_pin_text_segment(segments, &styled, part_start..part_end);
+        row = row.child(styled);
+        part_base += part.len();
+    }
+    row.into_any_element()
+}
+
 fn pin_selectable_segment(text: &str, base: usize, selected: Option<&Range<usize>>) -> StyledText {
     let Some(selected) = selected else {
         return StyledText::new(text.to_string());
@@ -1493,41 +1683,34 @@ fn render_pin_spans(
                     let start = base + line_base;
                     let end = start + line.len();
                     if pin_is_http_url(line) {
-                        let styled = pin_selectable_segment(line, start, selected.as_ref());
-                        push_pin_text_segment(&mut segments, &styled, start..end);
+                        if has_inline {
+                            col = col.child(row);
+                            row = pin_inline_row();
+                            has_inline = false;
+                        }
                         let url = line.to_string();
                         let selection_gate = selection.clone();
                         let key = link_key;
                         link_key += 1;
-                        col = col.child(
-                            div()
-                                .id(("pin-bare-url", key))
-                                .w_full()
-                                .min_w_0()
-                                .cursor_pointer()
-                                .text_sm()
-                                .line_height(rems(1.25))
-                                .text_color(link_color)
-                                .on_click(move |_, _, cx| {
-                                    if selection_gate
-                                        .as_ref()
-                                        .is_some_and(|state| state.borrow().has_selection())
-                                    {
-                                        return;
-                                    }
-                                    open_message_link(url.clone(), cx);
-                                })
-                                .child(styled),
-                        );
+                        col = col.child(pin_wrap_selectable_link(
+                            line,
+                            start,
+                            selected.as_ref(),
+                            &mut segments,
+                            url,
+                            selection_gate,
+                            key,
+                            link_color,
+                            true,
+                        ));
                     } else if has_inline {
-                        let styled = pin_selectable_segment(line, start, selected.as_ref());
-                        push_pin_text_segment(&mut segments, &styled, start..end);
-                        row = row.child(
-                            div()
-                                .text_sm()
-                                .line_height(rems(1.25))
-                                .text_color(body_color)
-                                .child(styled),
+                        row = pin_push_inline_text_chunks(
+                            row,
+                            line,
+                            start,
+                            selected.as_ref(),
+                            &mut segments,
+                            body_color,
                         );
                     } else {
                         let styled = pin_selectable_segment(line, start, selected.as_ref());
@@ -1582,30 +1765,20 @@ fn render_pin_spans(
                 has_inline = true;
                 let resolved = resolve_message_link_url(url, text);
                 let end = base + text.len();
-                let styled = pin_selectable_segment(text, base, selected.as_ref());
-                push_pin_text_segment(&mut segments, &styled, base..end);
                 let selection_gate = selection.clone();
-                let target = resolved.clone();
                 let key = link_key;
                 link_key += 1;
-                row = row.child(
-                    div()
-                        .id(("pin-span-link", key))
-                        .cursor_pointer()
-                        .text_sm()
-                        .line_height(rems(1.25))
-                        .text_color(link_color)
-                        .on_click(move |_, _, cx| {
-                            if selection_gate
-                                .as_ref()
-                                .is_some_and(|state| state.borrow().has_selection())
-                            {
-                                return;
-                            }
-                            open_message_link(target.clone(), cx);
-                        })
-                        .child(styled),
-                );
+                row = row.child(pin_wrap_selectable_link(
+                    text,
+                    base,
+                    selected.as_ref(),
+                    &mut segments,
+                    resolved,
+                    selection_gate,
+                    key,
+                    link_color,
+                    false,
+                ));
                 base = end;
             }
             MessageSpan::Mention { display, .. } | MessageSpan::Hashtag { display, .. } => {
@@ -1614,7 +1787,7 @@ fn render_pin_spans(
                 let is_selected = selected
                     .as_ref()
                     .is_some_and(|range| range.start < end && range.end > base);
-                let styled = pin_selectable_segment(display, base, selected.as_ref());
+                let styled = pin_selectable_segment(display, base, None);
                 let chip = div()
                     .text_sm()
                     .line_height(rems(1.25))
@@ -1700,8 +1873,32 @@ fn render_pin_spans(
                     has_inline = false;
                 }
                 let end = base + text.len();
-                let styled = pin_selectable_segment(text, base, selected.as_ref());
-                push_pin_text_segment(&mut segments, &styled, base..end);
+                let mut code_col = v_flex().w_full().min_w_0().overflow_hidden();
+                let mut line_base = 0usize;
+                for (i, line) in text.split('\n').enumerate() {
+                    if i > 0 {
+                        line_base += 1;
+                    }
+                    if i > 0 && line.is_empty() {
+                        code_col = code_col.child(div().w_full().h(px(8.)));
+                        continue;
+                    }
+                    let start = base + line_base;
+                    let line_end = start + line.len();
+                    let styled = pin_selectable_segment(line, start, selected.as_ref());
+                    push_pin_text_segment(&mut segments, &styled, start..line_end);
+                    code_col = code_col.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_size(px(14.))
+                            .line_height(rems(1.25))
+                            .text_color(body_color)
+                            .child(styled),
+                    );
+                    line_base += line.len();
+                }
                 let copy_id = SharedString::from(format!("pin-code-copy-{message_id}-{code_key}"));
                 code_key += 1;
                 col = col.child(
@@ -1716,9 +1913,7 @@ fn render_pin_spans(
                         .border_1()
                         .border_color(theme.tokens.border_primary)
                         .bg(code_bg)
-                        .text_size(px(14.))
-                        .text_color(body_color)
-                        .child(styled)
+                        .child(code_col)
                         .child(code_block_copy_overlay(
                             copy_id,
                             fenced_source.clone(),
@@ -1807,6 +2002,7 @@ fn render_pin_image_attachment(
     pin: &PinnedMessage,
     image_cache: Entity<LruImageCache>,
     settings: Option<Entity<Settings>>,
+    selection: Option<SharedSelection>,
 ) -> gpui::AnyElement {
     let src = if att.proxied_src.is_empty() {
         SharedString::from(att.url.clone())
@@ -1844,6 +2040,12 @@ fn render_pin_image_attachment(
         .when(can_open, |el| {
             el.on_click(move |_: &ClickEvent, window, cx| {
                 cx.stop_propagation();
+                if selection
+                    .as_ref()
+                    .is_some_and(|state| state.borrow().has_selection())
+                {
+                    return;
+                }
                 let Some(settings) = settings.clone() else {
                     return;
                 };
