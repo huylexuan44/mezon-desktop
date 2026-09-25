@@ -30,9 +30,7 @@ use mezon_store::{
 use std::time::Duration;
 
 pub use attachments::build_pending;
-use attachments::{
-    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, mime_from_extension, validate_batch,
-};
+use attachments::{AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, validate_batch};
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
 use crate::app::shell::Shell;
@@ -716,7 +714,7 @@ impl MentionInput {
                     this.on_paste_images(images.clone(), window, cx)
                 }
                 MentionFieldEvent::PastePaths(paths) => {
-                    this.on_paste_paths(paths.clone(), window, cx)
+                    this.add_dropped_paths(paths.clone(), window, cx)
                 }
             },
         );
@@ -1300,14 +1298,6 @@ impl MentionInput {
                 .ok();
         })
         .detach();
-    }
-
-    fn on_paste_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let images: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|path| mime_from_extension(path).starts_with("image/"))
-            .collect();
-        self.add_dropped_paths(images, window, cx);
     }
 
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {

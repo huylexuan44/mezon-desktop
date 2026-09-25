@@ -11,7 +11,7 @@ use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
 
 use crate::linux::{
-    WaylandClientStatePtr,
+    FILE_LIST_MIME_TYPES, WaylandClientStatePtr, clipboard_item_from_file_list,
     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
 };
 use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
@@ -120,6 +120,16 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
+    // mezon vendor edit: the files a file manager copied, see `FILE_LIST_MIME_TYPES`.
+    fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
+        FILE_LIST_MIME_TYPES
+            .iter()
+            .filter(|mime_type| self.has_mime_type(mime_type))
+            .find_map(|mime_type| {
+                clipboard_item_from_file_list(&self.read_bytes(connection, mime_type)?)
+            })
+    }
+
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
         for format in ImageFormat::iter() {
             let mime_type = format.mime_type();
@@ -212,8 +222,10 @@ impl Clipboard {
             return self.contents.clone();
         }
 
+        // mezon vendor edit: a copied file list wins over the text it also offers.
         let item = offer
-            .read_text(&self.connection)
+            .read_files(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_read = Some(item.clone());

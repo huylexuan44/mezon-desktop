@@ -48,6 +48,8 @@ use x11rb::{
 };
 
 use gpui::{ClipboardItem, Image, ImageFormat, hash};
+
+use crate::linux::clipboard_item_from_file_list;
 use strum::IntoEnumIterator;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -78,7 +80,9 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // URI_LIST: b"text/uri-list",
+        // mezon vendor edit: file lists a file manager copies, see `FILE_LIST_MIME_TYPES`.
+        URI_LIST: b"text/uri-list",
+        GNOME_COPIED_FILES: b"x-special/gnome-copied-files",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
         JPEG_MIME: ImageFormat::mime_type(ImageFormat::Jpeg).as_bytes(),
@@ -1033,13 +1037,35 @@ impl Clipboard {
             self.inner.atoms.TEXT_MIME_UNKNOWN,
         ];
 
+        // mezon vendor edit: a copied file list comes first, ahead of the text/image flavors a
+        // file manager offers beside it, so a paste attaches the files (as on macOS/Windows).
+        let file_list_atoms: &[Atom] = match selection {
+            ClipboardKind::Clipboard => &[
+                self.inner.atoms.URI_LIST,
+                self.inner.atoms.GNOME_COPIED_FILES,
+            ],
+            _ => &[],
+        };
+
         // image formats first, as they are more specific, and read will return the first
         // format that the contents can be converted to
-        let mut format_atoms = Vec::with_capacity(image_entries.len() + text_format_atoms.len());
+        let mut format_atoms = Vec::with_capacity(
+            file_list_atoms.len() + image_entries.len() + text_format_atoms.len(),
+        );
+        format_atoms.extend_from_slice(file_list_atoms);
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(text_format_atoms);
 
-        let result = self.inner.read(&format_atoms, selection)?;
+        let mut result = self.inner.read(&format_atoms, selection)?;
+        if file_list_atoms.contains(&result.format) {
+            if let Some(item) = clipboard_item_from_file_list(&result.bytes) {
+                return Ok(item);
+            }
+            // No local file in the list (a browser's http link): read the other flavors.
+            result = self
+                .inner
+                .read(&format_atoms[file_list_atoms.len()..], selection)?;
+        }
 
         log::trace!(
             "read clipboard as format {:?}",
