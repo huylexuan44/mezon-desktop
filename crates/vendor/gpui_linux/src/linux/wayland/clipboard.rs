@@ -120,14 +120,13 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
-    // mezon vendor edit: the files a file manager copied, see `FILE_LIST_MIME_TYPES`.
+    // mezon vendor edit: the files a file manager copied, see `FILE_LIST_MIME_TYPES`. One read
+    // at most, so a hung owner stalls a paste no longer than twice (this, then the text read).
     fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
-        FILE_LIST_MIME_TYPES
+        let mime_type = FILE_LIST_MIME_TYPES
             .iter()
-            .filter(|mime_type| self.has_mime_type(mime_type))
-            .find_map(|mime_type| {
-                clipboard_item_from_file_list(&self.read_bytes(connection, mime_type)?)
-            })
+            .find(|mime_type| self.has_mime_type(mime_type))?;
+        clipboard_item_from_file_list(&self.read_bytes(connection, mime_type)?)
     }
 
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {

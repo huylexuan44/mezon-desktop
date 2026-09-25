@@ -1056,7 +1056,16 @@ impl Clipboard {
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(text_format_atoms);
 
-        let mut result = self.inner.read(&format_atoms, selection)?;
+        let started = Instant::now();
+        let mut result = match self.inner.read(&format_atoms, selection) {
+            // An owner that lists a file list but refuses it at once: read its other flavors.
+            // Not after a time-out, which would only stall the paste a second time.
+            Err(_) if !file_list_atoms.is_empty() && started.elapsed() < LONG_TIMEOUT_DUR / 2 => {
+                self.inner
+                    .read(&format_atoms[file_list_atoms.len()..], selection)?
+            }
+            read => read?,
+        };
         if file_list_atoms.contains(&result.format) {
             if let Some(item) = clipboard_item_from_file_list(&result.bytes) {
                 return Ok(item);

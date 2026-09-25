@@ -30,7 +30,9 @@ use mezon_store::{
 use std::time::Duration;
 
 pub use attachments::build_pending;
-use attachments::{AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, validate_batch};
+use attachments::{
+    AttachmentLimit, MAX_FILE_ATTACHMENTS, PendingAttachment, build_pending_batch, validate_batch,
+};
 use recorder::{ActiveRecording, MIN_RECORDING_MILLIS, RecordTask, encode_recording};
 
 use crate::app::shell::Shell;
@@ -683,6 +685,9 @@ impl MentionInput {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::build(placeholder, settings, true, window, cx);
+        // Saving an edit sends text only; a pasted file would show as attached and then vanish.
+        this.input
+            .update(cx, |input, _| input.set_accepts_files(false));
         this.seed(content, spans, window, cx);
         this
     }
@@ -1157,20 +1162,15 @@ impl MentionInput {
             let Some(paths) = crate::util::file_dialog::resolve(rx, cx).await else {
                 return;
             };
-            let pending = cx
-                .background_spawn(async move {
-                    paths
-                        .into_iter()
-                        .filter_map(build_pending)
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.add_dropped_paths(paths, window, cx)
+            })
+            .ok();
         })
         .detach();
     }
 
+    /// Stages local files (dropped, pasted or picked) as attachments of the channel on screen now.
     pub fn add_dropped_paths(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1180,19 +1180,40 @@ impl MentionInput {
         if paths.is_empty() {
             return;
         }
+        let existing = self.pending_attachments.len();
+        let generation = self.bind_generation;
         cx.spawn_in(window, async move |this, cx| {
-            let pending = cx
-                .background_spawn(async move {
-                    paths
-                        .into_iter()
-                        .filter_map(build_pending)
-                        .collect::<Vec<_>>()
-                })
+            let staged = cx
+                .background_spawn(async move { build_pending_batch(existing, paths) })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.add_staged(generation, staged, window, cx)
+            })
+            .ok();
         })
         .detach();
+    }
+
+    /// Lands attachments read off the foreground thread. The composer is shared by every channel:
+    /// if it moved on meanwhile, they were meant for the one the user left, so they are dropped
+    /// rather than sent to the wrong place.
+    fn add_staged(
+        &mut self,
+        generation: u64,
+        staged: Result<Vec<PendingAttachment>, AttachmentLimit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.bind_generation != generation {
+            return false;
+        }
+        match staged {
+            Ok(pending) => self.add_pending(pending, window, cx),
+            Err(limit) => {
+                Self::show_upload_limit(limit, window, cx);
+                false
+            }
+        }
     }
 
     fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1282,6 +1303,7 @@ impl MentionInput {
             return;
         }
         let base = chrono::Utc::now().timestamp_millis();
+        let generation = self.bind_generation;
         cx.spawn_in(window, async move |this, cx| {
             let pending = cx
                 .background_spawn(async move {
@@ -1294,8 +1316,16 @@ impl MentionInput {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| this.add_pending(pending, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                let written: Vec<PathBuf> = pending.iter().map(|p| p.path.clone()).collect();
+                if !this.add_staged(generation, Ok(pending), window, cx) {
+                    // Our own temp copies of the clipboard bitmaps: nothing else will remove them.
+                    for path in written {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            })
+            .ok();
         })
         .detach();
     }
