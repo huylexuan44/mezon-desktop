@@ -1049,7 +1049,7 @@ pub struct ApiClanDesc {
     pub short_url: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiAttachment {
     pub url: String,
     pub filename: String,
@@ -1096,7 +1096,7 @@ impl ApiChannelAttachment {
     }
 }
 
-fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
+pub fn parse_message_attachments(bytes: &[u8]) -> Vec<ApiAttachment> {
     if bytes.is_empty() || blob_is_json_null(bytes) {
         return Vec::new();
     }

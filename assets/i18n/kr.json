@@ -4749,5 +4749,8 @@
   "screenShare.modeText": "텍스트",
   "screenShare.modeTextDescription": "텍스트와 슬라이드가 더 선명하고 리소스 사용량이 적습니다.",
   "screenShare.modeVideo": "동영상",
-  "screenShare.modeVideoDescription": "영상이 더 부드럽습니다. 연결이 느리면 선명도가 떨어질 수 있습니다."
+  "screenShare.modeVideoDescription": "영상이 더 부드럽습니다. 연결이 느리면 선명도가 떨어질 수 있습니다.",
+  "chat.activityStrip.latestPin": "최근 고정",
+  "chat.activityStrip.latestTopicMessage": "토픽의 최신 메시지",
+  "chat.activityStrip.messageFrom": "{{name}}님의 메시지: {{message}}"
 }

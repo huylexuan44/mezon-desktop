@@ -4748,5 +4748,8 @@
   "screenShare.modeText": "Texte",
   "screenShare.modeTextDescription": "Texte et diapositives plus nets, consommation de ressources réduite.",
   "screenShare.modeVideo": "Vidéo",
-  "screenShare.modeVideoDescription": "Vidéo plus fluide ; la netteté peut baisser sur une connexion lente."
+  "screenShare.modeVideoDescription": "Vidéo plus fluide ; la netteté peut baisser sur une connexion lente.",
+  "chat.activityStrip.latestPin": "Dernier épinglage",
+  "chat.activityStrip.latestTopicMessage": "Dernier message du sujet",
+  "chat.activityStrip.messageFrom": "Message de {{name}} : {{message}}"
 }

@@ -4749,5 +4749,8 @@
   "screenShare.modeText": "Texto",
   "screenShare.modeTextDescription": "Texto e slides mais nítidos, menor uso de recursos.",
   "screenShare.modeVideo": "Vídeo",
-  "screenShare.modeVideoDescription": "Vídeo mais fluido; pode perder nitidez em conexões lentas."
+  "screenShare.modeVideoDescription": "Vídeo mais fluido; pode perder nitidez em conexões lentas.",
+  "chat.activityStrip.latestPin": "Fixação mais recente",
+  "chat.activityStrip.latestTopicMessage": "Mensagem mais recente do tópico",
+  "chat.activityStrip.messageFrom": "Mensagem de {{name}}: {{message}}"
 }
