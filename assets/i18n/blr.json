@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Вы гаворыце — адпусціце Прабел, каб выключыць мікрафон",
   "channelVoice.removedFromChannel": "Вас выдалілі з галасавога канала.",
   "channelVoice.disconnectedAlone": "Вас адключылі ад галасавога канала, бо вы занадта доўга былі ў ім адны.",
+  "channelVoice.disconnectedOtherDevice": "Вы далучыліся да галасавога канала на іншай прыладзе, таму гэтая сесія была адключана.",
+  "channelVoice.disconnectedRejoin": "Вас адключылі ад галасавога канала.",
   "channelVoice.kickMemberFailed": "Не атрымалася выдаліць удзельніка",
   "channelVoice.kickModal.content": "Вы ўпэўнены, што хочаце выкінуць \"{{userName}}\" з галасавога канала?",
   "channelVoice.kickModal.kick": "Выкінуць",

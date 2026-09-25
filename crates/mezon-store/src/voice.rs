@@ -65,6 +65,8 @@ pub enum DeviceMenuKind {
 }
 
 const MEET_TOKEN_CACHE_TTL: Duration = Duration::from_secs(45);
+const MAX_SFU_RECONNECT_ATTEMPTS: u32 = 4;
+const SFU_RECONNECT_HEALTHY_SESSION: Duration = Duration::from_secs(30);
 const RAISE_HAND_TTL: Duration = Duration::from_secs(10);
 const RECORDING_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(20);
 const RECORDING_INDICATOR_TTL: Duration = Duration::from_secs(50);
@@ -399,6 +401,8 @@ pub struct VoiceStore {
     session_generation: u64,
     reconnect_generation: u64,
     reconnect_token_fetches: u32,
+    reconnect_attempts: u32,
+    reconnect_healthy_since: Option<Instant>,
     frame_store: Option<Arc<VideoFrameStore>>,
     camera_devices: Vec<CameraDeviceInfo>,
     device_menu: Option<DeviceMenuKind>,
@@ -787,6 +791,8 @@ impl VoiceStore {
             session_generation: 0,
             reconnect_generation: 0,
             reconnect_token_fetches: 0,
+            reconnect_attempts: 0,
+            reconnect_healthy_since: None,
             frame_store: None,
             camera_devices: Vec::new(),
             device_menu: None,
@@ -3364,24 +3370,6 @@ impl VoiceStore {
         }
     }
 
-    fn should_recover_after_disconnect(&self, reason: &str) -> bool {
-        if !matches!(self.call_status, VoiceCallStatus::Reconnecting)
-            || self.connection.active_channel_id().is_none()
-        {
-            return false;
-        }
-        let reason = reason.trim();
-        reason != "left"
-            && !reason.contains("invalid_token")
-            && !reason.contains("missing_token")
-            && !reason.contains("ClientInitiated")
-            && !reason.contains("ParticipantRemoved")
-            && !reason.contains("RoomDeleted")
-            && !reason.contains("RoomClosed")
-            && !reason.contains("UserRejected")
-            && !reason.contains("UserUnavailable")
-    }
-
     pub fn has_active_video(&self) -> bool {
         self.camera_enabled
             || self.screen_share_enabled
@@ -3396,6 +3384,7 @@ impl VoiceStore {
             VoiceEvent::Connected { room_name } => {
                 self.room_name = room_name;
                 self.cancel_reconnect_watchdog();
+                self.reconnect_healthy_since = Some(Instant::now());
                 if self.connection.mark_connected() {
                     self.play_join_sound(cx);
                 }
@@ -3406,6 +3395,23 @@ impl VoiceStore {
                 self.join_sound_baseline_set = true;
             }
             VoiceEvent::Reconnecting => {
+                if self
+                    .reconnect_healthy_since
+                    .is_some_and(|since| since.elapsed() >= SFU_RECONNECT_HEALTHY_SESSION)
+                {
+                    self.reconnect_attempts = 0;
+                }
+                self.reconnect_healthy_since = None;
+                if self.reconnect_attempts >= MAX_SFU_RECONNECT_ATTEMPTS {
+                    self.handle_engine_event(
+                        VoiceEvent::Disconnected {
+                            reason: "reconnect attempts exhausted".into(),
+                        },
+                        cx,
+                    );
+                    return;
+                }
+                self.reconnect_attempts += 1;
                 self.call_status = VoiceCallStatus::Reconnecting;
                 self.awaiting_room_snapshot = true;
                 self.arm_reconnect_watchdog(RECONNECT_STALL_TIMEOUT, cx);
@@ -3413,6 +3419,7 @@ impl VoiceStore {
             VoiceEvent::Reconnected => {
                 self.call_status = VoiceCallStatus::Stable;
                 self.cancel_reconnect_watchdog();
+                self.reconnect_healthy_since = Some(Instant::now());
                 if self.connection.mark_connected() {
                     self.play_join_sound(cx);
                 }
@@ -3524,22 +3531,19 @@ impl VoiceStore {
                 self.sync_screen_full_res();
             }
             VoiceEvent::Disconnected { reason } => {
-                if self.should_recover_after_disconnect(&reason) {
-                    tracing::warn!(
-                        "voice disconnected while reconnecting ({reason}); scheduling session rebuild"
-                    );
-                    self.call_status = VoiceCallStatus::Reconnecting;
-                    self.arm_reconnect_watchdog(Duration::ZERO, cx);
-                    cx.notify();
-                    return;
-                }
                 tracing::info!("voice disconnected: {reason}");
+                let was_connected = matches!(&self.connection, VoiceConnection::Connected { .. });
                 let unjoined_channel = match &self.connection {
                     VoiceConnection::Connecting { channel_id, .. }
                     | VoiceConnection::Failed { channel_id, .. } => Some(channel_id.clone()),
                     _ => None,
                 };
                 self.teardown(None, cx);
+                if was_connected && reason != "left" {
+                    cx.emit(VoiceStoreEvent::RemovedFromChannel(
+                        RemovalCause::Disconnected,
+                    ));
+                }
                 if let Some(channel_id) = unjoined_channel {
                     let locale = current_locale(cx);
                     self.connection = VoiceConnection::Failed {
@@ -4496,6 +4500,8 @@ impl VoiceStore {
 
     fn teardown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.cancel_reconnect_watchdog();
+        self.reconnect_attempts = 0;
+        self.reconnect_healthy_since = None;
         self.close_pip(cx);
         self.fullscreen_screen = None;
         self.member_strip_visible = true;

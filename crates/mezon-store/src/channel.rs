@@ -19,7 +19,6 @@ use mezon_client::{
 };
 
 use crate::KeyedCache;
-use crate::voice_presence::VoicePresence;
 use crate::badge::BadgeService;
 use crate::channel_settings::ChannelSettingsStore;
 use crate::clan::{ClanEvent, ClanList};
@@ -33,6 +32,7 @@ use crate::permissions::{
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::text_utils::normalize_diacritics;
 use crate::threads::CHANNEL_TYPE_THREAD;
+use crate::voice_presence::VoicePresence;
 
 pub const FAVOR_CATE_ID: &str = "favorCate";
 pub const CATEGORY_NAME_MAX_CHARS: usize = 64;
@@ -2093,7 +2093,8 @@ impl ChannelList {
 
         let mut changed = app_channels_changed;
         if let Some(voice_map) = extras.voice_map.as_ref() {
-            self.voice_presence.replace_clan(clan_id.get(), &extras.voice_peers);
+            self.voice_presence
+                .replace_clan(clan_id.get(), &extras.voice_peers);
             for ch in owned
                 .iter_mut()
                 .flat_map(|category| category.channels.iter_mut())
@@ -4690,7 +4691,8 @@ impl ChannelList {
                 store.remove_channel_locally(clan_id, channel_id, cx)
             });
         }
-        self.voice_presence.forget_channel(clan_id.get(), channel_id.get());
+        self.voice_presence
+            .forget_channel(clan_id.get(), channel_id.get());
         self.deleted_channel_ids.insert(channel_id);
         if !parent_id.is_zero() {
             self.deleted_channel_parents.insert(channel_id, parent_id);
