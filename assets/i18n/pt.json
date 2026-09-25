@@ -1103,6 +1103,8 @@
   "channelVoice.pushToTalk.holdingSpace": "Falando — solte Espaço para silenciar",
   "channelVoice.removedFromChannel": "Você foi removido do canal de voz.",
   "channelVoice.disconnectedAlone": "Você foi desconectado do canal de voz porque ficou sozinho nele por muito tempo.",
+  "channelVoice.disconnectedOtherDevice": "Você entrou no canal de voz em outro dispositivo, então esta sessão foi desconectada.",
+  "channelVoice.disconnectedRejoin": "Você foi desconectado do canal de voz.",
   "channelVoice.kickMemberFailed": "Não foi possível remover o membro",
   "channelVoice.kickModal.content": "Tem certeza de que deseja remover \"{{userName}}\" do canal de voz?",
   "channelVoice.kickModal.kick": "Remover",
