@@ -731,16 +731,11 @@ pub(super) fn is_within_click_distance(a: Point<Pixels>, b: Point<Pixels>) -> bo
     diff.x.abs() <= DOUBLE_CLICK_DISTANCE && diff.y.abs() <= DOUBLE_CLICK_DISTANCE
 }
 
-// mezon vendor edit: file managers put copied files on the clipboard as a list of URIs —
-// `text/uri-list` (Nautilus, Dolphin, Thunar) or GNOME's older `x-special/gnome-copied-files`
-// (a `copy`/`cut` line, then the URIs). Reading them lets a paste attach the files, as the
-// macOS and Windows backends already do via `ExternalPaths`.
+// mezon vendor edit: clipboard file lists for paste.
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) const FILE_LIST_MIME_TYPES: [&str; 2] =
     ["text/uri-list", "x-special/gnome-copied-files"];
 
-/// Parses a clipboard file list into `ExternalPaths` plus the paths as text, so plain text
-/// fields still paste something. `None` when no line is a local `file://` URI.
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) fn clipboard_item_from_file_list(bytes: &[u8]) -> Option<ClipboardItem> {
     let list = std::str::from_utf8(bytes).ok()?;

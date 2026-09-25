@@ -80,7 +80,7 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // mezon vendor edit: file lists a file manager copies, see `FILE_LIST_MIME_TYPES`.
+        // mezon vendor edit: clipboard file lists for paste.
         URI_LIST: b"text/uri-list",
         GNOME_COPIED_FILES: b"x-special/gnome-copied-files",
 
@@ -1037,8 +1037,7 @@ impl Clipboard {
             self.inner.atoms.TEXT_MIME_UNKNOWN,
         ];
 
-        // mezon vendor edit: a copied file list comes first, ahead of the text/image flavors a
-        // file manager offers beside it, so a paste attaches the files (as on macOS/Windows).
+        // mezon vendor edit: clipboard file lists for paste.
         let file_list_atoms: &[Atom] = match selection {
             ClipboardKind::Clipboard => &[
                 self.inner.atoms.URI_LIST,
@@ -1058,8 +1057,6 @@ impl Clipboard {
 
         let started = Instant::now();
         let mut result = match self.inner.read(&format_atoms, selection) {
-            // An owner that lists a file list but refuses it at once: read its other flavors.
-            // Not after a time-out, which would only stall the paste a second time.
             Err(_) if !file_list_atoms.is_empty() && started.elapsed() < LONG_TIMEOUT_DUR / 2 => {
                 self.inner
                     .read(&format_atoms[file_list_atoms.len()..], selection)?
@@ -1070,7 +1067,6 @@ impl Clipboard {
             if let Some(item) = clipboard_item_from_file_list(&result.bytes) {
                 return Ok(item);
             }
-            // No local file in the list (a browser's http link): read the other flavors.
             result = self
                 .inner
                 .read(&format_atoms[file_list_atoms.len()..], selection)?;

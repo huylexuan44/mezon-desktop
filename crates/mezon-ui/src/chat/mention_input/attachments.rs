@@ -42,8 +42,7 @@ pub fn mime_from_extension(path: &Path) -> String {
     mime.to_string()
 }
 
-/// What the upload limits need — name, type, size — read from the file's metadata only.
-pub fn stat_pending(path: PathBuf) -> Option<PendingAttachment> {
+fn stat_pending(path: PathBuf) -> Option<PendingAttachment> {
     let meta = match std::fs::metadata(&path) {
         Ok(meta) => meta,
         Err(err) => {
@@ -76,8 +75,7 @@ pub fn stat_pending(path: PathBuf) -> Option<PendingAttachment> {
     })
 }
 
-/// The costly half of `build_pending`: image dimensions, a decoded video poster, audio length.
-pub fn probe_pending(mut pending: PendingAttachment) -> PendingAttachment {
+fn probe_pending(mut pending: PendingAttachment) -> PendingAttachment {
     if pending.is_video {
         if let Some(probe) =
             mezon_video::probe_video(&pending.path.to_string_lossy(), POSTER_MAX_EDGE)
@@ -99,8 +97,6 @@ pub fn build_pending(path: PathBuf) -> Option<PendingAttachment> {
     stat_pending(path).map(probe_pending)
 }
 
-/// Stats every path and checks the batch against the upload limits before probing any of it,
-/// so a paste or drop past the limits is turned down without decoding a single video.
 pub fn build_pending_batch(
     existing: usize,
     paths: Vec<PathBuf>,
@@ -230,7 +226,6 @@ mod tests {
         };
         assert_eq!(staged.len(), 1, "the folder is skipped, the file kept");
         assert_eq!(staged[0].filename, "notes.txt");
-        // The folder does not count toward the limit, the file does.
         assert!(
             build_pending_batch(MAX_FILE_ATTACHMENTS - 1, vec![dir.clone(), file.clone()]).is_ok()
         );
