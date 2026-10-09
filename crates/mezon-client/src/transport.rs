@@ -9624,29 +9624,22 @@ impl MezonTransport {
             metadata: metadata.to_string(),
         }
         .encode_to_vec();
-        // Keep token issuance on the same HTTP route as the web voice client.
         let has_http_session = self.http_fallback.read().is_some();
-        let (code, response) = if has_http_session {
-            match self
-                .send_api_request_over_http("GenerateMeetToken", body.clone())
-                .await
-            {
-                Ok(response) => (0, response),
-                Err(error) => {
-                    tracing::warn!(target: "socket", "GenerateMeetToken HTTP request failed; using socket fallback: {error:#}");
-                    self.send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
-                        .await?
-                }
+        let (code, response) = match self
+            .send_api_request_with_http_fallback(cid, "GenerateMeetToken", body.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if has_http_session => {
+                tracing::warn!(target: "socket", "GenerateMeetToken socket request failed; using HTTP fallback: {error:#}");
+                let response = self
+                    .send_api_request_over_http("GenerateMeetToken", body)
+                    .await?;
+                (0, response)
             }
-        } else {
-            self.send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
-                .await?
+            Err(error) => return Err(error),
         };
-        let token = meet_token_from_raw_body(code, &response)?;
-        Ok(api::GenerateMeetTokenResponse {
-            token,
-            ..Default::default()
-        })
+        meet_token_from_raw_body(code, &response)
     }
 
     pub async fn remove_participant_mezon_meet(
@@ -10446,7 +10439,7 @@ fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
 
 const MEET_TOKEN_PROTOBUF_TAG: u8 = 0x0A;
 
-fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
+fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<api::GenerateMeetTokenResponse> {
     if code != 0 {
         tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
         return Err(api_status_error(code))
@@ -10455,18 +10448,58 @@ fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
     let Some(&first_byte) = body.first() else {
         anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
     };
-    let token = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
+    let response = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
         api::GenerateMeetTokenResponse::decode(body)
             .ok()
-            .map(|response| response.token)
-            .filter(|token| !token.is_empty())
+            .filter(|response| !response.token.is_empty())
     } else {
-        bare_jwt(body)
+        bare_jwt(body).map(|token| api::GenerateMeetTokenResponse {
+            token,
+            ..Default::default()
+        })
     };
-    token.ok_or_else(|| {
+    let mut response = response.ok_or_else(|| {
         tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
         anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
-    })
+    })?;
+    let sfu_url = normalized_sfu_ws_url(&response.url);
+    if sfu_url.is_none() && !response.url.trim().is_empty() {
+        tracing::warn!(
+            "GenerateMeetToken returned an unusable SFU url={:?}; the configured SFU stays in use",
+            response.url
+        );
+    }
+    response.url = sfu_url.unwrap_or_default();
+    Ok(response)
+}
+
+fn normalized_sfu_ws_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let with_scheme = if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("wss://{raw}")
+    };
+    let mut url = url::Url::parse(&with_scheme).ok()?;
+    let websocket_scheme = match url.scheme() {
+        "ws" | "wss" => None,
+        "http" => Some("ws"),
+        "https" => Some("wss"),
+        _ => return None,
+    };
+    if let Some(scheme) = websocket_scheme {
+        url.set_scheme(scheme).ok()?;
+    }
+    if !url.has_host() {
+        return None;
+    }
+    if url.path() == "/" {
+        url.set_path("/ws");
+    }
+    Some(url.into())
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -12706,7 +12739,7 @@ mod tests {
         }
         .encode_to_vec();
         assert_eq!(encoded[0], MEET_TOKEN_PROTOBUF_TAG);
-        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap().token, jwt);
     }
 
     #[test]
@@ -12717,7 +12750,9 @@ mod tests {
         encoded.extend_from_slice(jwt.as_bytes());
         encoded.extend_from_slice(&[0x12, url.len() as u8]);
         encoded.extend_from_slice(url.as_bytes());
-        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+        let response = meet_token_from_raw_body(0, &encoded).unwrap();
+        assert_eq!(response.token, jwt);
+        assert_eq!(response.url, url);
     }
 
     #[test]
@@ -12767,7 +12802,7 @@ mod tests {
     #[test]
     fn meet_token_raw_jwt_is_accepted() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
-        assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap(), jwt);
+        assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap().token, jwt);
     }
 
     #[test]
