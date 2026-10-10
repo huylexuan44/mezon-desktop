@@ -2135,4 +2135,31 @@ mod tests {
         assert_eq!(undone, ["hi yo", "hi y", "hi ", "hi", "h", "", ""]);
         assert_eq!(redone, ["h", "hi"]);
     }
+
+    #[gpui::test]
+    fn a_composition_committed_by_a_click_leaves_the_next_word_at_the_new_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let field = cx.update(|window, cx| cx.new(|cx| MentionInputState::new(window, cx)));
+        let (value, caret, composing) = field.update_in(cx, |field, window, cx| {
+            field.set_value("dùn bấm -> dùng", window, cx);
+            field.move_to("dùn bấm -> ".len(), cx);
+            for preedit in ["n", "ng", "ngu", "ngươ", "người "] {
+                field.replace_and_mark_text_in_range(None, preedit, None, window, cx);
+            }
+            field.replace_text_in_range(None, "người ", window, cx);
+            field.move_to("dùn".len(), cx);
+            field.replace_and_mark_text_in_range(None, "g", None, window, cx);
+            field.replace_text_in_range(None, "g", window, cx);
+            (
+                field.value().to_string(),
+                field.selected_range.clone(),
+                field.is_composing(),
+            )
+        });
+        assert_eq!(value, "dùng bấm -> người dùng");
+        assert_eq!(caret, "dùng".len().."dùng".len());
+        assert!(!composing);
+    }
 }
