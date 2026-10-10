@@ -11,6 +11,8 @@ use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
+use super::poll_card::render_poll_label_plain;
+
 const DETAIL_OPTIONS_SCROLL_AFTER: usize = 5;
 const DETAIL_MODAL_HEIGHT_PX: f32 = 700.;
 const DETAIL_MODAL_WIDTH_PX: f32 = 620.;
@@ -20,6 +22,7 @@ const VOTER_ROW_PX: f32 = 56.;
 pub struct PollDetailModal {
     focus_handle: FocusHandle,
     locale: SharedString,
+    poll_id: i64,
     question: SharedString,
     answers: Vec<PollAnswerView>,
     answer_counts: Vec<i32>,
@@ -84,6 +87,7 @@ impl PollDetailModal {
             Self {
                 focus_handle: cx.focus_handle(),
                 locale,
+                poll_id,
                 question,
                 answers,
                 answer_counts,
@@ -173,7 +177,12 @@ impl Render for PollDetailModal {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(answer.label.clone()),
+                            .child(render_poll_label_plain(
+                                answer,
+                                self.poll_id,
+                                i,
+                                &self.image_cache,
+                            )),
                     )
                     .child(
                         div()
