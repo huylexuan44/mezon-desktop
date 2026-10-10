@@ -2606,8 +2606,8 @@ impl MessagesStore {
         cx.emit(MessagesEvent::AnonymousModeChanged);
     }
 
-    pub fn toggle_anonymous_mode(&mut self, cx: &mut Context<Self>) {
-        if self.active_topic_id.is_some() {
+    pub fn toggle_anonymous_mode(&mut self, in_topic: bool, cx: &mut Context<Self>) {
+        if in_topic && self.active_topic_id.is_some() {
             self.topic_anonymous_mode = !self.topic_anonymous_mode;
             self.sync_anonymous_mode(cx);
             cx.notify();
@@ -16686,6 +16686,30 @@ mod tests {
                 assert_eq!(draft.content_preview, "parent row");
                 let draft = store.reply_draft_for(from_topic).expect("topic draft");
                 assert_eq!(draft.content_preview, "topic reply");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn the_channel_composer_toggles_anonymous_while_a_topic_is_open(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.active_clan_id = Some(ClanId(1));
+                store.active_channel_id = Some(ChannelId(10));
+                store.set_active_topic(Some(77), cx);
+
+                store.toggle_anonymous_mode(false, cx);
+                assert!(store.is_anonymous_mode());
+                assert!(!store.topic_anonymous_mode());
+
+                store.toggle_anonymous_mode(true, cx);
+                assert!(store.is_anonymous_mode());
+                assert!(store.topic_anonymous_mode());
+
+                store.toggle_anonymous_mode(false, cx);
+                assert!(!store.is_anonymous_mode());
+                assert!(store.topic_anonymous_mode());
             });
         });
     }

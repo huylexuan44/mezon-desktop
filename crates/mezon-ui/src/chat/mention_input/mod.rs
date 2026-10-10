@@ -100,7 +100,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
     ]);
     cx.on_action(|_: &ToggleAnonymous, cx: &mut App| {
-        toggle_anonymous_shortcut(cx);
+        toggle_anonymous_shortcut(false, cx);
     });
     cx.on_action(|_: &OpenMessageBuzz, cx: &mut App| {
         let Some(window_handle) =
@@ -116,7 +116,7 @@ pub fn init(cx: &mut App) {
     });
 }
 
-fn toggle_anonymous_shortcut(cx: &mut App) {
+pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
     if matches!(
         Router::global(cx).read(cx).route(),
         Route::DirectMessage { .. } | Route::Direct | Route::Friends
@@ -131,7 +131,7 @@ fn toggle_anonymous_shortcut(cx: &mut App) {
     {
         return;
     }
-    MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(cx));
+    MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(in_topic, cx));
 }
 
 fn open_message_buzz(for_topic: bool, window: &mut Window, cx: &mut App) {
