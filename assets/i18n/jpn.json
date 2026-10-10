@@ -3280,6 +3280,7 @@
   "message.actions.topicDiscussion": "スレッドディスカッション",
   "message.actions.unPinMessage": "メッセージのピン留めを解除",
   "message.addAMessage": "メッセージを追加（オプション）",
+  "message.attachment.fromPrivateChannel": "プライベートチャンネルのメディア",
   "message.attachment.uploading": "アップロード中...",
   "message.attachment.uploadFailed": "アップロードに失敗しました",
   "message.attachments.attachment": "添付ファイル",

@@ -3279,6 +3279,7 @@
   "message.actions.topicDiscussion": "Абмеркаванне тэмы",
   "message.actions.unPinMessage": "Адмацаваць паведамленне",
   "message.addAMessage": "Дадаць паведамленне (неабавязкова)",
+  "message.attachment.fromPrivateChannel": "Медыя з прыватнага канала",
   "message.attachment.uploading": "Загрузка...",
   "message.attachment.uploadFailed": "Не атрымалася загрузіць",
   "message.attachments.attachment": "Укладанне",

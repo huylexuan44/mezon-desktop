@@ -3279,6 +3279,7 @@
   "message.actions.topicDiscussion": "Thema discussie",
   "message.actions.unPinMessage": "Bericht losmaken",
   "message.addAMessage": "Voeg een bericht toe (Optioneel)",
+  "message.attachment.fromPrivateChannel": "Media uit een privékanaal",
   "message.attachment.uploading": "Aan het uploaden...",
   "message.attachment.uploadFailed": "Uploaden mislukt",
   "message.attachments.attachment": "Bijlage",

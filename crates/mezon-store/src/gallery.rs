@@ -262,10 +262,21 @@ pub async fn fetch_channel_attachments(
         .await?;
     let raw_count = list.len();
     let oldest_create_time = list.last().map(|a| a.create_time_seconds);
-    let attachments = list
+    let media: Vec<ChannelAttachment> = list
         .into_iter()
         .map(|a| ChannelAttachment::from_api(a, channel_id, clan_id, &cfg))
         .filter(ChannelAttachment::is_media)
+        .collect();
+    let denied = futures::future::join_all(
+        media
+            .iter()
+            .map(|a| mezon_client::cdn_signature::access_denied(&a.url)),
+    )
+    .await;
+    let attachments = media
+        .into_iter()
+        .zip(denied)
+        .filter_map(|(attachment, denied)| (!denied).then_some(attachment))
         .collect();
     Ok(FetchedChannelAttachments {
         attachments,

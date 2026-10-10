@@ -671,6 +671,7 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
+    _cdn_access_watch: Option<Task<()>>,
     pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
@@ -1164,6 +1165,7 @@ impl MessagesStore {
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let cdn_access_watch = Self::spawn_cdn_access_watch(cx);
 
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
@@ -1204,6 +1206,7 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
+            _cdn_access_watch: cdn_access_watch,
             pending_last_seen: HashMap::new(),
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
@@ -4534,6 +4537,46 @@ impl MessagesStore {
         } else {
             self.emit_upload_row_updates(rows, cx);
         }
+    }
+
+    fn spawn_cdn_access_watch(cx: &mut Context<Self>) -> Option<Task<()>> {
+        let mut changes = mezon_client::cdn_signature::access_changes()?;
+        Some(cx.spawn(async move |this, cx| {
+            while changes.changed().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| this.refresh_private_source_media(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }))
+    }
+
+    fn refresh_private_source_media(&mut self, cx: &mut Context<Self>) {
+        let config = AppConfig::try_global(cx).cloned();
+        let mut touched = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                if !message.is_forwarded || !mark_private_source_media(&mut message.attachments) {
+                    continue;
+                }
+                let (album_layout, viewer_media) =
+                    build_media_presentation(&message.attachments, config.as_ref());
+                message.album_layout = album_layout;
+                message.viewer_media = viewer_media;
+                touched.push(message.id);
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        for message_id in touched {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
     }
 
     /// Buckets a probe may look at: whatever the user is actually looking at.
@@ -8791,6 +8834,9 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
                 att.upload_failed = prior_att.upload_failed;
             }
         }
+        if existing.is_forwarded {
+            mark_private_source_media(&mut new_attachments);
+        }
         existing.attachments = new_attachments;
     }
     let kept_prior_references = incoming.references.is_empty();
@@ -9758,8 +9804,11 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         let base_img = cfg.map(|c| c.base_img_url.as_str()).unwrap_or_default();
         apply_presign_gate(&mut attachments, &keys, base_img, m.create_time);
     }
-    let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let is_forwarded = m.content_tokens.fwd;
+    if is_forwarded {
+        mark_private_source_media(&mut attachments);
+    }
+    let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let ogp = build_ogp_preview(&m.content_tokens, cfg);
     let code = MessageCode::from_raw(m.code);
     let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
@@ -10715,13 +10764,24 @@ fn parse_poll_markdown(text: &str) -> Option<ParsedPollMarkdown> {
     })
 }
 
+fn mark_private_source_media(attachments: &mut [MessageAttachment]) -> bool {
+    let mut changed = false;
+    for att in attachments.iter_mut().filter(|att| att.is_visual_media()) {
+        mezon_client::cdn_signature::check_access(&att.url);
+        let denied = mezon_client::cdn_signature::is_denied(&att.url);
+        changed |= att.source_denied != denied;
+        att.source_denied = denied;
+    }
+    changed
+}
+
 fn build_media_presentation(
     attachments: &[MessageAttachment],
     cfg: Option<&AppConfig>,
 ) -> (Option<AlbumLayout>, Arc<[ViewerMedia]>) {
     let images: Vec<&MessageAttachment> = attachments
         .iter()
-        .filter(|a| !a.is_unsupported_media() && !a.is_video() && a.is_image())
+        .filter(|a| !a.is_unsupported_media() && !a.is_video() && a.is_image() && !a.source_denied)
         .collect();
     if images.is_empty() {
         return (None, Vec::new().into());
@@ -10894,6 +10954,7 @@ impl MessageAttachment {
             local_source: None,
             uploading: false,
             upload_failed: false,
+            source_denied: false,
         }
     }
 
@@ -10926,6 +10987,7 @@ impl MessageAttachment {
             local_source: is_image.then(|| att.path.clone()),
             uploading: true,
             upload_failed: false,
+            source_denied: false,
         }
     }
 }
@@ -13640,6 +13702,84 @@ mod tests {
         assert_eq!(m.viewer_media.len(), 2);
         assert_eq!(m.viewer_media[0].url, "https://cdn/1.png");
         assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
+    }
+
+    #[test]
+    fn forwarded_media_from_a_channel_the_viewer_cannot_read_is_hidden() {
+        crate::cdn_test_signer::install();
+        let denied = "https://cdn.example/1cb164dbdac01001/2108799850765094912_secret.png";
+        let readable = "https://cdn.example/1cb164dbdac01000/2108799850765094913_open.png";
+        assert!(futures::executor::block_on(
+            mezon_client::cdn_signature::access_denied(denied)
+        ));
+        let image = |url: &str| mezon_client::transport::ApiAttachment {
+            url: url.into(),
+            filename: "photo.png".into(),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 0,
+        };
+        let msg = |fwd: bool| ApiMessage {
+            message_id: 7,
+            content: String::new(),
+            content_raw: String::new(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                fwd,
+                ..Default::default()
+            },
+            code: 0,
+            sender_id: 1,
+            sender_name: "Alice".into(),
+            avatar: String::new(),
+            create_time: 0,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![image(denied), image(readable)],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        };
+
+        let forwarded = message_from_api(msg(true), None, None);
+        assert!(forwarded.attachments[0].source_denied);
+        assert!(!forwarded.attachments[1].source_denied);
+        assert_eq!(forwarded.viewer_media.len(), 1);
+        assert_eq!(forwarded.viewer_media[0].url, readable);
+        assert!(forwarded.album_layout.is_none());
+
+        let original = message_from_api(msg(false), None, None);
+        assert!(original.attachments.iter().all(|a| !a.source_denied));
+        assert_eq!(original.viewer_media.len(), 2);
+        assert!(original.album_layout.is_some());
+    }
+
+    #[test]
+    fn an_update_to_a_forwarded_message_keeps_its_private_media_hidden() {
+        crate::cdn_test_signer::install();
+        let denied = "https://cdn.example/1cb164dbdac01001/2108799850765094914_secret.png";
+        assert!(futures::executor::block_on(
+            mezon_client::cdn_signature::access_denied(denied)
+        ));
+        let attachment = MessageAttachment {
+            url: denied.to_string(),
+            filetype: "image/png".to_string(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        };
+        let mut existing = Message::new(MessageId(9), "", "1", "Alice", 0)
+            .with_forwarded(true)
+            .with_attachments(vec![attachment.clone()]);
+        let incoming = Message::new(MessageId(9), "edited", "1", "Alice", 0)
+            .with_attachments(vec![attachment]);
+
+        merge_message_update(&mut existing, &incoming);
+
+        assert!(existing.attachments[0].source_denied);
     }
 
     #[test]

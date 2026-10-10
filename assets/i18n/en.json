@@ -3278,6 +3278,7 @@
   "message.actions.topicDiscussion": "Topic Discussion",
   "message.actions.unPinMessage": "Unpin Message",
   "message.addAMessage": "Add a message (Optional)",
+  "message.attachment.fromPrivateChannel": "Media from private channel",
   "message.attachment.uploading": "Uploading...",
   "message.attachment.uploadFailed": "Upload failed",
   "message.attachments.attachment": "Attachment",

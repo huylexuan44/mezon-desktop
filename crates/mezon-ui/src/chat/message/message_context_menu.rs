@@ -806,7 +806,7 @@ fn build_channel_menu(
     let image = msg
         .attachments
         .iter()
-        .find(|a| a.is_image())
+        .find(|a| a.is_image() && !a.source_denied)
         .map(|a| (a.url.clone(), a.filename.clone()));
     if link.is_some() || image.is_some() || !is_own_message {
         menu = menu.separator();
@@ -818,6 +818,15 @@ fn build_channel_menu(
         });
         menu = menu.item(t("contextMenu.openLink"), move |_, cx| {
             open_message_link(link.clone(), cx);
+        });
+    } else if let Some((image_url, _)) = &image {
+        let url_for_copy = image_url.clone();
+        let url_for_open = image_url.clone();
+        menu = menu.item(t("contextMenu.copyLink"), move |_, cx| {
+            mezon_store::copy_media_url_to_clipboard(url_for_copy.clone(), cx);
+        });
+        menu = menu.item(t("contextMenu.openLink"), move |_, cx| {
+            mezon_store::open_media_url_external(url_for_open.clone(), cx);
         });
     }
     if !is_own_message {

@@ -33,6 +33,7 @@ pub struct MessageAttachment {
     pub local_source: Option<std::path::PathBuf>,
     pub uploading: bool,
     pub upload_failed: bool,
+    pub source_denied: bool,
 }
 
 pub const STICKER_FILETYPE: &str = "sticker";
@@ -77,6 +78,10 @@ pub fn format_file_size(bytes: u64) -> String {
 }
 
 impl MessageAttachment {
+    pub fn is_visual_media(&self) -> bool {
+        !self.is_unsupported_media() && (self.is_video() || self.is_image())
+    }
+
     pub fn is_audio(&self) -> bool {
         self.filetype.contains("audio") && !self.is_unsupported_media()
     }

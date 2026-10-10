@@ -236,7 +236,8 @@ pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
     McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
-    PlatformStore, copy_image_url_to_clipboard, download_url_with_dialog, open_media_url_external,
+    PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
+    download_url_with_dialog, open_media_url_external,
 };
 pub use presence::*;
 pub use quick_menu::{
@@ -735,6 +736,40 @@ impl AuthState {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cdn_test_signer {
+    use futures::FutureExt;
+    use std::sync::{Arc, Once};
+
+    pub(crate) const SIGNATURE: &str = "1791259679-mac";
+    pub(crate) const DENIED_CHANNEL: i64 = 0x1cb1_64db_dac0_1001;
+
+    pub(crate) fn install() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            mezon_client::cdn_signature::install(mezon_client::cdn_signature::CdnSigner::new(
+                vec!["https://cdn.example/".to_string()],
+                Vec::new(),
+                Arc::new(|channel_id| {
+                    async move {
+                        if channel_id == DENIED_CHANNEL {
+                            Err(anyhow::Error::new(
+                                mezon_client::transport::ApiStatusError {
+                                    code:
+                                        mezon_client::transport::ApiStatusError::PERMISSION_DENIED,
+                                },
+                            ))
+                        } else {
+                            Ok(SIGNATURE.to_string())
+                        }
+                    }
+                    .boxed()
+                }),
+            ));
+        });
     }
 }
 

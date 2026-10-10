@@ -3280,6 +3280,7 @@
   "message.actions.topicDiscussion": "Discussione argomento",
   "message.actions.unPinMessage": "Rimuovi fissaggio",
   "message.addAMessage": "Aggiungi un messaggio (opzionale)",
+  "message.attachment.fromPrivateChannel": "Contenuto multimediale da un canale privato",
   "message.attachment.uploading": "Caricamento in corso...",
   "message.attachment.uploadFailed": "Caricamento non riuscito",
   "message.attachments.attachment": "Allegato",

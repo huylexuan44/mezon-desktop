@@ -3279,6 +3279,7 @@
   "message.actions.topicDiscussion": "Dyskusja tematyczna",
   "message.actions.unPinMessage": "Odepnij wiadomość",
   "message.addAMessage": "Dodaj wiadomość (Opcjonalne)",
+  "message.attachment.fromPrivateChannel": "Multimedia z prywatnego kanału",
   "message.attachment.uploading": "Przekazywanie...",
   "message.attachment.uploadFailed": "Nie udało się przesłać",
   "message.attachments.attachment": "Załącznik",
