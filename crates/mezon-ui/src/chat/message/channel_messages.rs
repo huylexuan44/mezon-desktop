@@ -2979,13 +2979,21 @@ impl ChannelMessages {
                 let image_count = message
                     .attachments
                     .iter()
-                    .filter(|att| !att.is_unsupported_media() && !att.is_video() && att.is_image())
+                    .filter(|att| {
+                        !att.is_unsupported_media()
+                            && !att.is_video()
+                            && att.is_image()
+                            && !att.source_denied
+                    })
                     .count();
                 if image_count >= 2 && message.album_layout.is_some() {
                     continue;
                 }
                 let first_image = message.attachments.iter().enumerate().find(|(_, att)| {
-                    !att.is_unsupported_media() && !att.is_video() && att.is_image()
+                    !att.is_unsupported_media()
+                        && !att.is_video()
+                        && att.is_image()
+                        && !att.source_denied
                 });
                 if let Some((att_ix, att)) = first_image
                     && let Some(mp4) = att.tenor_mp4.clone()

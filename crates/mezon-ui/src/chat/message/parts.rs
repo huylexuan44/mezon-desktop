@@ -864,8 +864,11 @@ pub fn render_attachments(
     let mut audios: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
     let mut images: SmallVec<[(usize, &MessageAttachment); 4]> = SmallVec::new();
     let mut documents: SmallVec<[&MessageAttachment; 2]> = SmallVec::new();
+    let mut private_source_hidden = false;
     for (idx, att) in msg.attachments.iter().enumerate() {
-        if att.is_unsupported_media() {
+        if att.source_denied {
+            private_source_hidden = true;
+        } else if att.is_unsupported_media() {
             documents.push(att);
         } else if att.is_video() {
             videos.push(att);
@@ -894,6 +897,9 @@ pub fn render_attachments(
         .gap_2()
         .mt_1()
         .w_full();
+    if private_source_hidden {
+        col = col.child(render_private_source_placeholder(ctx));
+    }
     for (i, att) in videos.iter().enumerate() {
         col = col.child(render_video(msg.id, i, att, ctx, att.uploading));
     }
@@ -946,6 +952,43 @@ pub fn render_attachments(
         )
         .into_any_element(),
     )
+}
+
+fn render_private_source_placeholder(ctx: &RowCtx) -> AnyElement {
+    let theme = ctx.theme;
+    div()
+        .w_full()
+        .py_1()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .w(px(280.))
+                .max_w_full()
+                .h(px(160.))
+                .rounded_md()
+                .bg(theme.tokens.bg_secondary)
+                .child(
+                    Icon::new(IconName::LockIcon)
+                        .size(px(24.))
+                        .text_color(theme.tokens.text_secondary),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .text_size(px(14.))
+                        .text_center()
+                        .text_color(theme.tokens.text_secondary)
+                        .child(mezon_i18n::t(
+                            ctx.locale,
+                            "message.attachment.fromPrivateChannel",
+                        )),
+                ),
+        )
+        .into_any_element()
 }
 
 #[allow(dead_code)]

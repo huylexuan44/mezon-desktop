@@ -3279,6 +3279,7 @@
   "message.actions.topicDiscussion": "Обговорення теми",
   "message.actions.unPinMessage": "Відкріпити повідомлення",
   "message.addAMessage": "Додати повідомлення (необов'язково)",
+  "message.attachment.fromPrivateChannel": "Медіа з приватного каналу",
   "message.attachment.uploading": "Завантаження...",
   "message.attachment.uploadFailed": "Не вдалося завантажити",
   "message.attachments.attachment": "Вкладення",

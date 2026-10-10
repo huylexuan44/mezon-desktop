@@ -3518,6 +3518,7 @@
   "message.actions.topicDiscussion": "Дискуссия в топике",
   "message.actions.unPinMessage": "Открепить сообщение",
   "message.addAMessage": "Добавить сообщение (опционально)",
+  "message.attachment.fromPrivateChannel": "Медиа из приватного канала",
   "message.attachment.uploading": "Загрузка...",
   "message.attachment.uploadFailed": "Не удалось загрузить",
   "message.attachments.attachment": "Вложение",

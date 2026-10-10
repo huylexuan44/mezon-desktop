@@ -3280,6 +3280,7 @@
   "message.actions.topicDiscussion": "Thảo luận chủ đề",
   "message.actions.unPinMessage": "Bỏ ghim tin nhắn",
   "message.addAMessage": "Thêm một tin nhắn (Không bắt buộc)",
+  "message.attachment.fromPrivateChannel": "Ảnh/video từ kênh riêng tư",
   "message.attachment.uploading": "Đang tải lên...",
   "message.attachment.uploadFailed": "Tải lên thất bại",
   "message.attachments.attachment": "Tệp đính kèm",

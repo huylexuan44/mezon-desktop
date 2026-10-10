@@ -12802,7 +12802,10 @@ mod tests {
     #[test]
     fn meet_token_raw_jwt_is_accepted() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
-        assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap().token, jwt);
+        assert_eq!(
+            meet_token_from_raw_body(0, jwt.as_bytes()).unwrap().token,
+            jwt
+        );
     }
 
     #[test]

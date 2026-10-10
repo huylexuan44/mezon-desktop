@@ -3313,6 +3313,7 @@
   "message.actions.unPinMessage": "Desfijar mensaje",
   "message.addAMessage": "Añadir un mensaje (Opcional)",
   "message.addReaction": "Añadir reacción",
+  "message.attachment.fromPrivateChannel": "Contenido multimedia de un canal privado",
   "message.attachment.uploading": "Subiendo...",
   "message.attachment.uploadFailed": "Error al subir",
   "message.attachments.attachment": "Adjunto",

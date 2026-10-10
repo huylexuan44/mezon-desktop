@@ -3280,6 +3280,7 @@
   "message.actions.topicDiscussion": "Discussão de tópico",
   "message.actions.unPinMessage": "Desafixar mensagem",
   "message.addAMessage": "Adicionar uma mensagem (Opcional)",
+  "message.attachment.fromPrivateChannel": "Mídia de um canal privado",
   "message.attachment.uploading": "Enviando...",
   "message.attachment.uploadFailed": "Falha no envio",
   "message.attachments.attachment": "Anexo",

@@ -3288,6 +3288,7 @@
   "message.actions.topicDiscussion": "Топикта дискуссия",
   "message.actions.unPinMessage": "Хәбәрне төяп куюдан алу",
   "message.addAMessage": "Хәбәр өстәү (мәҗбүри түгел)",
+  "message.attachment.fromPrivateChannel": "Шәхси каналдан медиа",
   "message.attachment.uploading": "Йөкләү...",
   "message.attachment.uploadFailed": "Йөкләп булмады",
   "message.attachments.attachment": "Кушымта",

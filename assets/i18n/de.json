@@ -3280,6 +3280,7 @@
   "message.actions.topicDiscussion": "Themen-Diskussion",
   "message.actions.unPinMessage": "Anpinnen aufheben",
   "message.addAMessage": "Eine Nachricht hinzufügen (optional)",
+  "message.attachment.fromPrivateChannel": "Medien aus einem privaten Kanal",
   "message.attachment.uploading": "Wird hochgeladen...",
   "message.attachment.uploadFailed": "Hochladen fehlgeschlagen",
   "message.attachments.attachment": "Anhang",
