@@ -810,19 +810,23 @@ fn schedule_notification_jump(
         tracing::debug!(topic_id, reply_id = message_id.get(), "inbox topic jump");
         navigate(cx, route);
         inbox_handle.hide(cx);
-        TopicBadgeStore::global(cx).update(cx, |store, cx| {
-            store.clear_topic(&topic_id.to_string(), cx);
-        });
-        ChannelList::global(cx).update(cx, |store, cx| {
-            store.apply_topic_read(ChannelId(topic_id), cx);
-        });
-        TopicsStore::global(cx).update(cx, |store, cx| {
-            store.begin_inbox_topic_jump(channel_id, topic_id, message_id, cx);
-        });
+        open_topic_reply(cx, channel_id, topic_id, message_id);
         return;
     }
     tracing::debug!(message_id = message_id.get(), "inbox channel jump");
     schedule_inbox_jump(cx, inbox_handle, route, channel_id, message_id);
+}
+
+pub fn open_topic_reply(cx: &mut App, channel_id: ChannelId, topic_id: i64, reply_id: MessageId) {
+    TopicBadgeStore::global(cx).update(cx, |store, cx| {
+        store.clear_topic(&topic_id.to_string(), cx);
+    });
+    ChannelList::global(cx).update(cx, |store, cx| {
+        store.apply_topic_read(ChannelId(topic_id), cx);
+    });
+    TopicsStore::global(cx).update(cx, |store, cx| {
+        store.begin_inbox_topic_jump(channel_id, topic_id, reply_id, cx);
+    });
 }
 
 fn schedule_topic_jump(
