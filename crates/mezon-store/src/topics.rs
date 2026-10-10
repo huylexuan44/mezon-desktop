@@ -2053,6 +2053,28 @@ mod tests {
     use super::*;
     use crate::message::MessageCode;
 
+    #[gpui::test]
+    fn anonymous_send_requires_an_existing_topic(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            crate::channel::ChannelList::init(api.clone(), cx);
+            crate::account::AccountStore::init(api.clone(), cx);
+            let messages = MessagesStore::init(api, cx);
+            messages.update(cx, |store, cx| {
+                store.set_active_topic(Some(77), cx);
+                store.toggle_anonymous_mode(cx);
+            });
+
+            assert!(!topic_anonymous_send(None, 9, cx));
+            assert!(topic_anonymous_send(Some(77), 9, cx));
+        });
+    }
+
     fn pending_jump(requested_at: Instant) -> PendingInboxTopicJump {
         PendingInboxTopicJump {
             topic_id: 99,

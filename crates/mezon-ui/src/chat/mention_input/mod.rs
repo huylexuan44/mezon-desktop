@@ -26,8 +26,8 @@ use mezon_store::{
     MENTION_HERE_USER_ID, MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS, MentionSearchEvent,
     MentionSearchStore, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
     OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
-    RolesStore, Settings, UserId, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id, is_clan_invite_url,
+    RolesStore, Settings, TopicsStore, UserId, fetch_invite_preview, fetch_ogp,
+    first_previewable_url, internal_invite_id, is_clan_invite_url,
 };
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
@@ -3287,6 +3287,22 @@ impl MentionInput {
         open_message_buzz(true, window, cx);
     }
 
+    fn on_toggle_anonymous(
+        &mut self,
+        _: &ToggleAnonymous,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.for_topic {
+            cx.propagate();
+            return;
+        }
+        if TopicsStore::global(cx).read(cx).active_topic_id().is_none() {
+            return;
+        }
+        toggle_anonymous_shortcut(cx);
+    }
+
     fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup_visible() && !self.accept_best(window, cx) {
             cx.notify();
@@ -3626,6 +3642,7 @@ impl MentionInput {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_dismiss))
+            .on_action(cx.listener(Self::on_toggle_anonymous))
             .when_some(previews, |this, previews| this.child(previews))
             .child(MentionInputField::new(&self.input))
             .when_some(popup, |this, popup| this.child(popup))
@@ -3943,6 +3960,7 @@ impl Render for MentionInput {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_open_buzz))
+            .on_action(cx.listener(Self::on_toggle_anonymous))
             .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(
