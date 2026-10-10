@@ -955,7 +955,7 @@ impl TransportClient {
         channel_id: &str,
         room_name: &str,
         metadata: &str,
-    ) -> Result<String> {
+    ) -> Result<mezon_proto::api::GenerateMeetTokenResponse> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
@@ -967,7 +967,6 @@ impl TransportClient {
                 transport
                     .generate_meet_token(channel_id, &room_name, &metadata)
                     .await
-                    .map(|resp| resp.token)
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?

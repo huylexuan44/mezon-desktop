@@ -3151,7 +3151,7 @@ impl AppApi {
         channel_id: &str,
         room_name: &str,
         metadata: &str,
-    ) -> Result<String> {
+    ) -> Result<mezon_proto::api::GenerateMeetTokenResponse> {
         self.transport
             .generate_meet_token(channel_id, room_name, metadata)
             .await
