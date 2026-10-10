@@ -1,9 +1,8 @@
 use super::context::RowCtx;
 use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
-use crate::components::compositions::channel_row_element::buzz_pill;
 use crate::components::primitives::{
-    Icon, IconName, avatar_color, avatar_text_color, initials_tile, mention_count_badge,
+    Icon, IconName, avatar_color, avatar_text_color, buzz_pill, initials_tile, mention_count_badge,
     name_initials,
 };
 use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px};

@@ -1,8 +1,7 @@
 use gpui::{AnyElement, App, ElementId, Pixels, SharedString, Window, div, prelude::*, px};
 use mezon_store::{ChannelId, DirectKind, DmAvatarPresence};
 
-use crate::components::compositions::channel_row_element::buzz_pill;
-use crate::components::primitives::{Avatar, Icon};
+use crate::components::primitives::{Avatar, Icon, buzz_pill};
 use crate::router::{Route, navigate};
 use crate::theme::Theme;
 use crate::util::user_status::{

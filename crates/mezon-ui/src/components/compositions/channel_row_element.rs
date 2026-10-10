@@ -3,13 +3,13 @@ use std::rc::Rc;
 
 use gpui::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, DispatchPhase,
-    Div, Edges, Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    Edges, Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, SharedString, Style, Styled, TextAlign,
-    TransformationMatrix, Window, div, fill, point, px, quad, size, transparent_black,
+    MouseUpEvent, Pixels, Point, SharedString, Style, TextAlign, TransformationMatrix, Window,
+    fill, point, px, quad, size, transparent_black,
 };
 
-use crate::components::primitives::IconName;
+use crate::components::primitives::{BUZZ_COLOR, BUZZ_LABEL, IconName};
 
 const ROW_VERTICAL_PADDING: Pixels = px(8.);
 const BG_HORIZONTAL_INSET: Pixels = px(8.);
@@ -35,8 +35,6 @@ const BADGE_FONT_SIZE: Pixels = px(12.);
 const BUZZ_HORIZONTAL_PADDING: Pixels = px(4.);
 const BUZZ_CORNER_RADIUS: Pixels = px(4.);
 const BUZZ_GAP: Pixels = px(4.);
-pub(crate) const BUZZ_LABEL: &str = "Buzz!!";
-pub(crate) const BUZZ_COLOR: u32 = 0xef_44_44;
 const FALLBACK_WIDTH: Pixels = px(240.);
 const THREAD_ROW_HEIGHT: Pixels = px(34.);
 const THREAD_CONNECTOR_X: Pixels = px(24.);
@@ -48,21 +46,6 @@ const THREAD_NAME_VERTICAL_NUDGE: Pixels = px(2.);
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 type RightClickHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
-
-pub(crate) fn buzz_pill() -> Div {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .h(BADGE_HEIGHT)
-        .px(BUZZ_HORIZONTAL_PADDING)
-        .rounded(BUZZ_CORNER_RADIUS)
-        .bg(gpui::rgb(BUZZ_COLOR))
-        .text_color(gpui::white())
-        .text_xs()
-        .font_weight(FontWeight::BOLD)
-        .child(BUZZ_LABEL)
-}
 
 pub struct ChannelRowBadge {
     pub count: u32,

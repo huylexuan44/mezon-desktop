@@ -2124,6 +2124,7 @@ impl ChannelMessages {
         let topics = TopicsStore::global(cx).read(cx);
         let badges = TopicBadgeStore::try_global(cx);
         let buzz = BuzzStore::try_global(cx);
+        let buzz = buzz.as_ref().map(|store| store.read(cx));
         let messages = MessagesStore::global(cx).read(cx);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut any_topic = false;
@@ -2142,8 +2143,7 @@ impl ChannelMessages {
                 .map(|store| store.read(cx).topic_badge_count(&topic_id.to_string()))
                 .unwrap_or(0);
             badge.hash(&mut hasher);
-            buzz.as_ref()
-                .is_some_and(|store| store.read(cx).has_topic_buzz(msg.channel_id, topic_id))
+            buzz.is_some_and(|store| store.has_topic_buzz(msg.channel_id, topic_id))
                 .hash(&mut hasher);
         }
         if !any_topic {
