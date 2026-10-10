@@ -1068,7 +1068,7 @@ fn send_attachment(
     }
     store.update(cx, |store, cx| {
         if store.is_anonymous_mode() != anonymous {
-            store.toggle_anonymous_mode(cx);
+            store.toggle_anonymous_mode(false, cx);
         }
         if store.is_anonymous_mode() != anonymous {
             anyhow::bail!("cannot set anonymous={anonymous} for the active channel");
