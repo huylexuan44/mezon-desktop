@@ -3,10 +3,10 @@ use std::rc::Rc;
 
 use gpui::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    Div, Edges, Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, Style, TextAlign, TransformationMatrix, Window,
-    fill, point, px, quad, size, transparent_black,
+    MouseUpEvent, ParentElement, Pixels, Point, SharedString, Style, Styled, TextAlign,
+    TransformationMatrix, Window, div, fill, point, px, quad, size, transparent_black,
 };
 
 use crate::components::primitives::IconName;
@@ -48,6 +48,21 @@ const THREAD_NAME_VERTICAL_NUDGE: Pixels = px(2.);
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 type RightClickHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
+
+pub(crate) fn buzz_pill() -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .h(BADGE_HEIGHT)
+        .px(BUZZ_HORIZONTAL_PADDING)
+        .rounded(BUZZ_CORNER_RADIUS)
+        .bg(gpui::rgb(BUZZ_COLOR))
+        .text_color(gpui::white())
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .child(BUZZ_LABEL)
+}
 
 pub struct ChannelRowBadge {
     pub count: u32,

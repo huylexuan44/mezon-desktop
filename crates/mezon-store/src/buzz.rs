@@ -18,6 +18,7 @@ struct BuzzMark {
     clan_id: ClanId,
     in_channel: Option<MessageId>,
     topics: HashMap<ChannelId, MessageId>,
+    opened: bool,
 }
 
 impl BuzzMark {
@@ -75,13 +76,32 @@ impl BuzzStore {
     }
 
     pub fn has_buzz(&self, channel_id: ChannelId) -> bool {
-        self.marks.contains_key(&channel_id)
+        self.marks.get(&channel_id).is_some_and(|mark| !mark.opened)
+    }
+
+    pub fn has_topic_buzz(&self, channel_id: ChannelId, topic_id: ChannelId) -> bool {
+        self.marks
+            .get(&channel_id)
+            .is_some_and(|mark| mark.topics.contains_key(&topic_id))
     }
 
     pub fn clear_opened(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        if self.marks.remove(&channel_id).is_some() {
+        if self.open(channel_id) {
             cx.notify();
         }
+    }
+
+    fn open(&mut self, channel_id: ChannelId) -> bool {
+        let Some(mark) = self.marks.get_mut(&channel_id) else {
+            return false;
+        };
+        let had_channel_buzz = mark.in_channel.take().is_some();
+        let was_open = std::mem::replace(&mut mark.opened, true);
+        let changed = had_channel_buzz || !was_open;
+        if mark.is_empty() {
+            self.marks.remove(&channel_id);
+        }
+        changed
     }
 
     pub fn clear_seen(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
@@ -157,6 +177,7 @@ impl BuzzStore {
     ) -> bool {
         let mark = self.marks.entry(channel_id).or_default();
         mark.clan_id = clan_id;
+        let reopened = std::mem::take(&mut mark.opened);
         let previous = match topic_id {
             Some(topic_id) => mark.topics.get(&topic_id).copied(),
             None => mark.in_channel,
@@ -170,7 +191,7 @@ impl BuzzStore {
             }
             None => mark.in_channel = Some(latest),
         }
-        previous.is_none()
+        previous.is_none() || reopened
     }
 
     fn unmark_channel(&mut self, channel_id: ChannelId) -> bool {
@@ -701,6 +722,39 @@ mod tests {
         assert!(!store.unmark_topic(channel(8)));
         assert!(store.unmark_topic(channel(TOPIC)));
         assert!(!store.has_buzz(channel(1)));
+    }
+
+    #[test]
+    fn opening_the_channel_hides_its_row_but_keeps_the_topic_buzz_until_the_topic_is_seen() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), None, message(1));
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(2));
+        assert!(store.open(channel(1)));
+        assert!(!store.has_buzz(channel(1)));
+        assert!(store.has_topic_buzz(channel(1), channel(TOPIC)));
+        assert!(!store.open(channel(1)));
+        assert!(store.unmark_topic(channel(TOPIC)));
+        assert!(!store.has_topic_buzz(channel(1), channel(TOPIC)));
+        assert!(store.marks.is_empty());
+    }
+
+    #[test]
+    fn a_new_topic_buzz_after_opening_shows_the_row_again() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(1));
+        store.open(channel(1));
+        assert!(store.mark(CLAN, channel(1), Some(channel(TOPIC)), message(2)));
+        assert!(store.has_buzz(channel(1)));
+        assert!(!store.has_topic_buzz(channel(1), channel(8)));
+    }
+
+    #[test]
+    fn opening_a_channel_with_only_its_own_buzz_forgets_it() {
+        let mut store = BuzzStore::default();
+        store.mark(CLAN, channel(1), None, message(1));
+        assert!(store.open(channel(1)));
+        assert!(store.marks.is_empty());
+        assert!(!store.open(channel(1)));
     }
 
     #[test]
