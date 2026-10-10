@@ -192,8 +192,9 @@ fn navigation_skips_ime(keyval: u32) -> bool {
     ime_caret_nav_key(keyval) || matches!(keyval, TAB | ISO_LEFT_TAB | ESCAPE)
 }
 
+// mezon vendor edit: a focus change made under a WM keyboard grab (GNOME/mutter Alt+Tab) arrives only as WhileGrabbed.
 fn is_keyboard_focus_event(mode: xproto::NotifyMode, detail: xproto::NotifyDetail) -> bool {
-    mode == xproto::NotifyMode::NORMAL
+    (mode == xproto::NotifyMode::NORMAL || mode == xproto::NotifyMode::WHILE_GRABBED)
         && detail != xproto::NotifyDetail::POINTER
         && detail != xproto::NotifyDetail::POINTER_ROOT
         && detail != xproto::NotifyDetail::NONE
