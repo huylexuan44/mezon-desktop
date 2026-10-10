@@ -479,7 +479,15 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .font_weight(FontWeight::MEDIUM)
         .text_color(username_color)
         .child(display_name);
-    if let Some(icon) = role_icon.filter(|icon| !icon.is_empty()) {
+    if shows_anonymous_hat(msg, ctx.app) {
+        name = name.flex().flex_row().items_center().child(
+            Icon::new(IconName::HatIcon)
+                .size(px(16.))
+                .ml(px(4.))
+                .flex_none()
+                .text_color(theme.tokens.text_theme_primary),
+        );
+    } else if let Some(icon) = role_icon.filter(|icon| !icon.is_empty()) {
         name = name.flex().flex_row().items_center().child(
             img(crate::util::imgproxy::role_icon_url(ctx.app, &icon))
                 .size(px(20.))
@@ -506,6 +514,10 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .child(time_label),
         )
         .into_any_element()
+}
+
+fn shows_anonymous_hat(msg: &Message, cx: &App) -> bool {
+    mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) && !msg.is_sending()
 }
 
 fn profile_name_trigger(msg: &Message, ctx: &RowCtx, name: gpui::Div) -> AnyElement {
@@ -2445,7 +2457,7 @@ mod anonymous_persona_tests {
 
     use super::{
         anonymous_display_name, anonymous_message_avatar_urls,
-        resolve_pin_sender_label_with_message,
+        resolve_pin_sender_label_with_message, shows_anonymous_hat,
     };
 
     const ANONYMOUS_ID: &str = "9876";
@@ -2515,6 +2527,17 @@ mod anonymous_persona_tests {
             anonymous_message_avatar_urls(&proxied).1,
             Some(SharedString::from("https://imgproxy/1.webp"))
         );
+    }
+
+    #[gpui::test]
+    fn a_sent_anonymous_row_wears_the_hat_next_to_its_name(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            install_config(cx);
+            assert!(shows_anonymous_hat(&message(1, ANONYMOUS_ID, "money"), cx));
+            assert!(!shows_anonymous_hat(&message(1, "42", "alice"), cx));
+            let sending = Message::new(MessageId::next_optimistic(), "hi", ANONYMOUS_ID, "", 0);
+            assert!(!shows_anonymous_hat(&sending, cx));
+        });
     }
 
     #[gpui::test]
