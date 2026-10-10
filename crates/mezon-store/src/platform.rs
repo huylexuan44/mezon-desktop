@@ -218,12 +218,19 @@ pub struct CliInstallHooks {
     pub toggle: CliInstallToggleFn,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationTopicReply {
+    pub topic_id: String,
+    pub message_id: String,
+}
+
 pub struct DesktopNotification {
     pub title: String,
     pub body: String,
     pub channel_id: Option<String>,
     pub clan_id: Option<String>,
     pub link: Option<String>,
+    pub topic_reply: Option<NotificationTopicReply>,
     /// Local path to a downloaded sender-avatar image, attached as the icon.
     pub icon_path: Option<String>,
 }
