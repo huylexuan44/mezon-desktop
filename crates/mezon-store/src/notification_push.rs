@@ -295,7 +295,7 @@ fn prepare(cx: &App, user_id: &str, n: &GotifyNotification) -> Option<PreparedNo
     let hide_content = Settings::try_global(cx)
         .map(|s| s.read(cx).notifications_hide_content)
         .unwrap_or(false);
-    let (channel_id, clan_id) = route_ids(cx, &n.channel_id);
+    let (channel_id, clan_id) = route_ids(cx, n.effective_channel_id());
     Some(PreparedNotification {
         title: n.title.clone(),
         body: if hide_content {

@@ -37,10 +37,22 @@ pub struct GotifyExtras {
     pub link: String,
     #[serde(default)]
     pub e2eemess: String,
+    #[serde(default, rename = "channel", deserialize_with = "de_id")]
+    pub channel_id: String,
     #[serde(default, rename = "topic", deserialize_with = "de_id")]
     pub topic_id: String,
     #[serde(default, rename = "message", deserialize_with = "de_message_ref_id")]
     pub message_id: String,
+}
+
+impl GotifyNotification {
+    pub fn effective_channel_id(&self) -> &str {
+        if self.channel_id.is_empty() || self.channel_id == "0" {
+            &self.extras.channel_id
+        } else {
+            &self.channel_id
+        }
+    }
 }
 
 /// Decode a snowflake id that may arrive as a JSON number, string, or null.
@@ -285,6 +297,21 @@ mod extras_tests {
         assert_eq!(extras.link, "https://mezon.ai/chat/clans/1/channels/2");
         assert_eq!(extras.topic_id, "2088098374732484608");
         assert_eq!(extras.message_id, "1840651254099873792");
+    }
+
+    #[test]
+    fn a_mention_without_a_top_level_channel_routes_by_its_extras() {
+        let frame = r#"{"message":"hi","title":"t","extras":{"channel":"2048775833006379008","topic":"5"}}"#;
+        let notification: GotifyNotification = serde_json::from_str(frame).expect("frame decodes");
+        assert_eq!(notification.channel_id, "");
+        assert_eq!(notification.effective_channel_id(), "2048775833006379008");
+    }
+
+    #[test]
+    fn a_top_level_channel_wins_over_the_extras() {
+        let frame = r#"{"channel_id":7,"extras":{"channel":"8"}}"#;
+        let notification: GotifyNotification = serde_json::from_str(frame).expect("frame decodes");
+        assert_eq!(notification.effective_channel_id(), "7");
     }
 
     #[test]
