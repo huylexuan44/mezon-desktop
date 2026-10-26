@@ -19,6 +19,9 @@ ignore = [
     "RUSTSEC-2026-0367", # zip 0.6 SUID bits on extract (webrtc-sys-build, own release archive)
     "RUSTSEC-2026-0368", # zip 0.6 symlink targets on extract (webrtc-sys-build, own release archive)
     "RUSTSEC-2026-0369", # zip 0.6 permissions through symlinks (webrtc-sys-build, own release archive)
+    "RUSTSEC-2026-0391", # zstd 0.13 with_context stream reuse (foyer-storage; image cache writes uncompressed)
+    "RUSTSEC-2026-0398", # zstd-safe 7 Seekable::decompress (foyer-storage; seekable API unused)
+    "RUSTSEC-2026-0403", # zstd-safe 7 legacy frame decode (foyer-storage; image cache writes uncompressed)
 ]
 
 [licenses]
