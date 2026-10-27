@@ -55,13 +55,13 @@ use crate::message::{
     message_sort_key, parse_spans, reaction_key, recompute_message_grouping, rollback_reaction,
     sort_messages, spans_only_emoji, viewer_highlight_direct,
 };
-use crate::message_time::{unix_now_millis, unix_now_seconds};
+use crate::message_time::{normalize_unix_seconds, unix_now_millis, unix_now_seconds};
 use crate::ogp::is_clan_invite_url;
 use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::roles::RolesStore;
 use crate::threads::ThreadsStore;
-use crate::topic_badges::TopicBadgeStore;
+use crate::topic_badges::{ReadTopic, TopicBadgeStore};
 use crate::topics::TopicsStore;
 use crate::upload_jobs::{
     self, FailedUpload, MessagePresence, PendingUpload, SavedUploads, UploadJob, UploadJobId,
@@ -1664,6 +1664,159 @@ impl MessagesStore {
         };
         self.set_last_read_message(topic_id, message_id);
         self.set_pending_last_seen(pending, cx);
+    }
+
+    fn read_channel_topics(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_dm || clan_id.is_zero() {
+            return;
+        }
+        let topics = TopicBadgeStore::try_global(cx)
+            .map(|store| {
+                store.update(cx, |store, cx| {
+                    store.take_channel_topics(clan_id, channel_id, cx)
+                })
+            })
+            .unwrap_or_default();
+        let topic_badge = ChannelList::global(cx).update(cx, |cl, cx| {
+            cl.apply_channel_topics_read(clan_id, channel_id, cx)
+        });
+        if topic_badge > 0 {
+            self.clear_parent_topic_badge(clan_id, channel_id, topic_badge, cx);
+        }
+        for topic in topics {
+            if let Some(buzz) = BuzzStore::try_global(cx) {
+                buzz.update(cx, |buzz, cx| buzz.clear_topic_seen(topic.topic_id, cx));
+            }
+            if topic.message_id.get() > 0 {
+                self.queue_topic_last_seen(clan_id, self.mode, topic, cx);
+            } else {
+                self.spawn_topic_tail_read(clan_id, channel_id, topic, cx);
+            }
+        }
+    }
+
+    fn clear_parent_topic_badge(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        topic_badge: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let channels = ChannelList::global(cx).read(cx);
+        if channels
+            .own_unread(clan_id, channel_id)
+            .is_none_or(|(_, unread)| unread)
+        {
+            return;
+        }
+        let Some((message_id, create_time)) = channels
+            .channel(clan_id, channel_id)
+            .map(|ch| (ch.last_sent_message_id, ch.last_sent_timestamp))
+        else {
+            return;
+        };
+        self.last_seen_fingerprint.remove(&channel_id);
+        self.set_pending_last_seen(
+            PendingLastSeen {
+                clan_id,
+                channel_id,
+                message_id,
+                create_time,
+                mode: self.mode,
+                badge_count: topic_badge,
+            },
+            cx,
+        );
+    }
+
+    fn queue_topic_last_seen(
+        &mut self,
+        clan_id: ClanId,
+        mode: i32,
+        topic: ReadTopic,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_last_read_message(topic.topic_id, topic.message_id);
+        self.set_pending_last_seen(
+            PendingLastSeen {
+                clan_id,
+                channel_id: topic.topic_id,
+                message_id: topic.message_id,
+                create_time: topic.create_time,
+                mode,
+                badge_count: topic.badge_count,
+            },
+            cx,
+        );
+    }
+
+    fn spawn_topic_tail_read(
+        &self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        topic: ReadTopic,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        let mode = self.mode;
+        cx.spawn(async move |this, cx| {
+            let page = match api
+                .list_topic_messages(
+                    clan_id.get(),
+                    channel_id.get(),
+                    topic.topic_id.get(),
+                    0,
+                    0,
+                    1,
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(e) => {
+                    tracing::warn!(topic = topic.topic_id.get(), "topic tail fetch failed: {e}");
+                    return;
+                }
+            };
+            let Some(tail) = page.messages.iter().max_by_key(|m| m.message_id) else {
+                return;
+            };
+            let read = ReadTopic {
+                message_id: MessageId(tail.message_id),
+                create_time: normalize_unix_seconds(tail.create_time),
+                ..topic
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation
+                    || this.has_read_message(read.topic_id, read.message_id)
+                {
+                    return;
+                }
+                this.queue_topic_last_seen(clan_id, mode, read, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub fn read_active_channel_topics(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if !self.is_dm
+            && self.active_clan_id == Some(clan_id)
+            && let Some(active_channel_id) = self.active_channel_id
+        {
+            self.read_channel_topics(clan_id, active_channel_id, cx);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_last_seen_message(&self, channel_id: ChannelId) -> Option<MessageId> {
+        self.pending_last_seen
+            .get(&channel_id)
+            .map(|p| p.message_id)
     }
 
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
@@ -6877,6 +7030,9 @@ impl MessagesStore {
         }
 
         self.seed_last_read_from_channel(channel_id, cx);
+        if !is_dm {
+            self.read_channel_topics(clan_id, channel_id, cx);
+        }
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.cache.touch(&channel_id);

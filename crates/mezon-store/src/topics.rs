@@ -2417,6 +2417,11 @@ fn report_topic_listing(
     store.update(cx, |store, cx| {
         store.end_topic_listing(clan_id, listed, listing, cx)
     });
+    if result.is_ok()
+        && let Some(messages) = MessagesStore::try_global(cx)
+    {
+        messages.update(cx, |m, cx| m.read_active_channel_topics(clan_id, cx));
+    }
 }
 
 #[cfg(test)]
@@ -3902,5 +3907,106 @@ mod tests {
                 "{code:?} must allow a topic discussion"
             );
         }
+    }
+
+    fn open_listed_parent(
+        cx: &mut App,
+    ) -> (
+        Entity<TopicBadgeStore>,
+        Entity<crate::messages::MessagesStore>,
+    ) {
+        let (topics, messages) = inbox_test_stores(cx);
+        let api = topics.read(cx).api.clone();
+        let auth_state = cx.new(|_| crate::AuthState::NotAuthenticated);
+        let badges = TopicBadgeStore::init(api, auth_state, cx);
+        crate::channel::ChannelList::global(cx).update(cx, |channels, _| {
+            channels.seed_clan_channels_for_test(
+                ClanId(9),
+                vec![crate::channel::Category {
+                    id: "1".into(),
+                    clan_id: ClanId(9),
+                    name: "General".into(),
+                    order: 0,
+                    channels: vec![crate::channel::Channel {
+                        id: ChannelId(5),
+                        name: "p".into(),
+                        channel_type: crate::channel::ChannelType::Text,
+                        private: false,
+                        clan_id: ClanId(9),
+                        clan_name: String::new(),
+                        category_name: String::new(),
+                        category_id: Some("1".into()),
+                        member_count: 0,
+                        badge_count: 0,
+                        muted: false,
+                        parent_id: None,
+                        last_seen_message_id: MessageId(0),
+                        last_seen_timestamp: 0,
+                        last_sent_message_id: MessageId(0),
+                        last_sent_timestamp: 0,
+                        voice_members: Vec::new(),
+                        is_favorite: false,
+                        creator_id: UserId(0),
+                        active: crate::channel::CHANNEL_ACTIVE_JOINED,
+                        avatar_url: String::new(),
+                        topic: String::new(),
+                        age_restricted: 0,
+                        e2ee: 0,
+                        app_id: 0,
+                    }],
+                }],
+            );
+        });
+        messages.update(cx, |store, cx| {
+            store.open_channel_in_clan(ClanId(9), ChannelId(5), cx);
+        });
+        (badges, messages)
+    }
+
+    #[gpui::test]
+    fn a_listing_for_the_open_channel_reads_its_topics(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (badges, messages) = open_listed_parent(cx);
+            let listing = badges.update(cx, |store, _| store.begin_topic_listing());
+            let mut p_topic = topic(91, 10, "8", "p", 50);
+            p_topic.channel_id = "5".into();
+            p_topic.unread_count = 2;
+            p_topic.last_message_id = "77".into();
+            let mut q_topic = topic(92, 11, "8", "q", 50);
+            q_topic.channel_id = "6".into();
+            q_topic.unread_count = 1;
+            q_topic.last_message_id = "88".into();
+            let result = Ok(vec![p_topic, q_topic]);
+            report_topic_listing("9", listing, &result, cx);
+
+            assert!(!badges.read(cx).topic_has_unread("91"));
+            assert!(badges.read(cx).topic_has_unread("92"));
+            assert_eq!(
+                messages.read(cx).pending_last_seen_message(ChannelId(91)),
+                Some(MessageId(77))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_listing_without_the_topics_last_message_still_clears_it(cx: &mut gpui::TestAppContext) {
+        let (badges, messages) = cx.update(|cx| {
+            let (badges, messages) = open_listed_parent(cx);
+            let listing = badges.update(cx, |store, _| store.begin_topic_listing());
+            let mut p_topic = topic(91, 10, "8", "p", 50);
+            p_topic.channel_id = "5".into();
+            p_topic.unread_count = 2;
+            let result = Ok(vec![p_topic]);
+            report_topic_listing("9", listing, &result, cx);
+            (badges, messages)
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(!badges.read(cx).topic_has_unread("91"));
+            assert_eq!(
+                messages.read(cx).pending_last_seen_message(ChannelId(91)),
+                None
+            );
+        });
     }
 }

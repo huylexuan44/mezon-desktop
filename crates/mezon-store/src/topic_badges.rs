@@ -30,12 +30,22 @@ pub enum TopicBadgeEvent {
     Updated { clan_id: Option<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadTopic {
+    pub topic_id: ChannelId,
+    pub message_id: MessageId,
+    pub create_time: i64,
+    pub badge_count: u32,
+}
+
 #[derive(Debug, Clone)]
 struct TopicParentEntry {
     clan_id: String,
     parent_channel_id: String,
     unread: bool,
     count: u32,
+    last_message_id: i64,
+    last_message_time: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +58,8 @@ pub struct TopicListing {
 struct CheckedTopic {
     clan_id: String,
     parent_channel_id: String,
+    last_message_id: i64,
+    last_message_time: i64,
 }
 
 pub struct TopicBadgeStore {
@@ -281,6 +293,8 @@ impl TopicBadgeStore {
                 let checked = CheckedTopic {
                     clan_id: clan_key.clone(),
                     parent_channel_id: topic.channel_id.clone(),
+                    last_message_id: topic.last_message_id.parse().unwrap_or(0),
+                    last_message_time: i64::from(topic.last_message_timestamp),
                 };
                 changed |= self
                     .checked_unread
@@ -296,6 +310,64 @@ impl TopicBadgeStore {
             });
             cx.notify();
         }
+    }
+
+    pub fn take_channel_topics(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Vec<ReadTopic> {
+        let clan_key = clan_id.to_string();
+        let channel_key = channel_id.to_string();
+        let mut topic_ids: Vec<String> = self
+            .topic_parent_map
+            .iter()
+            .filter(|(_, entry)| {
+                entry.clan_id == clan_key && entry.parent_channel_id == channel_key
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for (id, topic) in &self.checked_unread {
+            if topic.clan_id == clan_key
+                && topic.parent_channel_id == channel_key
+                && !topic_ids.contains(id)
+            {
+                topic_ids.push(id.clone());
+            }
+        }
+        if topic_ids.is_empty() {
+            return Vec::new();
+        }
+        let mut read = Vec::with_capacity(topic_ids.len());
+        for id in topic_ids {
+            self.note_cleared(&id);
+            let entry = self.topic_parent_map.remove(&id);
+            let checked = self.checked_unread.remove(&id);
+            let Ok(topic_id) = id.parse::<ChannelId>() else {
+                continue;
+            };
+            let (message_id, create_time) = match (&entry, &checked) {
+                (Some(e), Some(c)) if c.last_message_id > e.last_message_id => {
+                    (c.last_message_id, c.last_message_time)
+                }
+                (Some(e), _) => (e.last_message_id, e.last_message_time),
+                (None, Some(c)) => (c.last_message_id, c.last_message_time),
+                (None, None) => (0, 0),
+            };
+            read.push(ReadTopic {
+                topic_id,
+                message_id: MessageId(message_id),
+                create_time,
+                badge_count: entry.map_or(0, |e| e.count),
+            });
+        }
+        read.sort_by_key(|topic| topic.topic_id);
+        cx.emit(TopicBadgeEvent::Updated {
+            clan_id: Some(clan_key),
+        });
+        cx.notify();
+        read
     }
 
     pub fn clear_topic(&mut self, topic_id: &str, cx: &mut Context<Self>) {
@@ -382,6 +454,7 @@ impl TopicBadgeStore {
             &parent_channel_id,
             &topic_id,
             Some(&message_id),
+            i64::from(m.create_time_seconds),
             &dedupe_key,
             badge_mention,
         ) {
@@ -455,6 +528,7 @@ impl TopicBadgeStore {
                 &parent_channel_id,
                 &topic_id,
                 Some(&message_id),
+                i64::from(msg_time),
                 &dedupe_key,
                 true,
             ) && !changed_clans.contains(&clan_id)
@@ -489,12 +563,14 @@ impl TopicBadgeStore {
         cleared
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn increment_topic_for_message(
         &mut self,
         clan_id: &str,
         parent_channel_id: &str,
         topic_id: &str,
         message_id: Option<&str>,
+        message_time: i64,
         dedupe_key: &str,
         increment_badge: bool,
     ) -> bool {
@@ -513,10 +589,19 @@ impl TopicBadgeStore {
                 parent_channel_id: parent_channel_id.to_string(),
                 unread: false,
                 count: 0,
+                last_message_id: 0,
+                last_message_time: 0,
             });
         entry.unread = true;
         if increment_badge {
             entry.count = entry.count.saturating_add(1);
+        }
+        if let Some(id) = message_id.and_then(|id| id.parse::<i64>().ok())
+            && id > 0
+            && id >= entry.last_message_id
+        {
+            entry.last_message_id = id;
+            entry.last_message_time = message_time;
         }
         true
     }
@@ -675,6 +760,8 @@ mod tests {
                         parent_channel_id: "5".into(),
                         unread: true,
                         count: 2,
+                        last_message_id: 0,
+                        last_message_time: 0,
                     },
                 );
                 store.clear_topic("99", cx);
@@ -690,6 +777,8 @@ mod tests {
             parent_channel_id: parent_channel_id.into(),
             unread,
             count: 0,
+            last_message_id: 0,
+            last_message_time: 0,
         }
     }
 
@@ -902,6 +991,76 @@ mod tests {
 
                 store.clear_clan(ClanId(11), cx);
                 assert!(!store.any_topic_unread(ClanId(11)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn taking_a_channels_topics_returns_their_newest_message_and_leaves_other_channels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.topic_parent_map.insert(
+                    "92".into(),
+                    TopicParentEntry {
+                        count: 2,
+                        last_message_id: 100,
+                        last_message_time: 50,
+                        ..entry("10", "5", true)
+                    },
+                );
+                store.checked_unread.insert(
+                    "92".into(),
+                    CheckedTopic {
+                        clan_id: "10".into(),
+                        parent_channel_id: "5".into(),
+                        last_message_id: 120,
+                        last_message_time: 60,
+                    },
+                );
+                store.topic_parent_map.insert(
+                    "91".into(),
+                    TopicParentEntry {
+                        count: 1,
+                        last_message_id: 80,
+                        last_message_time: 40,
+                        ..entry("10", "5", true)
+                    },
+                );
+                store
+                    .topic_parent_map
+                    .insert("93".into(), entry("10", "6", true));
+                store
+                    .topic_parent_map
+                    .insert("94".into(), entry("11", "5", true));
+
+                assert_eq!(
+                    store.take_channel_topics(ClanId(10), ChannelId(5), cx),
+                    vec![
+                        ReadTopic {
+                            topic_id: ChannelId(91),
+                            message_id: MessageId(80),
+                            create_time: 40,
+                            badge_count: 1,
+                        },
+                        ReadTopic {
+                            topic_id: ChannelId(92),
+                            message_id: MessageId(120),
+                            create_time: 60,
+                            badge_count: 2,
+                        },
+                    ]
+                );
+                assert!(!store.channel_has_unread_topic(ClanId(10), ChannelId(5)));
+                assert!(store.channel_has_unread_topic(ClanId(10), ChannelId(6)));
+                assert!(store.channel_has_unread_topic(ClanId(11), ChannelId(5)));
+                assert!(
+                    store
+                        .take_channel_topics(ClanId(10), ChannelId(5), cx)
+                        .is_empty()
+                );
             });
         });
     }
