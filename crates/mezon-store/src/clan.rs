@@ -408,6 +408,38 @@ fn clan_badge_from_counts(counts: &[(String, i32, bool)], clan_id: ClanId) -> Op
         .map(|(_, badge, has_unread)| ((*badge).max(0) as u32, *has_unread))
 }
 
+fn apply_refreshed_clan_badges(
+    clans: &mut [Clan],
+    counts: &[(String, i32, bool)],
+    targets: &[(ClanId, u64)],
+    lowered: &HashMap<ClanId, u64>,
+) -> bool {
+    let mut changed = false;
+    for &(clan_id, lowered_at_request) in targets {
+        if lowered.get(&clan_id).copied().unwrap_or(0) != lowered_at_request {
+            continue;
+        }
+        let Some((badge, has_unread)) = clan_badge_from_counts(counts, clan_id) else {
+            continue;
+        };
+        let Some(clan) = clans
+            .iter_mut()
+            .find(|clan| clan.id == clan_id && !clan.muted)
+        else {
+            continue;
+        };
+        if clan.badge_count != badge {
+            clan.badge_count = badge;
+            changed = true;
+        }
+        if (has_unread || badge > 0) && !clan.has_unread {
+            clan.has_unread = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn proto_channel_id(id: Option<ChannelId>) -> i64 {
     id.map(|id| id.get())
         .filter(|id| *id != 0)
@@ -492,6 +524,7 @@ pub struct ClanList {
     badges_in_flight: Option<u64>,
     reload_pending: bool,
     reset_generation: u64,
+    badge_lowered: HashMap<ClanId, u64>,
     saved_order: Vec<ClanId>,
     joining_invite_urls: HashSet<String>,
     invite_join_failed_urls: HashSet<String>,
@@ -534,6 +567,7 @@ impl ClanList {
         self.badges_loaded = false;
         self.badges_in_flight = None;
         self.reload_pending = false;
+        self.badge_lowered.clear();
         self.joining_invite_urls.clear();
         self.invite_join_failed_urls.clear();
         if self.active_clan_id.take().is_some() {
@@ -568,6 +602,7 @@ impl ClanList {
             badges_in_flight: None,
             reload_pending: false,
             reset_generation: 0,
+            badge_lowered: HashMap::new(),
             saved_order: Vec::new(),
             joining_invite_urls: HashSet::new(),
             invite_join_failed_urls: HashSet::new(),
@@ -726,7 +761,14 @@ impl ClanList {
         .detach();
     }
 
-    pub fn refresh_clan_badge(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+    pub fn refresh_clan_badges(&mut self, clan_ids: Vec<ClanId>, cx: &mut Context<Self>) {
+        let targets: Vec<(ClanId, u64)> = clan_ids
+            .into_iter()
+            .map(|clan_id| {
+                let lowered = self.badge_lowered.get(&clan_id).copied().unwrap_or(0);
+                (clan_id, lowered)
+            })
+            .collect();
         let reset_generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
@@ -735,17 +777,15 @@ impl ClanList {
                 if this.reset_generation != reset_generation {
                     return;
                 }
-                if ChannelList::try_global(cx)
-                    .is_some_and(|channels| channels.read(cx).is_clan_cache_loaded(clan_id))
-                {
-                    return;
-                }
                 match result {
                     Ok(counts) => {
-                        if let Some((badge, has_unread)) = clan_badge_from_counts(&counts, clan_id)
-                        {
-                            this.set_badge_count(clan_id, badge, cx);
-                            this.set_has_unread(clan_id, has_unread || badge > 0, cx);
+                        if apply_refreshed_clan_badges(
+                            &mut this.clans,
+                            &counts,
+                            &targets,
+                            &this.badge_lowered,
+                        ) {
+                            cx.notify();
                         }
                     }
                     Err(e) => tracing::warn!("clan badge count refresh failed: {e}"),
@@ -928,6 +968,7 @@ impl ClanList {
             let was_badge = clan.badge_count;
             clan.badge_count = clan.badge_count.saturating_sub(amount);
             if was_badge != clan.badge_count {
+                *self.badge_lowered.entry(clan_id).or_default() += 1;
                 cx.notify();
             }
         }
@@ -937,6 +978,9 @@ impl ClanList {
         if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id) {
             let count = if clan.muted { 0 } else { count };
             if clan.badge_count != count {
+                if count < clan.badge_count {
+                    *self.badge_lowered.entry(clan_id).or_default() += 1;
+                }
                 clan.badge_count = count;
                 cx.notify();
             }
@@ -947,6 +991,7 @@ impl ClanList {
         if let Some(clan) = self.clans.iter_mut().find(|c| c.id == clan_id)
             && (clan.badge_count > 0 || clan.has_unread)
         {
+            *self.badge_lowered.entry(clan_id).or_default() += 1;
             clan.badge_count = 0;
             clan.has_unread = false;
             cx.notify();
@@ -2530,5 +2575,77 @@ mod tests {
         assert_eq!(clan_badge_from_counts(&counts, ClanId(1)), Some((3, true)));
         assert_eq!(clan_badge_from_counts(&counts, ClanId(2)), Some((0, false)));
         assert_eq!(clan_badge_from_counts(&counts, ClanId(99)), None);
+    }
+
+    #[test]
+    fn a_refreshed_count_replaces_a_stale_rail_but_never_clears_the_unread_dot() {
+        let mut rail = four_clans();
+        rail[0].badge_count = 3;
+        rail[0].has_unread = true;
+        rail[1].has_unread = true;
+        rail[2].muted = true;
+        let counts = vec![
+            ("1".to_string(), 1, true),
+            ("2".to_string(), 0, false),
+            ("3".to_string(), 4, true),
+        ];
+        let targets = [
+            (ClanId(1), 0),
+            (ClanId(2), 0),
+            (ClanId(3), 0),
+            (ClanId(4), 0),
+        ];
+        assert!(apply_refreshed_clan_badges(
+            &mut rail,
+            &counts,
+            &targets,
+            &HashMap::new()
+        ));
+        assert_eq!((rail[0].badge_count, rail[0].has_unread), (1, true));
+        assert_eq!((rail[1].badge_count, rail[1].has_unread), (0, true));
+        assert_eq!(rail[2].badge_count, 0);
+        assert_eq!(rail[3].badge_count, 0);
+    }
+
+    #[test]
+    fn a_refreshed_count_is_dropped_when_the_rail_was_lowered_here_meanwhile() {
+        let mut rail = clans();
+        rail[0].badge_count = 0;
+        let counts = vec![("1".to_string(), 2, true)];
+        let lowered = HashMap::from([(ClanId(1), 1)]);
+        assert!(!apply_refreshed_clan_badges(
+            &mut rail,
+            &counts,
+            &[(ClanId(1), 0)],
+            &lowered
+        ));
+        assert_eq!(rail[0].badge_count, 0);
+    }
+
+    #[gpui::test]
+    fn reading_here_counts_as_lowering_the_rail(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let clan_list = init_clan_list(cx);
+            clan_list.update(cx, |clans, cx| {
+                let mut one = make_clan(1, "One", None);
+                one.badge_count = 3;
+                clans.update_clans(vec![one], cx);
+                let at_request = clans.badge_lowered.get(&ClanId(1)).copied().unwrap_or(0);
+
+                clans.increment_clan_badge(ClanId(1), cx);
+                assert_eq!(
+                    clans.badge_lowered.get(&ClanId(1)).copied().unwrap_or(0),
+                    at_request,
+                    "a new mention must not void an in-flight refresh"
+                );
+
+                clans.set_badge_count(ClanId(1), 1, cx);
+                clans.decrement_badge(ClanId(1), 1, cx);
+                assert_eq!(
+                    clans.badge_lowered.get(&ClanId(1)).copied().unwrap_or(0),
+                    at_request + 2
+                );
+            });
+        });
     }
 }

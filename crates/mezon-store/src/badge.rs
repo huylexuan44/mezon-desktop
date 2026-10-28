@@ -30,6 +30,18 @@ const NOTIFICATION_CHANNEL_TYPE_THREAD: i32 = 7;
 const NOTIFICATION_CHANNEL_TYPE_APP: i32 = 8;
 const NOTIFICATION_CHANNEL_TYPE_VOICE: i32 = 10;
 
+fn badge_may_be_stale(badge_count: u32, muted: bool) -> bool {
+    !muted && badge_count > 1
+}
+
+fn badge_reconcile_delay() -> Duration {
+    let jitter_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_millis())
+        .unwrap_or(0);
+    BADGE_RECONCILE_DELAY + Duration::from_millis(u64::from(jitter_ms))
+}
+
 fn notification_badge_clan(notif: &Notification) -> Option<ClanId> {
     if notif.code != NOTIFICATION_USER_MENTIONED && notif.code != NOTIFICATION_USER_REPLIED {
         return None;
@@ -613,7 +625,18 @@ impl BadgeService {
                 }
                 let mut should_reconcile = false;
                 for notif in &n.notifications {
-                    if let Some(clan_id) = notification_badge_clan(notif) {
+                    let Some(clan_id) = notification_badge_clan(notif) else {
+                        continue;
+                    };
+                    let stale = ClanList::try_global(cx)
+                        .and_then(|clans| {
+                            clans
+                                .read(cx)
+                                .clan(clan_id)
+                                .map(|clan| badge_may_be_stale(clan.badge_count, clan.muted))
+                        })
+                        .unwrap_or(false);
+                    if stale {
                         self.reconcile_clans.insert(clan_id);
                         should_reconcile = true;
                     }
@@ -628,21 +651,33 @@ impl BadgeService {
 
     fn schedule_badge_reconcile(&mut self, cx: &mut Context<Self>) {
         self._reconcile_task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(BADGE_RECONCILE_DELAY).await;
+            cx.background_executor()
+                .timer(badge_reconcile_delay())
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let clans = std::mem::take(&mut this.reconcile_clans);
+                let mut rail_clans = Vec::new();
                 for clan_id in clans {
                     let loaded = ChannelList::try_global(cx)
                         .filter(|channels| channels.read(cx).is_clan_cache_loaded(clan_id));
-                    if let Some(channels) = loaded {
-                        channels.update(cx, |channels, cx| {
-                            channels.refresh_badge_seed(clan_id, cx);
-                        });
-                    } else if let Some(clans) = ClanList::try_global(cx) {
-                        clans.update(cx, |clans, cx| {
-                            clans.refresh_clan_badge(clan_id, cx);
-                        });
+                    let Some(channels) = loaded else {
+                        rail_clans.push(clan_id);
+                        continue;
+                    };
+                    let partial = channels.update(cx, |channels, cx| {
+                        channels.refresh_badge_seed(clan_id, cx);
+                        channels.badge_seed_partial(clan_id)
+                    });
+                    if partial {
+                        rail_clans.push(clan_id);
                     }
+                }
+                if !rail_clans.is_empty()
+                    && let Some(clans) = ClanList::try_global(cx)
+                {
+                    clans.update(cx, |clans, cx| {
+                        clans.refresh_clan_badges(rail_clans, cx);
+                    });
                 }
             });
         });
@@ -958,5 +993,20 @@ mod tests {
 
         let other_code = Notification { code: -1, ..base };
         assert_eq!(notification_badge_clan(&other_code), None);
+    }
+
+    #[test]
+    fn only_a_badge_above_one_can_hide_an_old_count() {
+        assert!(!badge_may_be_stale(0, false));
+        assert!(!badge_may_be_stale(1, false));
+        assert!(badge_may_be_stale(2, false));
+        assert!(!badge_may_be_stale(5, true));
+    }
+
+    #[test]
+    fn the_reconcile_delay_is_spread_over_one_extra_second() {
+        let delay = badge_reconcile_delay();
+        assert!(delay >= BADGE_RECONCILE_DELAY);
+        assert!(delay < BADGE_RECONCILE_DELAY + Duration::from_secs(1));
     }
 }

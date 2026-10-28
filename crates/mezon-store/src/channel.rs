@@ -673,6 +673,7 @@ pub struct ChannelList {
     extras_loaded: HashSet<ClanId>,
     extras_loading: HashSet<ClanId>,
     badge_seeding: HashSet<ClanId>,
+    badge_reseed_pending: HashSet<ClanId>,
     badge_seeds: HashMap<ClanId, BadgeSeed>,
     joined_clans: HashSet<ClanId>,
     joining_clans: HashMap<ClanId, Shared<Task<()>>>,
@@ -883,6 +884,7 @@ impl ChannelList {
         self.extras_loaded.clear();
         self.extras_loading.clear();
         self.badge_seeding.clear();
+        self.badge_reseed_pending.clear();
         self.badge_seeds.clear();
         self.joined_clans.clear();
         self.joining_clans.clear();
@@ -1001,6 +1003,7 @@ impl ChannelList {
             extras_loaded: HashSet::new(),
             extras_loading: HashSet::new(),
             badge_seeding: HashSet::new(),
+            badge_reseed_pending: HashSet::new(),
             badge_seeds: HashMap::new(),
             joined_clans: HashSet::new(),
             joining_clans: HashMap::new(),
@@ -1097,6 +1100,7 @@ impl ChannelList {
         self.extras_loaded.remove(&clan_id);
         self.extras_loading.remove(&clan_id);
         self.badge_seeding.remove(&clan_id);
+        self.badge_reseed_pending.remove(&clan_id);
         self.badge_seeds.remove(&clan_id);
         self.joined_clans.remove(&clan_id);
         self.joining_clans.remove(&clan_id);
@@ -1337,10 +1341,20 @@ impl ChannelList {
     }
 
     pub fn refresh_badge_seed(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if self.badge_seeding.contains(&clan_id) {
+            self.badge_reseed_pending.insert(clan_id);
+            return;
+        }
         if let Some(seed) = self.badge_seeds.get_mut(&clan_id) {
             seed.current = false;
         }
         self.seed_badges(clan_id, cx).detach();
+    }
+
+    pub fn badge_seed_partial(&self, clan_id: ClanId) -> bool {
+        self.badge_seeds
+            .get(&clan_id)
+            .is_some_and(|seed| !seed.complete)
     }
 
     pub fn seed_badges(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
@@ -1396,13 +1410,24 @@ impl ChannelList {
                 {
                     return;
                 }
-                this.badge_seeding.remove(&clan_id);
-                let Some(descs) = descs else {
-                    return;
-                };
-                this.apply_badge_seed(clan_id, descs, cx);
+                this.finish_badge_seed(clan_id, descs, cx);
             });
         })
+    }
+
+    fn finish_badge_seed(
+        &mut self,
+        clan_id: ClanId,
+        descs: Option<Vec<ApiChannelDesc>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.badge_seeding.remove(&clan_id);
+        if let Some(descs) = descs {
+            self.apply_badge_seed(clan_id, descs, cx);
+        }
+        if self.badge_reseed_pending.remove(&clan_id) {
+            self.refresh_badge_seed(clan_id, cx);
+        }
     }
 
     fn apply_badge_seed(
@@ -4656,6 +4681,7 @@ impl ChannelList {
             seed.current = false;
         }
         self.badge_seeding.clear();
+        self.badge_reseed_pending.clear();
         self.extras_loaded.clear();
         self.extras_loading.clear();
         self.loading.clear();
@@ -11753,6 +11779,85 @@ mod tests {
                 (3, true),
                 "once seeded, the rail follows the clan's channels"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_reseed_drops_mentions_read_elsewhere_and_keeps_a_channel_read_here(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_clan_with_rail_badge(cx, 0);
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
+                channels.apply_badge_seed(ClanId(1), vec![badge_desc(1, 2), badge_desc(2, 0)], cx);
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    true,
+                    false,
+                    200,
+                    MessageId(9),
+                    cx,
+                );
+                channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(2),
+                    true,
+                    false,
+                    200,
+                    MessageId(10),
+                    cx,
+                );
+                channels.apply_read(ClanId(1), ChannelId(2), cx);
+
+                let server = |channel_id: i64, badge_count: i32| ApiChannelDesc {
+                    last_sent_timestamp: 200,
+                    ..badge_desc(channel_id, badge_count)
+                };
+                channels.apply_badge_seed(ClanId(1), vec![server(1, 1), server(2, 1)], cx);
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(1))
+                        .unwrap()
+                        .badge_count,
+                    1,
+                    "the two mentions read on another device must drop out"
+                );
+                assert_eq!(
+                    channels
+                        .channel(ClanId(1), ChannelId(2))
+                        .unwrap()
+                        .badge_count,
+                    0,
+                    "a server count that predates this desktop's read must not bring the badge back"
+                );
+            });
+            assert_eq!(clan_rail(cx).0, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn a_reseed_asked_while_one_is_in_flight_runs_when_it_lands(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.seed_badges(ClanId(1), cx).detach();
+                channels.refresh_badge_seed(ClanId(1), cx);
+                assert!(channels.badge_reseed_pending.contains(&ClanId(1)));
+
+                channels.finish_badge_seed(ClanId(1), None, cx);
+                assert!(
+                    channels.badge_seeding.contains(&ClanId(1)),
+                    "the queued re-read must start once the earlier one lands"
+                );
+                assert!(channels.badge_reseed_pending.is_empty());
+            });
         });
     }
 
