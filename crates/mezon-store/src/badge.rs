@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context, Entity, Global};
+use gpui::{App, AppContext, Context, Entity, Global, Task};
 use mezon_client::{
     RealtimeEvent, inbox_notification_from_channel_mention, notification_ids_from_content,
 };
@@ -23,11 +23,25 @@ const STREAM_MODE_GROUP: i32 = 3;
 const STREAM_MODE_DM: i32 = 4;
 const MAX_BADGE_DEDUP: usize = 500;
 const DM_GOTIFY_DEDUP_WINDOW: Duration = Duration::from_secs(1);
+const BADGE_RECONCILE_DELAY: Duration = Duration::from_secs(1);
 const NOTIFICATION_USER_MENTIONED: i32 = -9;
 const NOTIFICATION_USER_REPLIED: i32 = -11;
 const NOTIFICATION_CHANNEL_TYPE_THREAD: i32 = 7;
 const NOTIFICATION_CHANNEL_TYPE_APP: i32 = 8;
 const NOTIFICATION_CHANNEL_TYPE_VOICE: i32 = 10;
+
+fn notification_badge_clan(notif: &Notification) -> Option<ClanId> {
+    if notif.code != NOTIFICATION_USER_MENTIONED && notif.code != NOTIFICATION_USER_REPLIED {
+        return None;
+    }
+    if notif.channel_type == NOTIFICATION_CHANNEL_TYPE_APP
+        || notif.channel_type == NOTIFICATION_CHANNEL_TYPE_VOICE
+    {
+        return None;
+    }
+    let clan_id = ClanId(notif.clan_id);
+    (!clan_id.is_zero()).then_some(clan_id)
+}
 
 fn mark_badge_processed(
     seen: &mut HashSet<(ChannelId, MessageId)>,
@@ -191,6 +205,8 @@ pub struct BadgeService {
     processed_badge_order: VecDeque<(ChannelId, MessageId)>,
     dm_push_channels: HashSet<ChannelId>,
     dm_gotify_counted: HashMap<ChannelId, Instant>,
+    reconcile_clans: HashSet<ClanId>,
+    _reconcile_task: Task<()>,
 }
 
 struct GlobalBadgeService(Entity<BadgeService>);
@@ -216,6 +232,8 @@ impl BadgeService {
         self.processed_badge_order.clear();
         self.dm_push_channels.clear();
         self.dm_gotify_counted.clear();
+        self.reconcile_clans.clear();
+        self._reconcile_task = Task::ready(());
         cx.notify();
     }
 
@@ -284,6 +302,8 @@ impl BadgeService {
             processed_badge_order: VecDeque::new(),
             dm_push_channels: HashSet::new(),
             dm_gotify_counted: HashMap::new(),
+            reconcile_clans: HashSet::new(),
+            _reconcile_task: Task::ready(()),
         }
     }
 
@@ -591,9 +611,41 @@ impl BadgeService {
                 for notif in &n.notifications {
                     self.handle_notification(notif, cx);
                 }
+                let mut should_reconcile = false;
+                for notif in &n.notifications {
+                    if let Some(clan_id) = notification_badge_clan(notif) {
+                        self.reconcile_clans.insert(clan_id);
+                        should_reconcile = true;
+                    }
+                }
+                if should_reconcile {
+                    self.schedule_badge_reconcile(cx);
+                }
             }
             _ => {}
         }
+    }
+
+    fn schedule_badge_reconcile(&mut self, cx: &mut Context<Self>) {
+        self._reconcile_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BADGE_RECONCILE_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                let clans = std::mem::take(&mut this.reconcile_clans);
+                for clan_id in clans {
+                    let loaded = ChannelList::try_global(cx)
+                        .filter(|channels| channels.read(cx).is_clan_cache_loaded(clan_id));
+                    if let Some(channels) = loaded {
+                        channels.update(cx, |channels, cx| {
+                            channels.refresh_badge_seed(clan_id, cx);
+                        });
+                    } else if let Some(clans) = ClanList::try_global(cx) {
+                        clans.update(cx, |clans, cx| {
+                            clans.refresh_clan_badge(clan_id, cx);
+                        });
+                    }
+                }
+            });
+        });
     }
 
     fn handle_notification(&mut self, notif: &Notification, cx: &mut Context<Self>) {
@@ -868,5 +920,43 @@ mod tests {
             });
             assert_eq!(unread(cx), Some(1));
         });
+    }
+
+    #[test]
+    fn notification_badge_clan_filters_mention_and_reply_in_clan_channels() {
+        let base = Notification {
+            code: NOTIFICATION_USER_MENTIONED,
+            channel_type: 1,
+            clan_id: 42,
+            ..Default::default()
+        };
+        assert_eq!(notification_badge_clan(&base), Some(ClanId(42)));
+
+        let reply = Notification {
+            code: NOTIFICATION_USER_REPLIED,
+            ..base.clone()
+        };
+        assert_eq!(notification_badge_clan(&reply), Some(ClanId(42)));
+
+        let zero_clan = Notification {
+            clan_id: 0,
+            ..base.clone()
+        };
+        assert_eq!(notification_badge_clan(&zero_clan), None);
+
+        let app_channel = Notification {
+            channel_type: NOTIFICATION_CHANNEL_TYPE_APP,
+            ..base.clone()
+        };
+        assert_eq!(notification_badge_clan(&app_channel), None);
+
+        let voice_channel = Notification {
+            channel_type: NOTIFICATION_CHANNEL_TYPE_VOICE,
+            ..base.clone()
+        };
+        assert_eq!(notification_badge_clan(&voice_channel), None);
+
+        let other_code = Notification { code: -1, ..base };
+        assert_eq!(notification_badge_clan(&other_code), None);
     }
 }

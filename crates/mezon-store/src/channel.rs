@@ -1336,6 +1336,13 @@ impl ChannelList {
         })
     }
 
+    pub fn refresh_badge_seed(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        if let Some(seed) = self.badge_seeds.get_mut(&clan_id) {
+            seed.current = false;
+        }
+        self.seed_badges(clan_id, cx).detach();
+    }
+
     pub fn seed_badges(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
         if self.forgotten_clans.contains(&clan_id)
             || self

@@ -400,6 +400,14 @@ fn apply_clan_badges(clans: &mut [Clan], counts: Vec<(String, i32, bool)>) {
     }
 }
 
+fn clan_badge_from_counts(counts: &[(String, i32, bool)], clan_id: ClanId) -> Option<(u32, bool)> {
+    let target = clan_id.to_string();
+    counts
+        .iter()
+        .find(|(id, _, _)| *id == target)
+        .map(|(_, badge, has_unread)| ((*badge).max(0) as u32, *has_unread))
+}
+
 fn proto_channel_id(id: Option<ChannelId>) -> i64 {
     id.map(|id| id.get())
         .filter(|id| *id != 0)
@@ -712,6 +720,35 @@ impl ClanList {
                         cx.notify();
                     }
                     Err(e) => tracing::warn!("clan badge count fetch failed: {e}"),
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn refresh_clan_badge(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        let reset_generation = self.reset_generation;
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.list_clan_badge_count().await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != reset_generation {
+                    return;
+                }
+                if ChannelList::try_global(cx)
+                    .is_some_and(|channels| channels.read(cx).is_clan_cache_loaded(clan_id))
+                {
+                    return;
+                }
+                match result {
+                    Ok(counts) => {
+                        if let Some((badge, has_unread)) = clan_badge_from_counts(&counts, clan_id)
+                        {
+                            this.set_badge_count(clan_id, badge, cx);
+                            this.set_has_unread(clan_id, has_unread || badge > 0, cx);
+                        }
+                    }
+                    Err(e) => tracing::warn!("clan badge count refresh failed: {e}"),
                 }
             });
         })
@@ -2485,5 +2522,13 @@ mod tests {
                 "a rejected leave must not drop the clan locally"
             );
         });
+    }
+
+    #[test]
+    fn clan_badge_from_counts_extracts_matching_clan_and_clamps_negative() {
+        let counts = vec![("1".to_string(), 3, true), ("2".to_string(), -4, false)];
+        assert_eq!(clan_badge_from_counts(&counts, ClanId(1)), Some((3, true)));
+        assert_eq!(clan_badge_from_counts(&counts, ClanId(2)), Some((0, false)));
+        assert_eq!(clan_badge_from_counts(&counts, ClanId(99)), None);
     }
 }
