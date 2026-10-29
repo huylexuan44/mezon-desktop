@@ -37,6 +37,7 @@ gdk-pixbuf = "0.20"
 # there. These two let us decode the keyframe ourselves; see poster_fallback.rs.
 mp4 = "0.14"
 openh264 = "0.9"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 matroska-demuxer = "0.7"

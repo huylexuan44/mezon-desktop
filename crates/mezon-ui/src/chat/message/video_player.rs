@@ -9,7 +9,9 @@ use gpui::{
 };
 use mezon_store::{may_be_transcoded, open_media_url_external, transcoded_hls_playlist};
 #[cfg(any(windows, target_os = "macos"))]
-use mezon_video::{PreparedVideo, needs_prepared_open};
+use mezon_video::PreparedVideo;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use mezon_video::needs_prepared_open;
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
@@ -279,6 +281,21 @@ impl VideoPlayerView {
                 });
                 return;
             }
+
+            #[cfg(target_os = "linux")]
+            let url = if needs_prepared_open(url.as_ref()) {
+                let copy_url = url.clone();
+                let local = cx
+                    .background_executor()
+                    .spawn(async move { mezon_video::prepare_local_copy(copy_url.as_ref()) })
+                    .await;
+                match local {
+                    Ok(Some(local)) => SharedString::from(local),
+                    Ok(None) | Err(_) => url,
+                }
+            } else {
+                url
+            };
 
             let _ = this.update(cx, |this, cx| {
                 this.finish_open(VideoPlayer::open(url.as_ref(), decode_max_size), cx);

@@ -230,7 +230,7 @@ impl PlayerImpl {
         let position = gst::ClockTime::from_nseconds((target * 1_000_000_000.0) as u64);
         if let Err(error) = self
             .playbin
-            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, position)
+            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, position)
         {
             tracing::warn!(target: "mezon_video", %error, "gstreamer seek failed");
         }
