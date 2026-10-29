@@ -8,8 +8,7 @@ target-*/
 
 # Editor
 .idea/
-.vscode/*
-!.vscode/settings.json
+.vscode/
 *.swp
 *.swo
 
@@ -19,27 +18,16 @@ target-*/
 .session.json
 .mcp-sessions.json
 
-# Local agent tooling (Claude Code / Cursor) — keep personal cruft ignored,
-# but commit shared fmt/vendor guardrails so agents cannot drift.
-# Note: must ignore contents (`dir/*`), not the dir itself, or negation cannot
-# re-include nested paths.
+# Local agent tooling (Claude Code / Cursor)
 .codebase-memory/
 .agents/
-.claude/*
-!.claude/rules/
-!.claude/rules/**
-!.claude/skills/
-!.claude/skills/**
-!.claude/settings.json
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/**
+.claude/
+.cursor/
 .claudeignore
 .cursorignore
 
 # Local project docs / tooling scripts (personal, not committed)
-# AGENTS.md is tracked (agent formatting entrypoint). CLAUDE.md stays local
-# unless force-added — keep personal notes out of git by default.
+AGENTS.md
 CACHE_FLOW.md
 CLAUDE.md
 MASTER_CHECKLIST.md

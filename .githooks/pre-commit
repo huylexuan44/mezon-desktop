@@ -1,32 +1,23 @@
 #!/usr/bin/env bash
 # Formatting gate, run before every commit.
 #
-# Only checks rustfmt on staged mezon-* .rs files so pre-existing fmt drift in
-# untouched files cannot block a focused commit. Full-tree checks stay in CI via
-# `./scripts/fmt.sh check all`.
-#
-# Also rejects a dirty crates/vendor/ tree (accidental rustfmt / IDE format).
+# It calls scripts/fmt.sh — the same script CI runs — so a commit that passes
+# here cannot fail the CI Format job, and vice versa. Deliberately does NOT
+# depend on `just`, so the gate still works on a machine without it.
 #
 # Installed via `just setup-hooks`, or directly:
 #   git config core.hooksPath .githooks
 set -euo pipefail
 
-repo_root="$(git rev-parse --show-toplevel)"
-
-if ! git -C "$repo_root" diff --quiet -- crates/vendor/ \
-    || ! git -C "$repo_root" diff --cached --quiet -- crates/vendor/; then
-    echo >&2
-    echo "pre-commit: crates/vendor/ has local changes — never commit vendored fmt drift." >&2
-    echo "pre-commit: revert with: git checkout -- crates/vendor/" >&2
-    exit 1
-fi
-
+# No staged Rust? Nothing to gate on.
 if ! git diff --cached --name-only --diff-filter=ACM | grep -qE '\.rs$'; then
     exit 0
 fi
 
-if ! "$repo_root/scripts/fmt.sh" check staged; then
+repo_root="$(git rev-parse --show-toplevel)"
+
+if ! "$repo_root/scripts/fmt.sh" check; then
     echo >&2
-    echo "pre-commit: rustfmt check failed on staged files — run 'scripts/fmt.sh fix staged' and stage the result." >&2
+    echo "pre-commit: rustfmt check failed — run 'scripts/fmt.sh fix' (or 'just fix') and stage the result." >&2
     exit 1
 fi

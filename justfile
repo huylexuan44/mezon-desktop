@@ -95,20 +95,16 @@ check:
     cargo clippy {{pkgs}} -- -D warnings
 
 # Formatting gate — the single source of truth for the fmt scope.
-# CI / just lint: all mezon-*; pre-commit: staged only (see .githooks/pre-commit).
+# The pre-commit hook and CI both call this, so they can never drift apart.
 fmt-check:
     ./scripts/fmt.sh check
-
-# Format only staged mezon-* .rs files (preferred for agents / task finish).
-fmt-fix-staged:
-    ./scripts/fmt.sh fix staged
 
 # Strict linting (Use before commit/push)
 lint: _ensure-hooks
     cargo clippy {{pkgs}} --all-targets --all-features --locked -- -D warnings
     @just fmt-check
 
-# Auto-fix formatting and clippy suggestions (full mezon-* pass — not for routine task finish)
+# Auto-fix formatting and clippy suggestions
 fix:
     ./scripts/fmt.sh fix
     cargo clippy {{pkgs}} --fix --allow-dirty --allow-staged
@@ -117,7 +113,7 @@ fix:
 # pre-commit gate without having to remember to install anything.
 setup-hooks:
     git config core.hooksPath .githooks
-    @echo "git hooks -> .githooks (pre-commit runs 'scripts/fmt.sh check staged')"
+    @echo "git hooks -> .githooks (pre-commit runs 'just fmt-check')"
 
 # Installs the hooks on first use of any common recipe, so a fresh clone is
 # formatted-by-default rather than only caught in CI.
