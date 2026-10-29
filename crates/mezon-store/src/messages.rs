@@ -12248,6 +12248,8 @@ mod tests {
                 })
                 .collect(),
             last_seen_message_id: 0,
+            last_sent_message_id: 0,
+            last_sent_sender_id: 0,
         }
     }
 
