@@ -2133,22 +2133,18 @@ impl TopicsStore {
                 .then(|| topic.last_sender_id.parse::<UserId>().ok())
                 .flatten()
                 .filter(|sender| sender.get() > 0);
-            if let Some(sender) = authoritative_sender {
-                if clan_member_avatar(&topic.clan_id, sender, cx).is_some() {
-                    if let Some(key) = avatar_key {
-                        self.inbox_message_avatars.remove(&key);
-                    }
-                    continue;
+            let Some(sender) = authoritative_sender else {
+                continue;
+            };
+            if clan_member_avatar(&topic.clan_id, sender, cx).is_some() {
+                if let Some(key) = avatar_key {
+                    self.inbox_message_avatars.remove(&key);
                 }
-                if matches!(
-                    self.inbox_lsent.get(&topic.id),
-                    Some(InboxLsent::User(recorded)) if *recorded == sender
-                ) {
-                    continue;
-                }
-            } else if matches!(
+                continue;
+            }
+            if matches!(
                 self.inbox_lsent.get(&topic.id),
-                Some(InboxLsent::Loading | InboxLsent::User(_) | InboxLsent::Failed)
+                Some(InboxLsent::User(recorded)) if *recorded == sender
             ) {
                 continue;
             }
