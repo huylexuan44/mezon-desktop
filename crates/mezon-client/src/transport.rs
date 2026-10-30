@@ -6376,7 +6376,7 @@ impl MezonTransport {
             .send_api_request(cid, "ListChannelDetail", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         let channel = api::ChannelDescription::decode(response.as_slice())?;
         Ok(Self::channel_desc_from_proto(channel))
