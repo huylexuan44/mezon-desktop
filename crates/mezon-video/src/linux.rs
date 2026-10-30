@@ -176,7 +176,11 @@ impl PlayerImpl {
         if self.failed.get() {
             return None;
         }
-        let sample = self.appsink.try_pull_sample(gst::ClockTime::ZERO)?;
+        let sample = if self.is_playing() {
+            self.appsink.try_pull_sample(gst::ClockTime::ZERO)?
+        } else {
+            self.appsink.try_pull_preroll(gst::ClockTime::ZERO)?
+        };
         let buffer = sample.buffer()?;
         let caps = sample.caps()?;
         let info = gst_video::VideoInfo::from_caps(caps).ok()?;
