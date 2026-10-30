@@ -456,6 +456,11 @@ impl VideoPlayerView {
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
     }
 
+    fn is_refreshing_frame(&self) -> bool {
+        self.frame_refresh_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(target) = self.pending_seek.take() {
             self.apply_seek_target(target, false, window, cx);
@@ -479,9 +484,7 @@ impl VideoPlayerView {
             player.pause();
             playing = false;
         }
-        let refreshing = self
-            .frame_refresh_until
-            .is_some_and(|until| Instant::now() < until);
+        let refreshing = self.is_refreshing_frame();
         let new_frame = if playing || refreshing {
             player.copy_frame()
         } else {
@@ -1257,7 +1260,7 @@ impl Render for VideoPlayerView {
                 .into_any_element();
         }
 
-        if playing && window.is_window_active() {
+        if (playing || self.is_refreshing_frame()) && window.is_window_active() {
             window.request_animation_frame();
         }
 
