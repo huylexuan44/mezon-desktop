@@ -756,7 +756,8 @@ impl AppApi {
         text: &str,
         search_type: i32,
     ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
-        self.search_ctrl_k_cancellable(text, search_type, None).await
+        self.search_ctrl_k_cancellable(text, search_type, None)
+            .await
     }
 
     pub async fn search_ctrl_k_cancellable(

@@ -1099,7 +1099,8 @@ impl MezonTransport {
         cancel: Option<SearchCancel>,
     ) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
-        self.send_connected_cancellable(cid, message, timeout, cancel).await
+        self.send_connected_cancellable(cid, message, timeout, cancel)
+            .await
     }
 
     async fn send_connected(
@@ -1108,7 +1109,8 @@ impl MezonTransport {
         message: Vec<u8>,
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
-        self.send_connected_cancellable(cid, message, timeout, None).await
+        self.send_connected_cancellable(cid, message, timeout, None)
+            .await
     }
 
     async fn send_connected_cancellable(
@@ -8097,7 +8099,8 @@ impl MezonTransport {
         text: &str,
         search_type: i32,
     ) -> Result<api::SearchCtrlKResponse> {
-        self.search_ctrl_k_cancellable(text, search_type, None).await
+        self.search_ctrl_k_cancellable(text, search_type, None)
+            .await
     }
 
     pub async fn search_ctrl_k_cancellable(
@@ -8108,9 +8111,7 @@ impl MezonTransport {
     ) -> Result<api::SearchCtrlKResponse> {
         let text = text.trim();
         if !ctrlk_search_text_accepted(text) {
-            anyhow::bail!(
-                "SearchCtrlK text must be at least {SEARCH_CTRL_K_MIN_CHARS} characters"
-            );
+            anyhow::bail!("SearchCtrlK text must be at least {SEARCH_CTRL_K_MIN_CHARS} characters");
         }
         if text.len() > SEARCH_CTRL_K_MAX_TEXT_BYTES {
             anyhow::bail!("SearchCtrlK text exceeds {SEARCH_CTRL_K_MAX_TEXT_BYTES} bytes");

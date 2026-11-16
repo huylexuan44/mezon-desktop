@@ -3,8 +3,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::AppApi;
 pub use mezon_client::transport::{
-    SEARCH_CTRL_K_MAX_TEXT_BYTES, SEARCH_CTRL_K_MIN_CHARS, SearchCancel,
-    ctrlk_search_text_accepted,
+    SEARCH_CTRL_K_MAX_TEXT_BYTES, SEARCH_CTRL_K_MIN_CHARS, SearchCancel, ctrlk_search_text_accepted,
 };
 
 use crate::ids::{ChannelId, ClanId, UserId};
