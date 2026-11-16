@@ -22,6 +22,9 @@ use tokio::sync::{oneshot, watch};
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 pub const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
 pub const SEARCH_CTRL_K_MAX_TEXT_BYTES: usize = 255;
+/// The prefix index is edge_ngram 1-20, so a one-character query matches a large
+/// share of the index and burns the whole search budget for nothing.
+pub const SEARCH_CTRL_K_MIN_CHARS: usize = 2;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -211,6 +214,16 @@ pub fn mention_search_text_accepted(text: &str) -> bool {
     let chars = text.trim().chars().filter(|c| !c.is_control()).count();
     (MENTION_SEARCH_MIN_CHARS..=MENTION_SEARCH_MAX_CHARS).contains(&chars)
 }
+
+/// Counts code points like the server's rune check, so an emoji is one character.
+pub fn ctrlk_search_text_accepted(text: &str) -> bool {
+    let chars = text.trim().chars().filter(|c| !c.is_control()).count();
+    chars >= SEARCH_CTRL_K_MIN_CHARS
+}
+
+/// Fires when a newer keystroke supersedes an in-flight Ctrl+K search, so the
+/// old request can drop instead of holding a server slot until it times out.
+pub type SearchCancel = oneshot::Receiver<()>;
 
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
@@ -1059,6 +1072,19 @@ impl MezonTransport {
         message: Vec<u8>,
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
+        self.send_with_timeout_cancellable(cid, message, timeout, None)
+            .await
+    }
+
+    /// Send and wait, abandoning the wait when `cancel` fires. The pending entry
+    /// is dropped on every early return so a late answer is never matched.
+    pub async fn send_with_timeout_cancellable(
+        &self,
+        cid: u16,
+        message: Vec<u8>,
+        timeout: Duration,
+        mut cancel: Option<SearchCancel>,
+    ) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
         let (tx, rx) = oneshot::channel();
         self.pending_requests
@@ -1068,14 +1094,25 @@ impl MezonTransport {
             self.pending_requests.lock().remove(&cid);
             return Err(e);
         }
-        let result = tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| {
-                self.pending_requests.lock().remove(&cid);
-                anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
-            })?
-            .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
-        Ok(result)
+        let response = async {
+            tokio::time::timeout(timeout, rx)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
+                })?
+                .map_err(|_| anyhow::anyhow!("Response channel closed"))
+        };
+        let result = match cancel.as_mut() {
+            None => response.await,
+            Some(cancel) => tokio::select! {
+                result = response => result,
+                _ = cancel => Err(anyhow::anyhow!("Request cancelled (cid={cid})")),
+            },
+        };
+        if result.is_err() {
+            self.pending_requests.lock().remove(&cid);
+        }
+        result
     }
 
     async fn send_realtime_control(
@@ -4806,11 +4843,27 @@ impl MezonTransport {
         api_name: &str,
         body: Vec<u8>,
     ) -> Result<(u32, Vec<u8>)> {
+        self.send_api_request_cancellable(cid, api_name, body, None)
+            .await
+    }
+
+    async fn send_api_request_cancellable(
+        &self,
+        cid: u16,
+        api_name: &str,
+        body: Vec<u8>,
+        cancel: Option<SearchCancel>,
+    ) -> Result<(u32, Vec<u8>)> {
         tracing::debug!(target: "socket", "api_send: action={api_name} cid={cid}");
         let started = Instant::now();
         let args = Self::args_fingerprint(&body);
         let (code, response) = self
-            .send(cid, self.build_api_request(cid, api_name, body)?)
+            .send_with_timeout_cancellable(
+                cid,
+                self.build_api_request(cid, api_name, body)?,
+                self.send_timeout_ms,
+                cancel,
+            )
             .await?;
         self.complete_api_request(api_name, cid, code, response, args, started)
     }
@@ -7915,9 +7968,20 @@ impl MezonTransport {
         text: &str,
         search_type: i32,
     ) -> Result<api::SearchCtrlKResponse> {
+        self.search_ctrl_k_cancellable(text, search_type, None).await
+    }
+
+    pub async fn search_ctrl_k_cancellable(
+        &self,
+        text: &str,
+        search_type: i32,
+        cancel: Option<SearchCancel>,
+    ) -> Result<api::SearchCtrlKResponse> {
         let text = text.trim();
-        if text.is_empty() {
-            anyhow::bail!("SearchCtrlK text must not be empty");
+        if !ctrlk_search_text_accepted(text) {
+            anyhow::bail!(
+                "SearchCtrlK text must be at least {SEARCH_CTRL_K_MIN_CHARS} characters"
+            );
         }
         if text.len() > SEARCH_CTRL_K_MAX_TEXT_BYTES {
             anyhow::bail!("SearchCtrlK text exceeds {SEARCH_CTRL_K_MAX_TEXT_BYTES} bytes");
@@ -7928,7 +7992,9 @@ impl MezonTransport {
             r#type: search_type,
         }
         .encode_to_vec();
-        let (code, response) = self.send_api_request(cid, "SearchCtrlK", body).await?;
+        let (code, response) = self
+            .send_api_request_cancellable(cid, "SearchCtrlK", body, cancel)
+            .await?;
         if code != 0 {
             return Err(api_status_error(code));
         }
