@@ -1995,11 +1995,25 @@ impl TransportClient {
         text: &str,
         search_type: i32,
     ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        self.search_ctrl_k_cancellable(text, search_type, None)
+            .await
+    }
+
+    pub async fn search_ctrl_k_cancellable(
+        &self,
+        text: &str,
+        search_type: i32,
+        cancel: Option<crate::transport::SearchCancel>,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
         let transport = self.inner.clone();
         let text = text.to_string();
 
         runtime()
-            .spawn(async move { transport.search_ctrl_k(&text, search_type).await })
+            .spawn(async move {
+                transport
+                    .search_ctrl_k_cancellable(&text, search_type, cancel)
+                    .await
+            })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

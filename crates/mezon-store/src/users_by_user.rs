@@ -94,6 +94,7 @@ pub struct UsersByUserStore {
     missing_profile_ids: HashSet<UserId>,
     profile_lookup_results: KeyedCache<UserId, Result<(), ()>>,
     missing_profile_task: Option<Task<()>>,
+    search_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     _search_task: Task<()>,
     _conn_watch: Task<()>,
 }
@@ -125,6 +126,9 @@ impl UsersByUserStore {
         self.search_hits.clear();
         self.search_query.clear();
         self.search_generation = self.search_generation.wrapping_add(1);
+        if let Some(tx) = self.search_cancel_tx.take() {
+            let _ = tx.send(());
+        }
         self.loading = false;
         self.freshness.mark_stale();
         cx.notify();
@@ -151,6 +155,7 @@ impl UsersByUserStore {
                 mezon_client::INBOX_PAGE_LIMIT as usize * 4,
             )),
             missing_profile_task: None,
+            search_cancel_tx: None,
             _search_task: Task::ready(()),
             _conn_watch: conn_watch,
         }
@@ -373,8 +378,19 @@ impl UsersByUserStore {
     pub fn search(&mut self, query: &str, cx: &mut Context<Self>) {
         let query = query.trim().to_string();
         self.search_generation = self.search_generation.wrapping_add(1);
+        if let Some(tx) = self.search_cancel_tx.take() {
+            let _ = tx.send(());
+        }
         self._search_task = Task::ready(());
         if query.is_empty() {
+            if !self.search_hits.is_empty() || !self.search_query.is_empty() {
+                self.search_hits.clear();
+                self.search_query.clear();
+                cx.emit(UsersByUserEvent::SearchSettled);
+            }
+            return;
+        }
+        if !mezon_client::ctrlk_search_text_accepted(&query) {
             if !self.search_hits.is_empty() || !self.search_query.is_empty() {
                 self.search_hits.clear();
                 self.search_query.clear();
@@ -385,14 +401,20 @@ impl UsersByUserStore {
         if query == self.search_query {
             return;
         }
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        self.search_cancel_tx = Some(cancel_tx);
         let generation = self.search_generation;
         let api = self.api.clone();
         tracing::debug!(query, generation, "user search sent");
         self._search_task = cx.spawn(async move |this, cx| {
             let result = api
-                .search_ctrl_k(&query, CtrlKSearchType::Users.as_raw())
+                .search_ctrl_k_cancellable(&query, CtrlKSearchType::Users.as_raw(), Some(cancel_rx))
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.search_cancel_tx = None;
                 this.apply_search_result(generation, query, result, cx)
             });
         });
@@ -475,6 +497,9 @@ impl UsersByUserStore {
         self.reset_profiles();
         self.loading = false;
         self.search_generation = self.search_generation.wrapping_add(1);
+        if let Some(tx) = self.search_cancel_tx.take() {
+            let _ = tx.send(());
+        }
         self._search_task = Task::ready(());
         self.freshness.mark_stale();
     }

@@ -266,6 +266,9 @@ impl CommandPaletteModal {
     }
 
     fn schedule_debounced_filter(&mut self, cx: &mut Context<Self>) {
+        if let Some(ctrlk) = CtrlKSearchStore::try_global(cx) {
+            ctrlk.update(cx, |store, _| store.cancel_in_flight());
+        }
         self._debounce_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))

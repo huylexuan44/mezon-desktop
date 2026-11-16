@@ -443,7 +443,7 @@ fn parse_search(query: &str) -> (SearchScope, &str) {
 fn server_channel_query(query: &str) -> Option<String> {
     let (scope, needle) = parse_search(query);
     (scope != SearchScope::Members
-        && !needle.is_empty()
+        && mezon_store::ctrlk_search_text_accepted(needle)
         && needle.len() <= SEARCH_CTRL_K_MAX_TEXT_BYTES)
         .then(|| needle.to_string())
 }
@@ -2187,6 +2187,12 @@ mod tests {
         assert_eq!(server_channel_query("@gen"), None);
         assert_eq!(server_channel_query("#  "), None);
         assert_eq!(server_channel_query(""), None);
+        assert_eq!(
+            server_channel_query("g"),
+            None,
+            "queries shorter than 2 characters are rejected by the server"
+        );
+        assert_eq!(server_channel_query("# g"), None);
         assert_eq!(
             server_channel_query(&"a".repeat(SEARCH_CTRL_K_MAX_TEXT_BYTES + 1)),
             None,
