@@ -1260,8 +1260,6 @@
   "chat.messagePlaceholder": "Сообщение",
   "chat.newMessages": "Новый",
   "setting.appSettings.streaming": "Трансляции",
-  "setting.chat.grammarCorrection.description": "Предлагает исправления орфографии и грамматики при наборе (до 256 символов).",
-  "setting.chat.grammarCorrection.title": "Исправление грамматики",
   "setting.chat.quickReplies.description": "Показывает быстрые ответы по последнему сообщению в канале.",
   "setting.chat.quickReplies.title": "Быстрые ответы",
   "setting.chat.onlyFriendsDm.title": "Не получать сообщения от незнакомцев.",

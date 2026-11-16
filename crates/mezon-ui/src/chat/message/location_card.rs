@@ -217,14 +217,14 @@ fn map_credit(row_id: i64, locale: &str) -> AnyElement {
         .px(px(4.))
         .py(px(1.))
         .rounded(px(3.))
-        .bg(rgba(0x000000_99))
+        .bg(rgba(0x0000_0099))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(|_, _, cx| open_message_link(MAP_CREDIT_URL.to_string(), cx))
         .child(
             div()
                 .text_size(px(10.))
-                .text_color(rgba(0xffffff_e6))
+                .text_color(rgba(0xffff_ffe6))
                 .child(mezon_i18n::t(locale, "message.mapView.mapCredit")),
         )
         .into_any_element()

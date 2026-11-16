@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "Envoyer un message",
   "chat.newMessages": "Nouveau",
   "setting.appSettings.streaming": "Streaming",
-  "setting.chat.grammarCorrection.description": "Suggère des corrections d'orthographe et de grammaire pendant la saisie (jusqu'à 256 caractères).",
-  "setting.chat.grammarCorrection.title": "Correction grammaticale",
   "setting.chat.quickReplies.description": "Affiche des réponses rapides d'après le dernier message du salon.",
   "setting.chat.quickReplies.title": "Réponses rapides",
   "setting.chat.onlyFriendsDm.title": "Ne pas recevoir de messages d'inconnus.",

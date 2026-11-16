@@ -1260,8 +1260,6 @@
   "chat.messagePlaceholder": "Хәбәр",
   "chat.newMessages": "Яңа",
   "setting.appSettings.streaming": "Трансляцияләр",
-  "setting.chat.grammarCorrection.description": "Язганда орфография һәм грамматика төзәтмәләрен тәкъдим итә (256 символга кадәр).",
-  "setting.chat.grammarCorrection.title": "Грамматиканы төзәтү",
   "setting.chat.quickReplies.description": "Каналдагы соңгы хәбәр буенча тиз җавапларны күрсәтә.",
   "setting.chat.quickReplies.title": "Тиз җаваплар",
   "setting.chat.onlyFriendsDm.title": "Таныш булмаганнардан хәбәрләр алмау.",

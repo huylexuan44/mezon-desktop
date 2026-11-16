@@ -1,4 +1,3 @@
-use crate::chat::mention_input::grammar_correction_bar as shared_grammar_correction_bar;
 use crate::chat::message::invite_card::member_count_label;
 use crate::chat::quick_replies::{
     last_text_message_for_quick_replies, message_bucket, quick_reply_source_text,
@@ -404,31 +403,9 @@ impl InputBar {
             )
     }
 
-    fn grammar_correction_bar(
-        &self,
-        theme: &Theme,
-        text: SharedString,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        shared_grammar_correction_bar(
-            theme,
-            text,
-            cx.listener(|this, _, window, cx| {
-                this.mention_input.update(cx, |input, cx| {
-                    input.apply_grammar_correction(window, cx);
-                });
-            }),
-            cx.listener(|this, _, _, cx| {
-                this.mention_input
-                    .update(cx, |input, cx| input.dismiss_grammar_popup(cx));
-            }),
-        )
-    }
-
     fn render_bar(&self, theme: std::sync::Arc<Theme>, cx: &mut Context<Self>) -> impl IntoElement {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
-        let grammar_correction = self.mention_input.read(cx).grammar_correction_text();
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
         let store = MessagesStore::global(cx);
         let anonymous = if self.for_topic {
@@ -452,9 +429,6 @@ impl InputBar {
                     .flex()
                     .flex_col()
                     .w_full()
-                    .when_some(grammar_correction, |d, text| {
-                        d.child(self.grammar_correction_bar(&theme, text, cx))
-                    })
                     .when_some(ogp_preview, |d, preview| {
                         d.child(self.ogp_preview_bar(&preview, &theme, cx))
                     })

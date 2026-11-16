@@ -451,6 +451,9 @@ impl CallStore {
         self.phase = CallPhase::Outgoing;
 
         let (input_device, output_device, camera_device) = self.call_devices(cx);
+        let virtual_background = crate::Settings::try_global(cx)
+            .map(|s| s.read(cx).virtual_background)
+            .unwrap_or_default();
         let config = CallConfig {
             ice_servers: ice_servers(cx),
             is_caller: true,
@@ -459,6 +462,7 @@ impl CallStore {
             output_device,
             camera_device,
             initial_camera_on: video,
+            virtual_background,
         };
         self.spawn_engine(config, cx);
         self.write_start_call_log(video, cx);
@@ -502,6 +506,9 @@ impl CallStore {
         self.tones.stop_dial_ring();
 
         let (input_device, output_device, camera_device) = self.call_devices(cx);
+        let virtual_background = crate::Settings::try_global(cx)
+            .map(|s| s.read(cx).virtual_background)
+            .unwrap_or_default();
         let config = CallConfig {
             ice_servers: ice_servers(cx),
             is_caller: false,
@@ -510,6 +517,7 @@ impl CallStore {
             output_device,
             camera_device,
             initial_camera_on: video,
+            virtual_background,
         };
         self.spawn_engine(config, cx);
         if let Some(engine) = &self.engine {
@@ -637,6 +645,12 @@ impl CallStore {
     pub fn set_camera_device(&self, device_id: Option<String>) {
         if let Some(engine) = &self.engine {
             engine.send(EngineCommand::SetCameraDevice(device_id));
+        }
+    }
+
+    pub fn set_virtual_background(&self, mode: mezon_voice::VirtualBackgroundMode) {
+        if let Some(engine) = &self.engine {
+            engine.set_virtual_background(mode);
         }
     }
 
