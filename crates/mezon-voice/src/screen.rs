@@ -875,7 +875,7 @@ fn blend_annotations(compositor: &AnnotationCompositor, buffer: &mut I420Buffer)
     compositor.blend(y, u, v, sy as usize, su as usize, sv as usize);
 }
 
-fn publish_i420_preview(
+pub(crate) fn publish_i420_preview(
     frame_store: &VideoFrameStore,
     key: u64,
     buffer: &I420Buffer,

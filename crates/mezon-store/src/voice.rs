@@ -5463,7 +5463,10 @@ impl VoiceStore {
     pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
         Self::persist_device(DeviceKind::AudioInput, device_id.clone(), cx);
         if let Some(session) = &self.session {
-            session.set_input_device(device_id);
+            session.set_input_device(device_id.clone());
+        }
+        if let Some(live) = crate::live::LiveStore::try_global(cx) {
+            live.update(cx, |live, cx| live.set_input_device(device_id, cx));
         }
         self.device_menu = None;
         self.device_submenu = None;
@@ -5483,7 +5486,10 @@ impl VoiceStore {
     pub fn set_camera_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
         Self::persist_device(DeviceKind::VideoInput, device_id.clone(), cx);
         if let Some(session) = &self.session {
-            session.set_camera_device(device_id);
+            session.set_camera_device(device_id.clone());
+        }
+        if let Some(live) = crate::live::LiveStore::try_global(cx) {
+            live.update(cx, |live, cx| live.set_camera_device(device_id, cx));
         }
         self.device_menu = None;
         self.device_submenu = None;

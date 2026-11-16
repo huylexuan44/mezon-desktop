@@ -5,6 +5,7 @@ pub mod compose;
 mod input_switch;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
+pub mod live;
 pub mod matting;
 mod noise;
 mod permission;
@@ -56,6 +57,10 @@ pub use camera::{
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::{record_wayland_session, set_portal_parent_window};
+pub use live::{
+    LIVE_PREVIEW_KEY, LiveEndpoint, LiveEndpointRefresher, LiveEvent, LiveFailure, LiveOptions,
+    LiveSession, LiveSource,
+};
 pub use matting::{MezonMatteProcessor, VirtualBackgroundMode};
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
@@ -102,7 +107,7 @@ const FRAME_PATH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_REMOTE_VIDEO_WIDTH: u32 = 1920;
 const MAX_REMOTE_VIDEO_HEIGHT: u32 = 1080;
 
-const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
+pub(crate) const AUDIO_SOURCE_QUEUE_SIZE_MS: u32 = 100;
 const PLAYBACK_RESTART_DELAY: Duration = Duration::from_millis(500);
 const MAX_PLAYBACK_RESTARTS: u32 = 3;
 
@@ -1523,7 +1528,7 @@ async fn abort_task(task: &mut Option<tokio::task::JoinHandle<()>>) {
     }
 }
 
-async fn shutdown_audio_io(audio_io: &mut Option<audio::AudioIo>) {
+pub(crate) async fn shutdown_audio_io(audio_io: &mut Option<audio::AudioIo>) {
     if let Some(io) = audio_io.take() {
         let _ = tokio::task::spawn_blocking(move || drop(io)).await;
     }
