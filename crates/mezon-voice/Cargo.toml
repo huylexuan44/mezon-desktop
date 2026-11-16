@@ -31,6 +31,12 @@ nokhwa = { version = "0.10", default-features = false }
 
 image = { workspace = true }
 yuv = { workspace = true }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+] }
 mezon-record = { path = "../mezon-record" }
 mezon-ns = { workspace = true }
 tiny-skia = "0.11"

@@ -451,6 +451,7 @@ fn render_meeting_pre_join(
                     .child(message),
             )
         })
+        .child(virtual_background_pre_join_selector(theme, voice, cx))
         .child(join_role_button(theme, locale, voice, join_action, cx));
 
     div()
@@ -3657,6 +3658,34 @@ fn control_bar(
         cx,
     );
 
+    let vtbg_active = store.virtual_background().is_enabled();
+    let is_vtbg_open = store.device_menu() == Some(DeviceMenuKind::VirtualBackground);
+    let vtbg_button = {
+        let voice = voice.clone();
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if vtbg_active || is_vtbg_open {
+            (
+                gpui::rgb(ACCENT_BLUE).into(),
+                darken(gpui::rgb(ACCENT_BLUE), 0.1),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        circle_button("voice-vtbg-btn", bg, hover, IconName::Sparkles, color)
+            .tooltip(Tooltip::text("Virtual Background"))
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| {
+                    store.toggle_device_menu(DeviceMenuKind::VirtualBackground, cx);
+                });
+            })
+    };
+    let vtbg_flyout = is_vtbg_open.then(|| virtual_background_flyout(theme, locale, voice, store));
+    let vtbg_button = div()
+        .relative()
+        .child(vtbg_button)
+        .children(vtbg_flyout)
+        .into_any_element();
+
     let screen_button = {
         let voice = voice.clone();
         let settings = settings.clone();
@@ -4164,6 +4193,7 @@ fn control_bar(
         .children(ptt_button)
         .children((!is_audience).then_some(mic_button))
         .children((!is_audience).then_some(camera_button))
+        .children((!is_audience).then_some(vtbg_button))
         .children((!is_audience).then_some(screen_button))
         .children(agent_button)
         .children(breakout_button)
@@ -4761,6 +4791,7 @@ fn device_control(
         DeviceMenuKind::Microphone => "voice-mic-devices-btn",
         DeviceMenuKind::Camera => "voice-camera-devices-btn",
         DeviceMenuKind::ScreenShare => "voice-screen-mode-btn",
+        DeviceMenuKind::VirtualBackground => "voice-vtbg-devices-btn",
     };
     let arrow_hover = theme.bg_hover;
     let arrow = {
@@ -4799,7 +4830,7 @@ fn device_control(
     let permission_device = match menu_kind {
         DeviceMenuKind::Microphone => Some(MediaDevice::Microphone),
         DeviceMenuKind::Camera => Some(MediaDevice::Camera),
-        DeviceMenuKind::ScreenShare => None,
+        DeviceMenuKind::ScreenShare | DeviceMenuKind::VirtualBackground => None,
     };
     div()
         .relative()
@@ -4849,10 +4880,13 @@ fn device_flyout(
     if menu_kind == DeviceMenuKind::ScreenShare {
         return screen_mode_flyout(theme, locale, voice, store);
     }
+    if menu_kind == DeviceMenuKind::VirtualBackground {
+        return virtual_background_flyout(theme, locale, voice, store);
+    }
     let kinds: &[DeviceKind] = match menu_kind {
         DeviceMenuKind::Microphone => &[DeviceKind::AudioInput, DeviceKind::AudioOutput],
         DeviceMenuKind::Camera => &[DeviceKind::VideoInput],
-        DeviceMenuKind::ScreenShare => &[],
+        DeviceMenuKind::ScreenShare | DeviceMenuKind::VirtualBackground => &[],
     };
     let settings = settings.read(cx);
     let input_id = settings.input_device_id.clone();
@@ -4879,6 +4913,51 @@ fn device_flyout(
         )
     });
 
+    let vtbg_shortcut = (menu_kind == DeviceMenuKind::Camera).then(|| {
+        let voice = voice.clone();
+        let hover_bg = theme.bg_hover;
+        div()
+            .id("camera-flyout-vtbg-btn")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .rounded(px(6.))
+            .bg(theme.bg_secondary)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg))
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| {
+                    store.toggle_device_menu(DeviceMenuKind::VirtualBackground, cx);
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Icon::new(IconName::Sparkles)
+                            .size(px(14.))
+                            .text_color(theme.text_primary),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.text_primary)
+                            .child("Virtual Background..."),
+                    ),
+            )
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .size(px(12.))
+                    .text_color(theme.text_secondary),
+            )
+    });
+
     let rows_panel = div()
         .flex()
         .flex_col()
@@ -4890,7 +4969,8 @@ fn device_flyout(
         .border_1()
         .border_color(theme.border)
         .shadow_lg()
-        .children(rows);
+        .children(rows)
+        .children(vtbg_shortcut);
 
     let list_panel = submenu.filter(|kind| kinds.contains(kind)).map(|kind| {
         let entries = device_entries(kind, store, locale, cx);
@@ -5061,6 +5141,328 @@ fn screen_mode_row(
         .on_click(move |_, _, cx| {
             voice.update(cx, |store, cx| store.set_screen_share_mode(mode, cx));
         })
+        .into_any_element()
+}
+
+fn virtual_background_flyout(
+    theme: &Theme,
+    _locale: &str,
+    voice: &Entity<VoiceStore>,
+    store: &VoiceStore,
+) -> AnyElement {
+    let current_mode = store.virtual_background();
+    let options = [
+        (mezon_voice::VirtualBackgroundMode::None, "None", None),
+        (mezon_voice::VirtualBackgroundMode::Blur, "Blur", None),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg1,
+            "Office 1",
+            Some(crate::util::assets::VTBG_BG1),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg2,
+            "Office 2",
+            Some(crate::util::assets::VTBG_BG2),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg3,
+            "Cafe",
+            Some(crate::util::assets::VTBG_BG3),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg4,
+            "Studio",
+            Some(crate::util::assets::VTBG_BG4),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg5,
+            "Living Room",
+            Some(crate::util::assets::VTBG_BG5),
+        ),
+    ];
+
+    let rows = options.into_iter().map(|(mode, label, img_path)| {
+        let selected = mode == current_mode;
+        let voice = voice.clone();
+        let hover_bg = theme.bg_hover;
+        let base_bg = if selected {
+            theme.bg_hover
+        } else {
+            theme.bg_secondary
+        };
+        let accent: Hsla = gpui::rgb(ACCENT_BLUE).into();
+        let muted: Hsla = theme.text_muted.into();
+
+        let preview = if let Some(path) = img_path {
+            div()
+                .w(px(48.))
+                .h(px(28.))
+                .rounded(px(4.))
+                .overflow_hidden()
+                .flex_none()
+                .border_1()
+                .border_color(if selected {
+                    accent
+                } else {
+                    theme.border.into()
+                })
+                .child(img(path).size_full().object_fit(ObjectFit::Cover))
+                .into_any_element()
+        } else {
+            div()
+                .w(px(48.))
+                .h(px(28.))
+                .rounded(px(4.))
+                .flex_none()
+                .bg(theme.bg_tertiary)
+                .border_1()
+                .border_color(if selected {
+                    accent
+                } else {
+                    theme.border.into()
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(if mode == mezon_voice::VirtualBackgroundMode::Blur {
+                        IconName::Sparkles
+                    } else {
+                        IconName::VideoOff
+                    })
+                    .size(px(14.))
+                    .text_color(if selected {
+                        accent
+                    } else {
+                        theme.text_secondary.into()
+                    }),
+                )
+                .into_any_element()
+        };
+
+        let radio = div()
+            .flex_none()
+            .size(px(16.))
+            .rounded_full()
+            .border_2()
+            .border_color(if selected { accent } else { muted })
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(selected, |radio| {
+                radio.child(div().size(px(8.)).rounded_full().bg(accent))
+            });
+
+        div()
+            .id(SharedString::from(format!("vtbg-{:?}", mode)))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(px(6.))
+            .bg(base_bg)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg))
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| {
+                    store.set_virtual_background(mode, cx);
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(preview)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if selected {
+                                theme.text_primary
+                            } else {
+                                theme.text_secondary
+                            })
+                            .child(label),
+                    ),
+            )
+            .child(radio)
+            .into_any_element()
+    });
+
+    deferred(
+        div()
+            .id("voice-vtbg-flyout")
+            .absolute()
+            .bottom(px(56.))
+            .left(px(-80.))
+            .occlude()
+            .on_mouse_down_out({
+                let voice = voice.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    voice.update(cx, |store, cx| store.close_device_menu(cx));
+                }
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w(px(280.))
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme.tokens.bg_theme_contexify)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.text_secondary)
+                            .child("VIRTUAL BACKGROUND"),
+                    )
+                    .children(rows),
+            ),
+    )
+    .into_any_element()
+}
+
+fn virtual_background_pre_join_selector(
+    theme: &Theme,
+    voice: &Entity<VoiceStore>,
+    cx: &App,
+) -> AnyElement {
+    let current_mode = voice.read(cx).virtual_background();
+    let options = [
+        (mezon_voice::VirtualBackgroundMode::None, "None", None),
+        (mezon_voice::VirtualBackgroundMode::Blur, "Blur", None),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg1,
+            "Office 1",
+            Some(crate::util::assets::VTBG_BG1),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg2,
+            "Office 2",
+            Some(crate::util::assets::VTBG_BG2),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg3,
+            "Cafe",
+            Some(crate::util::assets::VTBG_BG3),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg4,
+            "Studio",
+            Some(crate::util::assets::VTBG_BG4),
+        ),
+        (
+            mezon_voice::VirtualBackgroundMode::Bg5,
+            "Living Room",
+            Some(crate::util::assets::VTBG_BG5),
+        ),
+    ];
+
+    let accent: Hsla = gpui::rgb(ACCENT_BLUE).into();
+    let cards = options.into_iter().map(|(mode, label, img_path)| {
+        let selected = mode == current_mode;
+        let voice = voice.clone();
+        let preview = if let Some(path) = img_path {
+            div()
+                .size_full()
+                .child(img(path).size_full().object_fit(ObjectFit::Cover))
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .bg(theme.bg_secondary)
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(2.))
+                .child(
+                    Icon::new(if mode == mezon_voice::VirtualBackgroundMode::Blur {
+                        IconName::Sparkles
+                    } else {
+                        IconName::VideoOff
+                    })
+                    .size(px(16.))
+                    .text_color(if selected {
+                        accent
+                    } else {
+                        theme.text_secondary.into()
+                    }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if selected {
+                            accent
+                        } else {
+                            theme.text_secondary.into()
+                        })
+                        .child(label),
+                )
+                .into_any_element()
+        };
+
+        div()
+            .id(SharedString::from(format!("prejoin-vtbg-{:?}", mode)))
+            .w(px(64.))
+            .h(px(42.))
+            .rounded(px(6.))
+            .overflow_hidden()
+            .border_2()
+            .border_color(if selected {
+                accent
+            } else {
+                theme.border.into()
+            })
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.85))
+            .on_click(move |_, _, cx| {
+                voice.update(cx, |store, cx| {
+                    store.set_virtual_background(mode, cx);
+                });
+            })
+            .child(preview)
+            .into_any_element()
+    });
+
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .my_2()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_secondary)
+                .child("Virtual Background"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .justify_center()
+                .gap_2()
+                .children(cards),
+        )
         .into_any_element()
 }
 

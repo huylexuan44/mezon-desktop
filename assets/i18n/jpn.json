@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "メッセージ",
   "chat.newMessages": "新着",
   "setting.appSettings.streaming": "配信",
-  "setting.chat.grammarCorrection.description": "入力中にスペルと文法の修正を提案します（最大 256 文字）。",
-  "setting.chat.grammarCorrection.title": "文法の修正",
   "setting.chat.quickReplies.description": "チャンネルの最後のメッセージに基づいてクイック返信を表示します。",
   "setting.chat.quickReplies.title": "クイック返信",
   "setting.chat.onlyFriendsDm.title": "知らない人からのメッセージを受け取らない。",

@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "Meddelande",
   "chat.newMessages": "NY",
   "setting.appSettings.streaming": "Streaming",
-  "setting.chat.grammarCorrection.description": "Föreslår stavnings- och grammatikkorrigeringar medan du skriver (upp till 256 tecken).",
-  "setting.chat.grammarCorrection.title": "Grammatikkorrigering",
   "setting.chat.quickReplies.description": "Visar snabbsvar utifrån det senaste meddelandet i kanalen.",
   "setting.chat.quickReplies.title": "Snabbsvar",
   "setting.chat.onlyFriendsDm.title": "Ta inte emot meddelanden från främlingar.",

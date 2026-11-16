@@ -119,7 +119,6 @@ impl ChatPage {
 impl Render for ChatPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let quick = self.settings.read(cx).quick_replies_enabled;
-        let grammar = self.settings.read(cx).grammar_correction_enabled;
         v_flex()
             .w_full()
             .gap_3()
@@ -128,18 +127,10 @@ impl Render for ChatPage {
                 "setting.chat.quickReplies.title",
                 "setting.chat.quickReplies.description",
                 quick,
-                |s| s.quick_replies_enabled = !s.quick_replies_enabled,
-                cx,
-            ))
-            .child(self.toggle_row(
-                "grammar-correction-enabled",
-                "setting.chat.grammarCorrection.title",
-                "setting.chat.grammarCorrection.description",
-                grammar,
                 |s| {
-                    s.grammar_correction_enabled = !s.grammar_correction_enabled;
-                    mezon_grammar::set_download_enabled(s.grammar_correction_enabled);
-                    if s.grammar_correction_enabled {
+                    s.quick_replies_enabled = !s.quick_replies_enabled;
+                    mezon_grammar::set_download_enabled(s.quick_replies_enabled);
+                    if s.quick_replies_enabled {
                         mezon_grammar::prefetch_all_assets();
                     }
                 },

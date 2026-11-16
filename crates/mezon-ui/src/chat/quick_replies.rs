@@ -104,6 +104,7 @@ mod tests {
             viewer_media: std::sync::Arc::new([]),
             raw_content: None,
             command: None,
+            location: None,
         }
     }
 

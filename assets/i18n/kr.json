@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "메시지",
   "chat.newMessages": "새로",
   "setting.appSettings.streaming": "스트리밍",
-  "setting.chat.grammarCorrection.description": "입력하는 동안 맞춤법과 문법 수정을 제안합니다(최대 256자).",
-  "setting.chat.grammarCorrection.title": "문법 교정",
   "setting.chat.quickReplies.description": "채널의 마지막 메시지를 기준으로 빠른 답장을 표시합니다.",
   "setting.chat.quickReplies.title": "빠른 답장",
   "setting.chat.onlyFriendsDm.title": "낯선 사람의 메시지를 받지 않음.",

@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "Nhắn tin",
   "chat.newMessages": "Mới",
   "setting.appSettings.streaming": "Phát trực tiếp",
-  "setting.chat.grammarCorrection.description": "Gợi ý sửa chính tả và ngữ pháp khi gõ (tối đa 256 ký tự).",
-  "setting.chat.grammarCorrection.title": "Sửa lỗi ngữ pháp",
   "setting.chat.quickReplies.description": "Hiện chip trả lời nhanh dựa trên tin nhắn cuối trong kênh.",
   "setting.chat.quickReplies.title": "Trả lời nhanh",
   "setting.chat.onlyFriendsDm.title": "Không nhận tin nhắn từ người lạ.",

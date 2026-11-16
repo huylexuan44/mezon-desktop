@@ -5,6 +5,7 @@ pub mod compose;
 mod input_switch;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_session;
+pub mod matting;
 mod noise;
 mod permission;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -55,6 +56,7 @@ pub use camera::{
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use linux_session::{record_wayland_session, set_portal_parent_window};
+pub use matting::{MezonMatteProcessor, VirtualBackgroundMode};
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
     MediaDevice, MediaPermission, media_permission, media_permission_changes,
@@ -219,6 +221,7 @@ enum Command {
     PushToTalk(bool),
     ParticipantAction(String),
     SendRoomMessage(String),
+    SetVirtualBackground(VirtualBackgroundMode),
     Disconnect,
 }
 
@@ -243,6 +246,7 @@ pub struct VoiceConnectOptions {
     pub input_device_id: Option<String>,
     pub output_device_id: Option<String>,
     pub camera_device_id: Option<String>,
+    pub virtual_background: VirtualBackgroundMode,
     pub ice_servers: Vec<IceServerConfig>,
     pub refresh_token: Option<TokenRefresher>,
 }
@@ -259,6 +263,7 @@ impl VoiceSession {
             input_device_id,
             output_device_id,
             camera_device_id,
+            virtual_background,
             ice_servers,
             refresh_token,
         } = options;
@@ -290,6 +295,7 @@ impl VoiceSession {
                 input_device_id,
                 output_device_id,
                 camera_device_id,
+                virtual_background,
                 cmd_rx,
                 &evt_tx,
                 store,
@@ -419,6 +425,10 @@ impl VoiceSession {
     pub fn set_screen_full_res(&self, full_res: bool) {
         self.screen_full_res.store(full_res, Ordering::Relaxed);
     }
+
+    pub fn set_virtual_background(&self, mode: VirtualBackgroundMode) {
+        let _ = self.cmd_tx.send(Command::SetVirtualBackground(mode));
+    }
 }
 
 impl Drop for VoiceSession {
@@ -507,6 +517,7 @@ async fn session_main(
     input_device_id: Option<String>,
     output_device_id: Option<String>,
     camera_device_id: Option<String>,
+    virtual_background: VirtualBackgroundMode,
     cmd_rx: flume::Receiver<Command>,
     evt_tx: &flume::Sender<VoiceEvent>,
     frame_store: Arc<VideoFrameStore>,
@@ -561,6 +572,7 @@ async fn session_main(
     let mut mic_on = start_unmuted;
     let mut ptt_on = false;
     let mut camera_device_id = camera_device_id;
+    let mut wanted_virtual_background = virtual_background;
     let mut camera_switch_pending = false;
     let mut camera_session: Option<CameraSession> = None;
     let mut screen_session: Option<ScreenSession> = None;
@@ -789,10 +801,17 @@ async fn session_main(
                             let tx = cam_tx.clone();
                             let generation = camera_gen;
                             let device = camera_device_id.clone();
+                            let bg_mode = wanted_virtual_background;
                             camera_task = Some(runtime::runtime().spawn(async move {
-                                let result = start_camera_track(&factory, &identity, store, device).await;
+                                let result = start_camera_track(&factory, &identity, store, device, bg_mode).await;
                                 let _ = tx.send_async((generation, result)).await;
                             }));
+                        }
+                    }
+                    Ok(Command::SetVirtualBackground(mode)) => {
+                        wanted_virtual_background = mode;
+                        if let Some(session) = &camera_session {
+                            session.controller.set_background(mode);
                         }
                     }
                     Ok(Command::SetInputDevice(id)) => {
@@ -1510,9 +1529,14 @@ async fn start_camera_track(
     identity: &str,
     frame_store: Arc<VideoFrameStore>,
     device_id: Option<String>,
+    virtual_background: VirtualBackgroundMode,
 ) -> Result<CameraSession> {
-    let (controller, source_rx) =
-        camera::start_camera(identity.to_string(), frame_store, device_id);
+    let (controller, source_rx) = camera::start_camera(
+        identity.to_string(),
+        frame_store,
+        device_id,
+        virtual_background,
+    );
     let source = source_rx
         .recv_async()
         .await

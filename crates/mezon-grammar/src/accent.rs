@@ -776,14 +776,17 @@ pub fn decode_teencode_diacritics(text: &str) -> String {
     static RE_TEENCODE_SPLIT_CODA: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)([a-zA-ZăâêôơưĂÂÊÔƠƯ])([.?`'~^+\\])\s+(n|ng|nh|m|p|t|c|ch|i|y)\b").unwrap()
     });
-    let mut res = RE_TEENCODE_SPLIT_CODA.replace_all(text, "$1$2$3").into_owned();
+    let mut res = RE_TEENCODE_SPLIT_CODA
+        .replace_all(text, "$1$2$3")
+        .into_owned();
 
     if !res.chars().any(|c| {
         matches!(
             c,
             '^' | '+' | '*' | '(' | '-' | '~' | '.' | '?' | '\'' | '/' | '`' | '\\' | 'ổ' | 'ỏ'
         )
-    }) && !res.contains(' ') {
+    }) && !res.contains(' ')
+    {
         return res;
     }
 
@@ -807,16 +810,18 @@ pub fn decode_teencode_diacritics(text: &str) -> String {
     static RE_SPLIT_CODA: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\b([a-zA-Zà-ỹĂÂĐÊÔƠƯăâđêôơư]*[àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệòóỏõọồốổỗộờớởỡợùúủũụừứửữự])\s+(n|ng|nh|m|p|t|c|ch|i|y)\b").unwrap()
     });
-    RE_SPLIT_CODA.replace_all(&cleaned, |caps: &regex::Captures| {
-        let syl = &caps[1];
-        let coda = &caps[2];
-        let combined = format!("{syl}{coda}");
-        if is_valid_vietnamese_syllable(&combined) {
-            combined
-        } else {
-            caps[0].to_string()
-        }
-    }).into_owned()
+    RE_SPLIT_CODA
+        .replace_all(&cleaned, |caps: &regex::Captures| {
+            let syl = &caps[1];
+            let coda = &caps[2];
+            let combined = format!("{syl}{coda}");
+            if is_valid_vietnamese_syllable(&combined) {
+                combined
+            } else {
+                caps[0].to_string()
+            }
+        })
+        .into_owned()
 }
 
 pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {

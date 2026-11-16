@@ -522,6 +522,9 @@ pub struct Settings {
     pub output_device_id: Option<String>,
     /// Selected camera (video input) device identifier
     pub camera_device_id: Option<String>,
+    /// Selected virtual background mode
+    #[serde(default)]
+    pub virtual_background: mezon_voice::VirtualBackgroundMode,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
     pub clan_order: Vec<ClanId>,
@@ -556,8 +559,6 @@ pub struct Settings {
     #[serde(default)]
     pub quick_replies_enabled: bool,
     #[serde(default)]
-    pub grammar_correction_enabled: bool,
-    #[serde(default)]
     pub stream_default_quality: StreamQuality,
     #[serde(default)]
     pub voice_user_volumes: HashMap<String, u16>,
@@ -584,6 +585,7 @@ impl Default for Settings {
             input_device_id: None,
             output_device_id: None,
             camera_device_id: None,
+            virtual_background: mezon_voice::VirtualBackgroundMode::None,
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,
@@ -599,7 +601,6 @@ impl Default for Settings {
             realtime_server: RealtimeServer::Auto,
             agent_hint_dismissed: false,
             quick_replies_enabled: false,
-            grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
             voice_user_volumes: HashMap::new(),
             last_download_dir: None,
@@ -937,13 +938,11 @@ mod settings_tests {
     }
 
     #[test]
-    fn grammar_chat_toggles_default_off_and_legacy_settings_parse() {
+    fn quick_replies_chat_toggle_default_off_and_legacy_settings_parse() {
         let defaults = Settings::default();
         assert!(!defaults.quick_replies_enabled);
-        assert!(!defaults.grammar_correction_enabled);
         let legacy = r#"{"language":"en"}"#;
         let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
         assert!(!settings.quick_replies_enabled);
-        assert!(!settings.grammar_correction_enabled);
     }
 }

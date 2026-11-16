@@ -314,7 +314,8 @@ static RE_INVALID_VN_ENDING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[bdfgklrsvxz]$").unwrap());
 
 static RE_CONSONANT_CODA_CLUSTER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(st|sk|sh|ct|pt|ft|lt|rt|ld|nd|rd|mp|nk|rk|ck|nt|[a-z]{2,}(ce|de|te|ge))$").unwrap()
+    Regex::new(r"(st|sk|sh|ct|pt|ft|lt|rt|ld|nd|rd|mp|nk|rk|ck|nt|[a-z]{2,}(ce|de|te|ge))$")
+        .unwrap()
 });
 
 static RE_CONSONANT_ONSET_CLUSTER: LazyLock<Regex> = LazyLock::new(|| {
@@ -1893,10 +1894,7 @@ pub fn is_foreign_or_tech_word(word: &str) -> bool {
     {
         return true;
     }
-    if has_double_consonant(&w)
-        && !w.starts_with("oo")
-        && !w.starts_with("ee")
-        && !w.contains("uu")
+    if has_double_consonant(&w) && !w.starts_with("oo") && !w.starts_with("ee") && !w.contains("uu")
     {
         return true;
     }
@@ -1976,27 +1974,36 @@ pub fn normalize_punctuation_spacing(text: &str) -> (String, Vec<CorrectionEdit>
         RE_SPACE_BEFORE_PUNCT.replace_all(part, "$1").into_owned()
     });
     let step2 = rewrite_outside_spans(&step1, &protected_literal_spans(&step1), |part| {
-        RE_SPACE_AFTER_PUNCT.replace_all(part, |caps: &regex::Captures| {
-            let p1 = &caps[1];
-            let p2 = &caps[2];
-            if p1 == ":" && p2.chars().next().is_some_and(|c| "([/\\pPoOdDxX*3><)".contains(c)) {
-                format!("{p1}{p2}")
-            } else {
-                format!("{p1} {p2}")
-            }
-        }).into_owned()
+        RE_SPACE_AFTER_PUNCT
+            .replace_all(part, |caps: &regex::Captures| {
+                let p1 = &caps[1];
+                let p2 = &caps[2];
+                if p1 == ":"
+                    && p2
+                        .chars()
+                        .next()
+                        .is_some_and(|c| "([/\\pPoOdDxX*3><)".contains(c))
+                {
+                    format!("{p1}{p2}")
+                } else {
+                    format!("{p1} {p2}")
+                }
+            })
+            .into_owned()
     });
     let step3 = rewrite_outside_spans(&step2, &protected_literal_spans(&step2), |part| {
-        RE_SPLIT_CODA.replace_all(part, |caps: &regex::Captures| {
-            let syl = &caps[1];
-            let coda = &caps[2];
-            let combined = format!("{syl}{coda}");
-            if crate::syllable::is_valid_vietnamese_syllable(&combined.to_lowercase()) {
-                combined
-            } else {
-                caps[0].to_string()
-            }
-        }).into_owned()
+        RE_SPLIT_CODA
+            .replace_all(part, |caps: &regex::Captures| {
+                let syl = &caps[1];
+                let coda = &caps[2];
+                let combined = format!("{syl}{coda}");
+                if crate::syllable::is_valid_vietnamese_syllable(&combined.to_lowercase()) {
+                    combined
+                } else {
+                    caps[0].to_string()
+                }
+            })
+            .into_owned()
     });
     let cleaned = RE_MULTI_SPACE.replace_all(&step3, " ").trim().to_string();
 

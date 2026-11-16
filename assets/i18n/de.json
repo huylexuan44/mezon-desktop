@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "Nachricht",
   "chat.newMessages": "Neu",
   "setting.appSettings.streaming": "Streaming",
-  "setting.chat.grammarCorrection.description": "Schlägt Rechtschreib- und Grammatikkorrekturen beim Tippen vor (bis zu 256 Zeichen).",
-  "setting.chat.grammarCorrection.title": "Grammatikkorrektur",
   "setting.chat.quickReplies.description": "Zeigt Schnellantworten anhand der letzten Nachricht im Kanal.",
   "setting.chat.quickReplies.title": "Schnellantworten",
   "setting.chat.onlyFriendsDm.title": "Keine Nachrichten von Fremden erhalten.",

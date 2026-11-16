@@ -309,10 +309,34 @@ fn test_lang_filter_vn_uu_preserved() {
 #[test]
 fn test_tach_biet_confusable_and_collocations() {
     let client = MezonGrammarClient::new();
-    assert!(client.correct("tach biet").corrected.to_lowercase().contains("tách biệt"));
-    assert!(client.correct("dac biet").corrected.to_lowercase().contains("đặc biệt"));
-    assert!(client.correct("khac biet").corrected.to_lowercase().contains("khác biệt"));
-    assert!(client.correct("phan biet").corrected.to_lowercase().contains("phân biệt"));
+    assert!(
+        client
+            .correct("tach biet")
+            .corrected
+            .to_lowercase()
+            .contains("tách biệt")
+    );
+    assert!(
+        client
+            .correct("dac biet")
+            .corrected
+            .to_lowercase()
+            .contains("đặc biệt")
+    );
+    assert!(
+        client
+            .correct("khac biet")
+            .corrected
+            .to_lowercase()
+            .contains("khác biệt")
+    );
+    assert!(
+        client
+            .correct("phan biet")
+            .corrected
+            .to_lowercase()
+            .contains("phân biệt")
+    );
 }
 
 #[test]

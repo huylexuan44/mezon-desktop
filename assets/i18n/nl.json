@@ -1251,8 +1251,6 @@
   "chat.messagePlaceholder": "Bericht sturen",
   "chat.newMessages": "Nieuw",
   "setting.appSettings.streaming": "Streaming",
-  "setting.chat.grammarCorrection.description": "Stelt spelling- en grammaticacorrecties voor terwijl je typt (maximaal 256 tekens).",
-  "setting.chat.grammarCorrection.title": "Grammaticacorrectie",
   "setting.chat.quickReplies.description": "Toont snelle antwoorden op basis van het laatste bericht in het kanaal.",
   "setting.chat.quickReplies.title": "Snelle antwoorden",
   "setting.chat.onlyFriendsDm.title": "Geen berichten van onbekenden ontvangen.",
