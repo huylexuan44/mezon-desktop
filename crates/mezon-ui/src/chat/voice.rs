@@ -386,16 +386,16 @@ fn render_meeting_pre_join(
         avatar = avatar.fallback_src(avatar_raw);
     }
 
+    let join_role = voice.read(cx).join_role_for(code, 0);
     let join_action = {
         let voice = voice.clone();
         let code = code.to_string();
-        let role = voice.read(cx).pending_join_role();
         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
             voice.update(cx, |store, cx| {
                 store.join_external_meeting(
                     code.clone(),
                     label.to_string(),
-                    role,
+                    join_role,
                     input_device_id.clone(),
                     output_device_id.clone(),
                     camera_device_id.clone(),
@@ -451,7 +451,7 @@ fn render_meeting_pre_join(
                     .child(message),
             )
         })
-        .child(join_role_button(theme, locale, voice, join_action, cx));
+        .child(join_role_button(theme, locale, voice, code, join_role, join_action, cx));
 
     div()
         .flex()
@@ -1265,11 +1265,16 @@ fn render_pre_join(
         }
     };
 
+    let room_id = channel.id.to_string();
+    let participant_count = members.iter().filter(|m| m.user_id.0 > 0).count();
+    let join_role = voice.read(cx).join_role_for(&room_id, participant_count);
     let join = join_role_button(
         theme,
         locale,
         voice,
-        make_join_action(voice.read(cx).pending_join_role()),
+        &room_id,
+        join_role,
+        make_join_action(join_role),
         cx,
     );
 
@@ -1357,15 +1362,15 @@ fn join_role_button(
     theme: &Theme,
     locale: &str,
     voice: &Entity<VoiceStore>,
+    room_id: &str,
+    selected: SfuRole,
     on_join: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
     let green = theme.status_online;
     let green_hover = darken(theme.status_online, 0.12);
     let divider = darken(theme.status_online, 0.3);
-    let store = voice.read(cx);
-    let selected = store.pending_join_role();
-    let menu_open = store.join_role_menu_open();
+    let menu_open = voice.read(cx).join_role_menu_open();
 
     let role_label = |role: SfuRole| {
         let key = if role.is_audience() {
@@ -1378,6 +1383,7 @@ fn join_role_button(
 
     let role_row = |id: &'static str, role: SfuRole| {
         let voice = voice.clone();
+        let room_id = room_id.to_string();
         div()
             .id(id)
             .w_full()
@@ -1389,7 +1395,9 @@ fn join_role_button(
             .hover(|s| s.bg(theme.bg_tertiary))
             .child(role_label(role))
             .on_click(move |_, _, cx| {
-                voice.update(cx, |store, cx| store.set_pending_join_role(role, cx));
+                voice.update(cx, |store, cx| {
+                    store.set_pending_join_role(room_id.clone(), role, cx)
+                });
             })
     };
 
