@@ -127,13 +127,7 @@ impl Render for ChatPage {
                 "setting.chat.quickReplies.title",
                 "setting.chat.quickReplies.description",
                 quick,
-                |s| {
-                    s.quick_replies_enabled = !s.quick_replies_enabled;
-                    mezon_grammar::set_download_enabled(s.quick_replies_enabled);
-                    if s.quick_replies_enabled {
-                        mezon_grammar::prefetch_all_assets();
-                    }
-                },
+                |s| s.quick_replies_enabled = !s.quick_replies_enabled,
                 cx,
             ))
             .child(self.only_friends_row(cx))

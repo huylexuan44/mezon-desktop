@@ -59,4 +59,5 @@ perf-report*.json
 
 # ONNX models and grammar assets (downloaded from CDN)
 *.onnx
+!crates/mezon-voice/assets/mezon_matte.onnx
 crates/mezon-grammar/assets/

@@ -950,6 +950,7 @@ async fn session_main(
                             camera_switch_pending = false;
                             session.controller.switch(camera_device_id.clone());
                         }
+                        session.controller.set_background(wanted_virtual_background);
                         engine.set_local_camera(Some(session.track.clone()));
                         engine.set_camera_active(true);
                         camera_session = Some(session);

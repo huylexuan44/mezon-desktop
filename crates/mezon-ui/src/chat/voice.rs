@@ -1308,6 +1308,7 @@ fn render_pre_join(
                     .child(message),
             )
         })
+        .child(virtual_background_pre_join_selector(theme, voice, cx))
         .child(join);
 
     div()
