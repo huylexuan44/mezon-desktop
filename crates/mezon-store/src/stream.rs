@@ -446,6 +446,11 @@ impl StreamStore {
         if self.is_session_channel(channel_id) && (self.is_joined() || self.is_joining()) {
             return;
         }
+        if crate::live::LiveStore::try_global(cx)
+            .is_some_and(|live| live.read(cx).is_active_in(channel_id))
+        {
+            return;
+        }
         self.show_chat = false;
         cx.notify();
     }

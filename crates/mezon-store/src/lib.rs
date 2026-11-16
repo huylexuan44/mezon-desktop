@@ -40,6 +40,7 @@ pub mod group_members;
 pub mod ids;
 pub mod inbox;
 pub mod invite;
+pub mod live;
 pub mod login;
 pub mod media_permission;
 pub mod mention_search;
@@ -192,6 +193,9 @@ pub use group_members::{
 pub use ids::{ChannelId, ClanId, MessageId, MessageRef, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
+pub use live::{
+    LIVE_PREVIEW_KEY, LiveError, LiveFailure, LivePhase, LiveRequest, LiveSource, LiveStore,
+};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
 pub use mention_search::{MentionSearchEvent, MentionSearchKey, MentionSearchStore};
@@ -375,6 +379,46 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
     });
     if changed {
         schedule_settings_save(&settings, cx);
+    }
+}
+
+pub fn set_input_device(input_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_input_device(input_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.input_device_id = input_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.update(cx, |call, cx| {
+            call.set_input_device(input_device_id.clone(), cx)
+        });
+    }
+    if let Some(live) = LiveStore::try_global(cx) {
+        live.update(cx, |live, cx| live.set_input_device(input_device_id, cx));
+    }
+}
+
+pub fn set_camera_device(camera_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_camera_device(camera_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.camera_device_id = camera_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.read(cx).set_camera_device(camera_device_id.clone());
+    }
+    if let Some(live) = LiveStore::try_global(cx) {
+        live.update(cx, |live, cx| live.set_camera_device(camera_device_id, cx));
     }
 }
 

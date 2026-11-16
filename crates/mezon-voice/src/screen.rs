@@ -342,13 +342,22 @@ pub fn start_screen(
                                 break;
                             }
                             options.fps = pump_control.fps();
-                            let mut capturer = match Capturer::build(options.clone()) {
-                                Ok(capturer) => capturer,
-                                Err(e) => {
-                                    pump_slot.fail(format!("screen capture init failed: {e:#}"));
-                                    return;
-                                }
-                            };
+                            let build_options = options.clone();
+                            let mut capturer =
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    Capturer::build(build_options)
+                                })) {
+                                    Ok(Ok(capturer)) => capturer,
+                                    Ok(Err(e)) => {
+                                        pump_slot
+                                            .fail(format!("screen capture init failed: {e:#}"));
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        pump_slot.fail("screen capture source is gone".into());
+                                        return;
+                                    }
+                                };
                             capturer.start_capture();
                             let mut errored = false;
                             let mut produced = false;
@@ -875,7 +884,7 @@ fn blend_annotations(compositor: &AnnotationCompositor, buffer: &mut I420Buffer)
     compositor.blend(y, u, v, sy as usize, su as usize, sv as usize);
 }
 
-fn publish_i420_preview(
+pub(crate) fn publish_i420_preview(
     frame_store: &VideoFrameStore,
     key: u64,
     buffer: &I420Buffer,
