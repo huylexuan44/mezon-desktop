@@ -1298,7 +1298,12 @@ fn spawn_camera_open(
     tx: flume::Sender<(u64, Result<(CameraController, NativeVideoSource), String>)>,
 ) {
     runtime::runtime().spawn(async move {
-        let (controller, rx) = camera::start_camera(identity, frame_store, device_id);
+        let (controller, rx) = camera::start_camera(
+            identity,
+            frame_store,
+            device_id,
+            crate::VirtualBackgroundMode::None,
+        );
         let outcome = match rx.recv_async().await {
             Ok(Ok(source)) => Ok((controller, source)),
             Ok(Err(err)) => Err(err),
