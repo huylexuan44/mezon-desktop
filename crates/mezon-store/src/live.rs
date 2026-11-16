@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{App, AppContext, Context, Entity, Global, RenderImage, Subscription, Task, Window};
-use mezon_client::AppApi;
+use mezon_client::{AppApi, RealtimeEvent};
 pub use mezon_voice::{LIVE_PREVIEW_KEY, LiveFailure, LiveSource};
 use mezon_voice::{
     LiveEndpoint, LiveEndpointRefresher, LiveEvent, LiveOptions, LiveSession, PickedScreen,
@@ -13,7 +13,8 @@ use parking_lot::Mutex;
 
 use crate::Settings;
 use crate::account::AccountStore;
-use crate::ids::{ChannelId, ClanId};
+use crate::ids::{ChannelId, ClanId, UserId};
+use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::stream::StreamStore;
 use crate::voice::VoiceRenderFrame;
 
@@ -49,6 +50,8 @@ pub struct LiveRequest {
 pub enum LiveError {
     Failure(LiveFailure),
     SourceUnavailable(LiveSource),
+    SourceEnded(LiveSource),
+    AccessLost,
 }
 
 struct CachedRenderFrame {
@@ -98,6 +101,7 @@ impl LiveStore {
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
+        Self::register_realtime(cx);
         let quit_sub = cx.on_app_quit(|this, _cx| {
             this._events_task = None;
             let events_rx = this.session.as_ref().map(|session| {
@@ -136,6 +140,34 @@ impl LiveStore {
             _events_task: None,
             _app_quit_subscription: Some(quit_sub),
         }
+    }
+
+    fn register_realtime(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
+            dispatch.on(RealtimeKind::ChannelDeleted, &entity, |this, event, cx| {
+                this.handle_access_event(event, cx)
+            });
+            dispatch.on(
+                RealtimeKind::UserChannelRemoved,
+                &entity,
+                |this, event, cx| this.handle_access_event(event, cx),
+            );
+            dispatch.on(RealtimeKind::UserClanRemoved, &entity, |this, event, cx| {
+                this.handle_access_event(event, cx)
+            });
+        });
+    }
+
+    fn handle_access_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        let me = crate::BadgeService::try_global(cx)
+            .and_then(|badges| badges.read(cx).current_user_id(cx));
+        if !live_access_lost(self.active_channel(), event, me) {
+            return;
+        }
+        self.stop(cx);
+        self.push_error(LiveError::AccessLost);
+        cx.notify();
     }
 
     pub fn phase(&self) -> LivePhase {
@@ -645,6 +677,16 @@ impl LiveStore {
                 self.push_error(LiveError::SourceUnavailable(source));
                 true
             }
+            LiveEvent::SourceEnded { source } => {
+                match source {
+                    LiveSource::Screen => self.screen_on = false,
+                    LiveSource::SystemAudio => self.system_audio_on = false,
+                    LiveSource::Microphone => self.mic_on = false,
+                    LiveSource::Camera => self.camera_on = false,
+                }
+                self.push_error(LiveError::SourceEnded(source));
+                true
+            }
             LiveEvent::Failed(failure) => {
                 self.last_error = Some(failure);
                 self.push_error(LiveError::Failure(failure));
@@ -691,6 +733,26 @@ impl LiveStore {
             }
             self.pending_texture_work.store(true, Ordering::Release);
         }
+    }
+}
+
+fn live_access_lost(
+    active: Option<(ClanId, ChannelId)>,
+    event: &RealtimeEvent,
+    me: Option<UserId>,
+) -> bool {
+    let Some((active_clan, active_channel)) = active else {
+        return false;
+    };
+    match event {
+        RealtimeEvent::ChannelDeleted(e) => ChannelId(e.channel_id) == active_channel,
+        RealtimeEvent::UserChannelRemoved(e) => {
+            ChannelId(e.channel_id) == active_channel && crate::event_targets_user(&e.user_ids, me)
+        }
+        RealtimeEvent::UserClanRemoved(e) => {
+            ClanId(e.clan_id) == active_clan && crate::event_targets_user(&e.user_ids, me)
+        }
+        _ => false,
     }
 }
 
@@ -850,5 +912,88 @@ mod tests {
             Some(LiveError::SourceUnavailable(LiveSource::Camera))
         );
         assert_eq!(store.take_error(), None);
+    }
+
+    #[test]
+    fn apply_event_source_ended_clears_matching_flag_and_queues_ended_toast() {
+        let mut store = test_store();
+
+        assert!(store.apply_event(LiveEvent::SourceEnded {
+            source: LiveSource::Screen,
+        }));
+        assert!(!store.screen_on());
+        assert!(store.system_audio_on());
+        assert!(store.mic_on());
+        assert!(store.camera_on());
+        assert_eq!(
+            store.take_error(),
+            Some(LiveError::SourceEnded(LiveSource::Screen))
+        );
+        assert_eq!(store.take_error(), None);
+    }
+
+    #[test]
+    fn live_access_lost_matches_channel_deletion_and_self_removals_only() {
+        let active = Some((ClanId(10), ChannelId(20)));
+        let me = Some(UserId(100));
+
+        let deleted_live =
+            RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
+                clan_id: 10,
+                channel_id: 20,
+                ..Default::default()
+            });
+        let deleted_other =
+            RealtimeEvent::ChannelDeleted(mezon_proto::realtime::ChannelDeletedEvent {
+                clan_id: 10,
+                channel_id: 21,
+                ..Default::default()
+            });
+        let kicked_me_live_clan =
+            RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                clan_id: 10,
+                user_ids: vec![99, 100],
+            });
+        let kicked_someone_else =
+            RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                clan_id: 10,
+                user_ids: vec![99, 101],
+            });
+        let kicked_me_other_clan =
+            RealtimeEvent::UserClanRemoved(mezon_proto::realtime::UserClanRemoved {
+                clan_id: 11,
+                user_ids: vec![100],
+            });
+        let removed_me_live_channel =
+            RealtimeEvent::UserChannelRemoved(mezon_proto::realtime::UserChannelRemoved {
+                channel_id: 20,
+                user_ids: vec![100],
+                ..Default::default()
+            });
+        let removed_other_live_channel =
+            RealtimeEvent::UserChannelRemoved(mezon_proto::realtime::UserChannelRemoved {
+                channel_id: 20,
+                user_ids: vec![200],
+                ..Default::default()
+            });
+        let removed_me_other_channel =
+            RealtimeEvent::UserChannelRemoved(mezon_proto::realtime::UserChannelRemoved {
+                channel_id: 21,
+                user_ids: vec![100],
+                ..Default::default()
+            });
+
+        assert!(live_access_lost(active, &deleted_live, me));
+        assert!(!live_access_lost(active, &deleted_other, me));
+        assert!(live_access_lost(active, &kicked_me_live_clan, me));
+        assert!(!live_access_lost(active, &kicked_someone_else, me));
+        assert!(!live_access_lost(active, &kicked_me_other_clan, me));
+        assert!(live_access_lost(active, &removed_me_live_channel, me));
+        assert!(!live_access_lost(active, &removed_other_live_channel, me));
+        assert!(!live_access_lost(active, &removed_me_other_channel, me));
+
+        assert!(!live_access_lost(None, &deleted_live, me));
+        assert!(!live_access_lost(None, &kicked_me_live_clan, me));
+        assert!(!live_access_lost(None, &removed_me_live_channel, me));
     }
 }

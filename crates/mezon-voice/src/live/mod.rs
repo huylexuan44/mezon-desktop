@@ -6,7 +6,7 @@ mod whip;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::future::BoxFuture;
 use libwebrtc::MediaType;
@@ -43,8 +43,44 @@ const VIDEO_MAX_FRAMERATE: f64 = 30.0;
 const LIVE_STREAM_ID: &str = "mezon-live";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DISCONNECTED_GRACE: Duration = Duration::from_secs(5);
+const SUSPEND_GAP: Duration = Duration::from_secs(5);
 const MAX_RECONNECT_ATTEMPTS: u32 = 6;
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(16);
+
+struct WallClockWatch {
+    last_tick: SystemTime,
+    suspended: bool,
+}
+
+impl WallClockWatch {
+    fn new(now: SystemTime) -> Self {
+        Self {
+            last_tick: now,
+            suspended: false,
+        }
+    }
+
+    fn observe(&mut self, now: SystemTime) -> bool {
+        if now
+            .duration_since(self.last_tick)
+            .is_ok_and(|elapsed| elapsed >= SUSPEND_GAP)
+        {
+            self.suspended = true;
+        }
+        self.last_tick = now;
+        self.suspended
+    }
+
+    fn on_connected(&mut self) {
+        self.suspended = false;
+    }
+}
+
+struct StaleResource {
+    url: Url,
+    token: String,
+    trust_takeover: bool,
+}
 
 #[derive(Clone)]
 pub struct LiveEndpoint {
@@ -114,6 +150,7 @@ pub enum LiveEvent {
     Live,
     Reconnecting { attempt: u32 },
     SourceUnavailable { source: LiveSource, reason: String },
+    SourceEnded { source: LiveSource },
     Failed(LiveFailure),
     Ended,
 }
@@ -196,6 +233,7 @@ impl Drop for LiveSession {
 }
 
 struct ActiveScreen {
+    generation: u64,
     stopper: ScreenStopper,
     reader: tokio::task::JoinHandle<()>,
     _track: RtcVideoTrack,
@@ -303,6 +341,7 @@ async fn session_main(
 
     let (screen_tx, screen_rx) =
         flume::unbounded::<(u64, Result<(ScreenStopper, NativeVideoSource), String>)>();
+    let (screen_end_tx, screen_end_rx) = flume::unbounded::<u64>();
     let (cam_tx, cam_rx) =
         flume::unbounded::<(u64, Result<(CameraController, NativeVideoSource), String>)>();
     let (sys_audio_tx, sys_audio_rx) =
@@ -333,6 +372,7 @@ async fn session_main(
             source_store.clone(),
             pick,
             screen_tx.clone(),
+            screen_end_tx.clone(),
         );
     }
 
@@ -379,6 +419,9 @@ async fn session_main(
         retry_deadline: None,
         stale_resource: None,
     };
+    let mut watch = WallClockWatch::new(SystemTime::now());
+    let mut watch_interval = tokio::time::interval(Duration::from_secs(1));
+    watch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     spawn_connect_attempt(
         connect_gen,
@@ -462,6 +505,7 @@ async fn session_main(
                             source_store.clone(),
                             pick,
                             screen_tx.clone(),
+                            screen_end_tx.clone(),
                         );
                     }
                     Ok(LiveCommand::SetScreen(None)) => {
@@ -502,6 +546,7 @@ async fn session_main(
                             let slot = compositor.screen_slot();
                             let reader = spawn_slot_reader(track.clone(), slot.clone());
                             active_screen = Some(ActiveScreen {
+                                generation,
                                 stopper,
                                 reader,
                                 _track: track,
@@ -520,6 +565,20 @@ async fn session_main(
                         }
                         Err(_) => {}
                     }
+                }
+            }
+            ended_gen = screen_end_rx.recv_async() => {
+                if let Ok(generation) = ended_gen
+                    && active_screen
+                        .as_ref()
+                        .is_some_and(|a| a.generation == generation)
+                    && let Some(scr) = active_screen.take()
+                {
+                    scr.stop();
+                    tracing::info!("live screen source ended");
+                    let _ = evt_tx.send(LiveEvent::SourceEnded {
+                        source: LiveSource::Screen,
+                    });
                 }
             }
             res = cam_rx.recv_async() => {
@@ -641,6 +700,7 @@ async fn session_main(
                                 connect_deadline = None;
                                 reconnect.attempt = 0;
                                 reconnect.last_server_busy = false;
+                                watch.on_connected();
                                 if !currently_live {
                                     currently_live = true;
                                     tracing::info!("live session connected");
@@ -692,6 +752,7 @@ async fn session_main(
                             disconnected_deadline = None;
                             reconnect.attempt = 0;
                             reconnect.last_server_busy = false;
+                            watch.on_connected();
                             if !currently_live {
                                 currently_live = true;
                                 let _ = evt_tx.send(LiveEvent::Live);
@@ -761,16 +822,29 @@ async fn session_main(
                     break;
                 }
             }
+            _ = watch_interval.tick() => {
+                watch.observe(SystemTime::now());
+            }
             _ = sleep_until_opt(reconnect.retry_deadline) => {
                 reconnect.retry_deadline = None;
                 current_pc_gen = current_pc_gen.wrapping_add(1);
                 connect_gen = connect_gen.wrapping_add(1);
                 connect_in_flight = true;
+                let trust_takeover = !watch.observe(SystemTime::now());
+                let stale_resource =
+                    reconnect
+                        .stale_resource
+                        .take()
+                        .map(|(url, token)| StaleResource {
+                            url,
+                            token,
+                            trust_takeover,
+                        });
                 spawn_connect_attempt(
                     connect_gen,
                     current_pc_gen,
                     true,
-                    reconnect.stale_resource.take(),
+                    stale_resource,
                     factory.clone(),
                     audio_track.clone(),
                     video_track.clone(),
@@ -893,7 +967,7 @@ fn spawn_connect_attempt(
     connect_gen: u64,
     pc_gen: u64,
     is_reconnect: bool,
-    stale_resource: Option<(Url, String)>,
+    stale_resource: Option<StaleResource>,
     factory: PeerConnectionFactory,
     audio_track: RtcAudioTrack,
     video_track: RtcVideoTrack,
@@ -905,25 +979,31 @@ fn spawn_connect_attempt(
     connect_tx: flume::Sender<(u64, ConnectOutcome)>,
 ) {
     runtime::runtime().spawn(async move {
-        if let Some((stale_url, stale_token)) = stale_resource
-            && whip::was_replaced(whip::delete(&client, &stale_url, &stale_token).await)
-        {
-            tracing::warn!(
-                "live session was replaced by another publisher on this account; not reconnecting"
-            );
-            let _ = connect_tx
-                .send_async((
-                    connect_gen,
-                    ConnectOutcome::Failed {
-                        endpoint,
-                        error: WhipError::Terminal {
-                            failure: LiveFailure::Replaced,
-                            status: 404,
+        if let Some(stale) = stale_resource {
+            let delete_status = whip::delete(&client, &stale.url, &stale.token).await;
+            if whip::was_replaced(delete_status, stale.trust_takeover) {
+                tracing::warn!(
+                    "live session was replaced by another publisher on this account; not reconnecting"
+                );
+                let _ = connect_tx
+                    .send_async((
+                        connect_gen,
+                        ConnectOutcome::Failed {
+                            endpoint,
+                            error: WhipError::Terminal {
+                                failure: LiveFailure::Replaced,
+                                status: 404,
+                            },
                         },
-                    },
-                ))
-                .await;
-            return;
+                    ))
+                    .await;
+                return;
+            }
+            if delete_status == Some(404) {
+                tracing::info!(
+                    "previous live session already expired after a suspension; reconnecting"
+                );
+            }
         }
 
         if is_reconnect
@@ -1185,6 +1265,7 @@ fn spawn_screen_open(
     frame_store: Arc<VideoFrameStore>,
     pick: PickedScreen,
     tx: flume::Sender<(u64, Result<(ScreenStopper, NativeVideoSource), String>)>,
+    screen_end_tx: flume::Sender<u64>,
 ) {
     runtime::runtime().spawn(async move {
         let (stopper, rx) = screen::start_screen(
@@ -1200,7 +1281,12 @@ fn spawn_screen_open(
             Ok(Err(err)) => Err(err),
             Err(_) => Err("screen capture thread exited".into()),
         };
-        let _ = tx.send_async((generation, outcome)).await;
+        let started = outcome.is_ok();
+        if tx.send_async((generation, outcome)).await.is_err() || !started {
+            return;
+        }
+        while rx.recv_async().await.is_ok() {}
+        let _ = screen_end_tx.send_async(generation).await;
     });
 }
 
@@ -1263,5 +1349,33 @@ async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(instant) => tokio::time::sleep_until(instant).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_clock_watch_tracks_suspensions_backward_jumps_and_reconnect_reset() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut watch = WallClockWatch::new(base);
+
+        for sec in 1..=10 {
+            assert!(!watch.observe(base + Duration::from_secs(sec)));
+        }
+
+        let rewound = base + Duration::from_secs(5);
+        assert!(!watch.observe(rewound));
+        assert!(!watch.observe(rewound + Duration::from_secs(1)));
+
+        let woke = rewound + Duration::from_secs(61);
+        assert!(watch.observe(woke));
+        assert!(watch.observe(woke + Duration::from_secs(1)));
+        assert!(watch.observe(woke + Duration::from_secs(2)));
+
+        watch.on_connected();
+        assert!(!watch.observe(woke + Duration::from_secs(3)));
+        assert!(watch.observe(woke + Duration::from_secs(3) + SUSPEND_GAP));
     }
 }

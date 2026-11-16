@@ -344,7 +344,12 @@ impl ChatLayout {
                         let msg = mezon_i18n::t(&locale, key).to_string();
                         Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
                     }
-                    LiveError::SourceUnavailable(source) => {
+                    LiveError::AccessLost => {
+                        let msg = mezon_i18n::t(&locale, "channelStream.liveError.accessLost")
+                            .to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+                    }
+                    LiveError::SourceUnavailable(source) | LiveError::SourceEnded(source) => {
                         let source_name = match source {
                             LiveSource::Screen => {
                                 mezon_i18n::t(&locale, "channelStream.liveScreen")
@@ -359,8 +364,12 @@ impl ChatLayout {
                                 mezon_i18n::t(&locale, "channelStream.liveCamera")
                             }
                         };
-                        let msg = mezon_i18n::t(&locale, "channelStream.liveError.source")
-                            .replace("{{source}}", source_name);
+                        let template_key = match err {
+                            LiveError::SourceEnded(_) => "channelStream.liveError.sourceEnded",
+                            _ => "channelStream.liveError.source",
+                        };
+                        let msg =
+                            mezon_i18n::t(&locale, template_key).replace("{{source}}", source_name);
                         Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
                     }
                 }

@@ -169,8 +169,8 @@ pub(super) async fn delete(
     .flatten()
 }
 
-pub(super) fn was_replaced(delete_status: Option<u16>) -> bool {
-    delete_status == Some(404)
+pub(super) fn was_replaced(delete_status: Option<u16>, trust_takeover: bool) -> bool {
+    trust_takeover && delete_status == Some(404)
 }
 
 pub(super) fn classify(status: u16, retry_after: Option<&str>) -> WhipError {
@@ -295,10 +295,12 @@ mod tests {
 
     #[test]
     fn only_a_404_on_the_old_resource_means_the_session_was_replaced() {
-        assert!(was_replaced(Some(404)));
-        assert!(!was_replaced(Some(200)));
-        assert!(!was_replaced(Some(503)));
-        assert!(!was_replaced(None));
+        assert!(was_replaced(Some(404), true));
+        assert!(!was_replaced(Some(404), false));
+        assert!(!was_replaced(Some(200), true));
+        assert!(!was_replaced(Some(200), false));
+        assert!(!was_replaced(Some(503), true));
+        assert!(!was_replaced(None, true));
     }
 
     #[test]
