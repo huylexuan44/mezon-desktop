@@ -156,9 +156,10 @@ fn main() {
             add_gio_headers(&mut builder);
 
             for lib_name in ["glib-2.0", "gobject-2.0", "gio-2.0"] {
-                let lib = pkg_config::Config::new().cargo_metadata(false).probe(lib_name).unwrap();
-                for path in lib.include_paths {
-                    builder.include(path);
+                if let Ok(lib) = pkg_config::Config::new().cargo_metadata(false).probe(lib_name) {
+                    for path in lib.include_paths {
+                        builder.include(path);
+                    }
                 }
             }
 

@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(any(target_os = "linux", test))]
+mod exit_record;
 #[cfg(any(windows, test))]
 mod hang_dump;
 #[cfg(any(target_os = "linux", test))]
@@ -331,7 +333,11 @@ fn main() -> Result<()> {
             tracing::info!("Another instance is already running — exiting");
             return Ok(());
         }
-        Some(lock) => run_app(lock, deep_link_url),
+        Some(lock) => {
+            #[cfg(target_os = "linux")]
+            exit_record::report_previous_and_arm(&log_dir());
+            run_app(lock, deep_link_url)
+        }
     }
 
     Ok(())
@@ -656,6 +662,13 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     app.run(move |cx: &mut App| {
         tracing::debug!("App started");
         install_foreground_watchdog(cx);
+        cx.on_app_quit(|_| {
+            tracing::info!("Quitting normally");
+            #[cfg(target_os = "linux")]
+            exit_record::mark_clean_exit();
+            async {}
+        })
+        .detach();
 
         #[cfg(target_os = "linux")]
         cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
@@ -681,6 +694,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             (
                 include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
                 "ExtraBold",
+            ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic-as-ggsans.ttf"
+                ),
+                "Italic",
+            ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBoldItalic-as-ggsans.ttf"
+                ),
+                "SemiBoldItalic",
             ),
         ];
         let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
@@ -1043,6 +1068,7 @@ fn open_main_window(
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::StreamStore::init(api.clone(), cx);
+    mezon_store::LiveStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::CallStore::init(api.clone(), cx);
     mezon_store::MediaPermissionStore::init(cx);
@@ -1144,11 +1170,6 @@ fn open_main_window(
     mezon_store::PlatformStore::set_notification_permit(
         &platform_store,
         std::sync::Arc::new(mezon_native::notifications::notifications_permitted),
-        cx,
-    );
-    mezon_store::PlatformStore::set_current_location(
-        &platform_store,
-        std::sync::Arc::new(mezon_native::location::current_location),
         cx,
     );
 

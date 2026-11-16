@@ -6,10 +6,10 @@ use gpui::{
     RenderImage, SharedString, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
-    Settings, VoiceStore, capture_screen_share_preview, list_screen_share_options,
-    peek_screen_share_options, request_screen_capture_access, screen_capture_permitted,
-    system_screen_share_pick,
+    ChannelId, ClanId, LiveRequest, LiveStore, PickedScreen, ScreenShareKind, ScreenShareListError,
+    ScreenShareOption, ScreenSharePreview, Settings, VoiceStore, capture_screen_share_preview,
+    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
+    screen_capture_permitted, system_screen_share_pick,
 };
 
 use crate::app::shell::Shell;
@@ -38,9 +38,18 @@ struct SelectedTarget {
     id: u32,
 }
 
+pub enum ShareTarget {
+    Voice(Entity<VoiceStore>),
+    GoLive {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+    },
+    LiveSwitch,
+}
+
 pub struct ScreenShareModal {
     focus_handle: FocusHandle,
-    voice: Entity<VoiceStore>,
+    target: ShareTarget,
     settings: Entity<Settings>,
     tab: ShareTab,
     options: Vec<ScreenShareOption>,
@@ -50,6 +59,8 @@ pub struct ScreenShareModal {
     load_error: Option<ScreenShareListError>,
     selected: Option<SelectedTarget>,
     share_audio: bool,
+    live_mic: bool,
+    live_camera: bool,
     portal: Option<PickedScreen>,
     load_started: bool,
     list_task: Option<Task<()>>,
@@ -67,7 +78,7 @@ impl Focusable for ScreenShareModal {
 
 impl ScreenShareModal {
     pub fn new(
-        voice: Entity<VoiceStore>,
+        target: ShareTarget,
         settings: Entity<Settings>,
         portal: Option<PickedScreen>,
         window: &mut Window,
@@ -84,10 +95,12 @@ impl ScreenShareModal {
         .detach();
 
         let cached = peek_screen_share_options();
+        let initial_share_audio = matches!(target, ShareTarget::LiveSwitch)
+            && LiveStore::try_global(cx).is_some_and(|live| live.read(cx).system_audio_on());
 
         Self {
             focus_handle,
-            voice,
+            target,
             settings,
             tab: ShareTab::Window,
             options: cached.clone().unwrap_or_default(),
@@ -96,7 +109,9 @@ impl ScreenShareModal {
             loading: cached.is_none(),
             load_error: None,
             selected: None,
-            share_audio: false,
+            share_audio: initial_share_audio,
+            live_mic: true,
+            live_camera: false,
             portal,
             load_started: false,
             list_task: None,
@@ -235,13 +250,82 @@ impl ScreenShareModal {
         cx.notify();
     }
 
+    fn is_go_live(&self) -> bool {
+        matches!(self.target, ShareTarget::GoLive { .. })
+    }
+
+    fn dispatch_pick(&mut self, pick: PickedScreen, cx: &mut Context<Self>) {
+        let share_audio = self.share_audio;
+        match &self.target {
+            ShareTarget::Voice(voice) => {
+                let voice = voice.clone();
+                voice.update(cx, |store, cx| {
+                    store.start_screen_share(pick, share_audio, cx)
+                });
+            }
+            &ShareTarget::GoLive {
+                clan_id,
+                channel_id,
+            } => {
+                let mic = self.live_mic;
+                let camera = self.live_camera;
+                if let Some(live) = LiveStore::try_global(cx) {
+                    live.update(cx, |store, cx| {
+                        store.start(
+                            clan_id,
+                            channel_id,
+                            LiveRequest {
+                                screen: Some(pick),
+                                system_audio: share_audio,
+                                mic,
+                                camera,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            }
+            ShareTarget::LiveSwitch => {
+                if let Some(live) = LiveStore::try_global(cx) {
+                    live.update(cx, |store, cx| {
+                        store.change_screen(pick, share_audio, cx);
+                    });
+                }
+            }
+        }
+        self.close(cx);
+    }
+
+    fn confirm_camera_only(&mut self, cx: &mut Context<Self>) {
+        let ShareTarget::GoLive {
+            clan_id,
+            channel_id,
+        } = self.target
+        else {
+            return;
+        };
+        let mic = self.live_mic;
+        if let Some(live) = LiveStore::try_global(cx) {
+            live.update(cx, |store, cx| {
+                store.start(
+                    clan_id,
+                    channel_id,
+                    LiveRequest {
+                        screen: None,
+                        system_audio: false,
+                        mic,
+                        camera: true,
+                    },
+                    cx,
+                );
+            });
+        }
+        self.close(cx);
+    }
+
     fn confirm_share(&mut self, cx: &mut Context<Self>) {
         if let Some(portal) = self.portal.clone() {
-            let share_audio = self.share_audio;
-            self.voice.update(cx, |store, cx| {
-                store.start_screen_share(portal, share_audio, cx)
-            });
-            self.close(cx);
+            self.dispatch_pick(portal, cx);
             return;
         }
         let Some(selected) = self.selected else {
@@ -255,11 +339,99 @@ impl ScreenShareModal {
             return;
         };
         let pick = option.pick.clone();
-        let share_audio = self.share_audio;
-        self.voice.update(cx, |store, cx| {
-            store.start_screen_share(pick, share_audio, cx)
-        });
-        self.close(cx);
+        self.dispatch_pick(pick, cx);
+    }
+
+    fn render_toggles(
+        &self,
+        locale: &str,
+        text_primary: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let share_audio_label: SharedString =
+            mezon_i18n::t(locale, "screenShare.alsoShareSystemAudio").into();
+        if !self.is_go_live() {
+            return h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(text_primary)
+                        .child(share_audio_label),
+                )
+                .child(
+                    Switch::new("screen-share-audio")
+                        .checked(self.share_audio)
+                        .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                            this.share_audio = *checked;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
+
+        let mic_label: SharedString = mezon_i18n::t(locale, "channelStream.liveMic").into();
+        let camera_label: SharedString = mezon_i18n::t(locale, "channelStream.liveCamera").into();
+
+        h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(text_primary)
+                            .child(share_audio_label),
+                    )
+                    .child(
+                        Switch::new("screen-share-audio")
+                            .checked(self.share_audio)
+                            .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                                this.share_audio = *checked;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().text_sm().text_color(text_primary).child(mic_label))
+                            .child(Switch::new("go-live-mic").checked(self.live_mic).on_click(
+                                cx.listener(|this, checked: &bool, _window, cx| {
+                                    this.live_mic = *checked;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().text_sm().text_color(text_primary).child(camera_label))
+                            .child(
+                                Switch::new("go-live-camera")
+                                    .checked(self.live_camera)
+                                    .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                                        this.live_camera = *checked;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_portal(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -270,12 +442,30 @@ impl ScreenShareModal {
         let text_muted: gpui::Hsla = theme.text_muted.into();
         let bg: gpui::Hsla = theme.bg_secondary.into();
 
-        let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
+        let is_go_live = self.is_go_live();
+        let title: SharedString = mezon_i18n::t(
+            &locale,
+            if is_go_live {
+                "channelStream.goLive"
+            } else {
+                "screenShare.chooseWhatToShare"
+            },
+        )
+        .into();
         let hint: SharedString = mezon_i18n::t(&locale, "screenShare.systemWillAsk").into();
-        let share_audio_label: SharedString =
-            mezon_i18n::t(&locale, "screenShare.alsoShareSystemAudio").into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
-        let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
+        let share_label: SharedString = mezon_i18n::t(
+            &locale,
+            if is_go_live {
+                "channelStream.goLive"
+            } else {
+                "screenShare.share"
+            },
+        )
+        .into();
+        let camera_only_label: SharedString =
+            mezon_i18n::t(&locale, "channelStream.cameraOnly").into();
+        let toggles = self.render_toggles(&locale, text_primary, cx);
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -283,7 +473,7 @@ impl ScreenShareModal {
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {
                 this.close(cx);
             }))
-            .w(px(480.))
+            .w(px(520.))
             .rounded(px(12.))
             .bg(bg)
             .shadow_lg()
@@ -336,26 +526,7 @@ impl ScreenShareModal {
                     .gap(px(16.))
                     .px(px(20.))
                     .py(px(16.))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(text_primary)
-                                    .child(share_audio_label),
-                            )
-                            .child(
-                                Switch::new("screen-share-audio")
-                                    .checked(self.share_audio)
-                                    .on_click(cx.listener(|this, checked: &bool, _window, cx| {
-                                        this.share_audio = *checked;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
+                    .child(toggles)
                     .child(
                         h_flex()
                             .w_full()
@@ -367,6 +538,15 @@ impl ScreenShareModal {
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _window, cx| this.close(cx))),
                             )
+                            .when(is_go_live, |row| {
+                                row.child(
+                                    Button::new("screen-share-camera-only")
+                                        .label(camera_only_label)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.confirm_camera_only(cx);
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("screen-share-confirm")
                                     .label(share_label)
@@ -416,15 +596,33 @@ impl Render for ScreenShareModal {
         let tile_bg: gpui::Hsla = theme.bg_tertiary.into();
         let danger_text: gpui::Hsla = theme.danger_text.into();
 
-        let title: SharedString = mezon_i18n::t(&locale, "screenShare.chooseWhatToShare").into();
-        let share_audio_label: SharedString =
-            mezon_i18n::t(&locale, "screenShare.alsoShareSystemAudio").into();
+        let is_go_live = self.is_go_live();
+        let title: SharedString = mezon_i18n::t(
+            &locale,
+            if is_go_live {
+                "channelStream.goLive"
+            } else {
+                "screenShare.chooseWhatToShare"
+            },
+        )
+        .into();
         let window_tab: SharedString = mezon_i18n::t(&locale, "screenShare.window").into();
         let screen_tab: SharedString = mezon_i18n::t(&locale, "screenShare.entireScreen").into();
         let cancel_label: SharedString = mezon_i18n::t(&locale, "screenShare.cancel").into();
-        let share_label: SharedString = mezon_i18n::t(&locale, "screenShare.share").into();
+        let share_label: SharedString = mezon_i18n::t(
+            &locale,
+            if is_go_live {
+                "channelStream.goLive"
+            } else {
+                "screenShare.share"
+            },
+        )
+        .into();
+        let camera_only_label: SharedString =
+            mezon_i18n::t(&locale, "channelStream.cameraOnly").into();
         let loading_label: SharedString = mezon_i18n::t(&locale, "screenShare.loading").into();
         let empty_label: SharedString = mezon_i18n::t(&locale, "screenShare.selectScreen").into();
+        let toggles = self.render_toggles(&locale, text_primary, cx);
 
         let filtered = self.filtered_options();
         let can_share = self.selected.is_some();
@@ -579,31 +777,8 @@ impl Render for ScreenShareModal {
                             target_os = "macos",
                             target_os = "windows",
                             target_os = "linux"
-                        )),
-                        |footer| {
-                            footer.child(
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(text_primary)
-                                            .child(share_audio_label),
-                                    )
-                                    .child(
-                                        Switch::new("screen-share-audio")
-                                            .checked(self.share_audio)
-                                            .on_click(cx.listener(
-                                                |this, checked: &bool, _window, cx| {
-                                                    this.share_audio = *checked;
-                                                    cx.notify();
-                                                },
-                                            )),
-                                    ),
-                            )
-                        },
+                        )) || is_go_live,
+                        |footer| footer.child(toggles),
                     )
                     .child(
                         h_flex()
@@ -616,6 +791,15 @@ impl Render for ScreenShareModal {
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _window, cx| this.close(cx))),
                             )
+                            .when(is_go_live, |row| {
+                                row.child(
+                                    Button::new("screen-share-camera-only")
+                                        .label(camera_only_label)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.confirm_camera_only(cx);
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("screen-share-confirm")
                                     .label(share_label)
@@ -811,28 +995,72 @@ fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> 
         .into_any_element()
 }
 
+fn ensure_screen_capture_permission(settings: &Entity<Settings>, cx: &mut App) -> bool {
+    if !screen_capture_permitted() && !settings.read(cx).screen_capture_access_requested {
+        settings.update(cx, |settings, _| {
+            settings.screen_capture_access_requested = true;
+        });
+        mezon_store::schedule_settings_save(settings, cx);
+        request_screen_capture_access();
+        let locale = settings.read(cx).language.clone();
+        let msg = mezon_i18n::t(&locale, "screenShare.permissionPromptToast").to_string();
+        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+        return false;
+    }
+    true
+}
+
 pub fn start_screen_share_flow(
     voice: Entity<VoiceStore>,
     settings: Entity<Settings>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if !screen_capture_permitted() && !settings.read(cx).screen_capture_access_requested {
-        settings.update(cx, |settings, _| {
-            settings.screen_capture_access_requested = true;
-        });
-        mezon_store::schedule_settings_save(&settings, cx);
-        request_screen_capture_access();
-        let locale = settings.read(cx).language.clone();
-        let msg = mezon_i18n::t(&locale, "screenShare.permissionPromptToast").to_string();
-        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+    if !ensure_screen_capture_permission(&settings, cx) {
         return;
     }
     let portal = system_screen_share_pick();
-    let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, portal, window, cx));
+    let modal =
+        cx.new(|cx| ScreenShareModal::new(ShareTarget::Voice(voice), settings, portal, window, cx));
     if let Some(Some(meeting)) = window.root::<MeetingView>() {
         meeting.update(cx, |view, cx| view.show_share_modal(modal, window, cx));
         return;
     }
+    Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+}
+
+pub fn start_go_live_flow(
+    clan_id: ClanId,
+    channel_id: ChannelId,
+    settings: Entity<Settings>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !ensure_screen_capture_permission(&settings, cx) {
+        return;
+    }
+    let portal = system_screen_share_pick();
+    let modal = cx.new(|cx| {
+        ScreenShareModal::new(
+            ShareTarget::GoLive {
+                clan_id,
+                channel_id,
+            },
+            settings,
+            portal,
+            window,
+            cx,
+        )
+    });
+    Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
+}
+
+pub fn start_live_switch_flow(settings: Entity<Settings>, window: &mut Window, cx: &mut App) {
+    if !ensure_screen_capture_permission(&settings, cx) {
+        return;
+    }
+    let portal = system_screen_share_pick();
+    let modal =
+        cx.new(|cx| ScreenShareModal::new(ShareTarget::LiveSwitch, settings, portal, window, cx));
     Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
 }

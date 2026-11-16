@@ -968,7 +968,8 @@ fn render_inbox_styled_body(
         .text_sm()
         .child(interactive_link_text(
             id,
-            StyledText::new(display_text).with_highlights(display_highlights),
+            display_text,
+            display_highlights,
             links,
         ))
         .into_any_element()
@@ -993,7 +994,10 @@ fn inbox_body_links(
         }
         if !matches!(
             &source.span,
-            MessageSpan::Text(_) | MessageSpan::Bold(_) | MessageSpan::Heading { .. }
+            MessageSpan::Text(_)
+                | MessageSpan::Bold(_)
+                | MessageSpan::Styled { .. }
+                | MessageSpan::Heading { .. }
         ) {
             occupied.push((range, HighlightStyle::default()));
         }

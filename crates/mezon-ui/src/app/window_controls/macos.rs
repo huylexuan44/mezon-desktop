@@ -11,6 +11,7 @@ const NS_KEY_DOWN_MASK: u64 = 1 << 10;
 const NS_COMMAND_KEY_MASK: u64 = 1 << 20;
 const NS_ALTERNATE_KEY_MASK: u64 = 1 << 19;
 const NS_CONTROL_KEY_MASK: u64 = 1 << 18;
+const NS_WINDOW_STYLE_MASK_FULL_SCREEN: u64 = 1 << 14;
 static INSTALL_SHORTCUTS: Once = Once::new();
 
 #[allow(dead_code)]
@@ -35,6 +36,10 @@ pub fn hide_window(window: &Window) {
 pub fn hide_active_window(cx: &mut App) {
     let main_active =
         cx.active_window().is_some() && cx.active_window() == crate::app::main_window::handle(cx);
+    if main_active && active_window_hides_app(cx) {
+        cx.hide();
+        return;
+    }
     update_active_window(cx, |window| hide_window(window));
     if main_active {
         super::note_main_window_hidden(cx);
@@ -106,14 +111,17 @@ unsafe fn handle_shortcut(event: *mut Object, async_app: &gpui::AsyncApp) -> boo
     match key.to_ascii_lowercase() {
         b'w' => {
             let ns_window = unsafe { key_window() };
+            let is_main = async_app.update(|cx| is_main_ns_window(ns_window, cx));
+            if is_main && unsafe { is_full_screen(ns_window) } {
+                unsafe { hide_app() };
+                return true;
+            }
             unsafe {
                 order_out(ns_window);
             }
-            async_app.update(|cx| {
-                if is_main_ns_window(ns_window, cx) {
-                    super::note_main_window_hidden(cx);
-                }
-            });
+            if is_main {
+                async_app.update(super::note_main_window_hidden);
+            }
             true
         }
         b'm' => {
@@ -123,8 +131,7 @@ unsafe fn handle_shortcut(event: *mut Object, async_app: &gpui::AsyncApp) -> boo
             true
         }
         b'h' => {
-            let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-            let _: () = msg_send![app, hide: std::ptr::null::<Object>()];
+            unsafe { hide_app() };
             true
         }
         b'q' => {
@@ -153,6 +160,18 @@ fn is_main_ns_window(ns_window: *mut Object, cx: &mut App) -> bool {
         .unwrap_or(false)
 }
 
+fn active_window_hides_app(cx: &mut App) -> bool {
+    cx.active_window()
+        .and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| {
+                    super::hides_app_instead_of_window(window)
+                })
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
 fn update_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
     let Some(handle) = cx.active_window() else {
         return;
@@ -163,6 +182,19 @@ fn update_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
 unsafe fn key_window() -> *mut Object {
     let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
     msg_send![app, keyWindow]
+}
+
+unsafe fn is_full_screen(ns_window: *mut Object) -> bool {
+    if ns_window.is_null() {
+        return false;
+    }
+    let mask: u64 = msg_send![ns_window, styleMask];
+    mask & NS_WINDOW_STYLE_MASK_FULL_SCREEN != 0
+}
+
+unsafe fn hide_app() {
+    let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+    let _: () = msg_send![app, hide: std::ptr::null::<Object>()];
 }
 
 unsafe fn order_out(ns_window: *mut Object) {
@@ -215,7 +247,7 @@ fn disable_fullscreen(native_view: *mut std::ffi::c_void) {
         }
 
         let current: u64 = msg_send![window, collectionBehavior];
-        let behavior = (current & !(FULLSCREEN_PRIMARY | FULLSCREEN_AUXILIARY)) | FULLSCREEN_NONE;
+        let behavior = (current & !(FULLSCREEN_PRIMARY | FULLSCREEN_NONE)) | FULLSCREEN_AUXILIARY;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
     });
 }

@@ -40,6 +40,7 @@ pub mod group_members;
 pub mod ids;
 pub mod inbox;
 pub mod invite;
+pub mod live;
 pub mod login;
 pub mod media_permission;
 pub mod mention_search;
@@ -147,7 +148,8 @@ pub use config::{AppConfig, sticker_display_dimensions, sticker_search_display_d
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
-    SEARCH_CTRL_K_MAX_TEXT_BYTES,
+    SEARCH_CTRL_K_MAX_TEXT_BYTES, SEARCH_CTRL_K_MIN_CHARS, SearchCancel,
+    ctrlk_search_text_accepted,
 };
 pub use desktop_draw::DesktopDraw;
 pub use direct::{
@@ -192,6 +194,9 @@ pub use group_members::{
 pub use ids::{ChannelId, ClanId, MessageId, MessageRef, ParseIdError, RoleId, UserId};
 pub use inbox::{GLOBAL_INBOX_BUCKET_CLAN_ID, InboxEvent, InboxStore};
 pub use invite::{InviteDetails, InviteEvent, InviteState, InviteStore};
+pub use live::{
+    LIVE_PREVIEW_KEY, LiveError, LiveFailure, LivePhase, LiveRequest, LiveSource, LiveStore,
+};
 pub use login::{LoginStore, token_from_oauth_callback_url};
 pub use media_permission::{MediaPermissionPrompt, MediaPermissionStore};
 pub use mention_search::{MentionSearchEvent, MentionSearchKey, MentionSearchStore};
@@ -378,6 +383,46 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
     }
 }
 
+pub fn set_input_device(input_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_input_device(input_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.input_device_id = input_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.update(cx, |call, cx| {
+            call.set_input_device(input_device_id.clone(), cx)
+        });
+    }
+    if let Some(live) = LiveStore::try_global(cx) {
+        live.update(cx, |live, cx| live.set_input_device(input_device_id, cx));
+    }
+}
+
+pub fn set_camera_device(camera_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_camera_device(camera_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.camera_device_id = camera_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.read(cx).set_camera_device(camera_device_id.clone());
+    }
+    if let Some(live) = LiveStore::try_global(cx) {
+        live.update(cx, |live, cx| live.set_camera_device(camera_device_id, cx));
+    }
+}
+
 pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
     if let Some(voice) = VoiceStore::try_global(cx) {
         voice.update(cx, |voice, cx| {
@@ -522,6 +567,9 @@ pub struct Settings {
     pub output_device_id: Option<String>,
     /// Selected camera (video input) device identifier
     pub camera_device_id: Option<String>,
+    /// Selected virtual background mode
+    #[serde(default)]
+    pub virtual_background: mezon_voice::VirtualBackgroundMode,
     /// User-defined clan ordering: list of clan_ids in display order
     #[serde(default)]
     pub clan_order: Vec<ClanId>,
@@ -556,8 +604,6 @@ pub struct Settings {
     #[serde(default)]
     pub quick_replies_enabled: bool,
     #[serde(default)]
-    pub grammar_correction_enabled: bool,
-    #[serde(default)]
     pub stream_default_quality: StreamQuality,
     #[serde(default)]
     pub voice_user_volumes: HashMap<String, u16>,
@@ -584,6 +630,7 @@ impl Default for Settings {
             input_device_id: None,
             output_device_id: None,
             camera_device_id: None,
+            virtual_background: mezon_voice::VirtualBackgroundMode::None,
             clan_order: Vec::new(),
             last_clan_id: None,
             last_channel_id: None,
@@ -599,7 +646,6 @@ impl Default for Settings {
             realtime_server: RealtimeServer::Auto,
             agent_hint_dismissed: false,
             quick_replies_enabled: false,
-            grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
             voice_user_volumes: HashMap::new(),
             last_download_dir: None,
@@ -937,13 +983,11 @@ mod settings_tests {
     }
 
     #[test]
-    fn grammar_chat_toggles_default_off_and_legacy_settings_parse() {
+    fn quick_replies_chat_toggle_default_off_and_legacy_settings_parse() {
         let defaults = Settings::default();
         assert!(!defaults.quick_replies_enabled);
-        assert!(!defaults.grammar_correction_enabled);
         let legacy = r#"{"language":"en"}"#;
         let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
         assert!(!settings.quick_replies_enabled);
-        assert!(!settings.grammar_correction_enabled);
     }
 }

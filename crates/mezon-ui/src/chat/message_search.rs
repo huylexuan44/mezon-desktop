@@ -6,8 +6,8 @@ use chrono::Local;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, Global, HighlightStyle, Hsla,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, ObjectFit, Render,
-    SharedString, StyledText, Subscription, Transformation, UnderlineStyle, WeakEntity, Window,
-    deferred, div, img, list, prelude::*, px, radians,
+    SharedString, Subscription, Transformation, UnderlineStyle, WeakEntity, Window, deferred, div,
+    img, list, prelude::*, px, radians,
 };
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, MessageId, MessageSearchStore, MessageSpan,
@@ -1159,6 +1159,17 @@ fn render_search_spans(
                         .child(text.to_string()),
                 );
             }
+            MessageSpan::Styled { text, style } => {
+                row = row.child(
+                    div()
+                        .max_w_full()
+                        .min_w_0()
+                        .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                        .when(style.italic, |d| d.italic())
+                        .when(style.strike, |d| d.line_through())
+                        .child(text.to_string()),
+                );
+            }
             MessageSpan::Code(text) => {
                 row = row.child(inline_code_chip(theme).child(text.to_string()));
             }
@@ -1338,7 +1349,8 @@ fn render_rich_search_content(
         .min_w_0()
         .child(interactive_link_text(
             "search-body",
-            StyledText::new(text).with_highlights(highlights),
+            text,
+            highlights,
             links,
         ))
         .into_any_element()
@@ -1380,11 +1392,12 @@ fn render_search_styled_plain(text: &str, terms: &[String], theme: &Theme) -> gp
         .min_w_0()
         .child(interactive_link_text(
             "search-body",
-            StyledText::new(text.to_string()).with_highlights(if highlights.is_empty() {
+            text.to_string(),
+            if highlights.is_empty() {
                 vec![(0..text.len(), body_style)]
             } else {
                 highlights
-            }),
+            },
             links,
         ))
         .into_any_element()

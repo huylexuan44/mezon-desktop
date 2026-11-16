@@ -68,6 +68,7 @@ pub enum DeviceMenuKind {
     Microphone,
     Camera,
     ScreenShare,
+    VirtualBackground,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -599,6 +600,14 @@ fn breakout_invitees(
         .collect()
 }
 
+fn agent_request_channel_id(channel_key: &str, external_meeting: bool) -> Option<i64> {
+    if external_meeting {
+        Some(0)
+    } else {
+        channel_key.parse::<i64>().ok()
+    }
+}
+
 fn participant_rosters_differ(old: &[VoiceParticipant], new: &[VoiceParticipant]) -> bool {
     old.len() != new.len()
         || old.iter().zip(new).any(|(before, after)| {
@@ -879,6 +888,7 @@ pub struct VoiceStore {
     channel_label: String,
     mic_enabled: bool,
     camera_enabled: bool,
+    virtual_background: mezon_voice::VirtualBackgroundMode,
     screen_share_enabled: bool,
     noise_suppression_enabled: bool,
     noise_suppression_status: Option<NoiseSuppressionStatus>,
@@ -1004,6 +1014,7 @@ struct VoiceReconnectSnapshot {
     camera_device_id: Option<String>,
     mic_enabled: bool,
     camera_enabled: bool,
+    virtual_background: mezon_voice::VirtualBackgroundMode,
     screen_share: Option<(PickedScreen, bool)>,
 }
 
@@ -1296,6 +1307,9 @@ impl VoiceStore {
             channel_label: String::new(),
             mic_enabled: false,
             camera_enabled: false,
+            virtual_background: crate::Settings::try_global(cx)
+                .map(|s| s.read(cx).virtual_background)
+                .unwrap_or_default(),
             screen_share_enabled: false,
             noise_suppression_enabled: NOISE_SUPPRESSION_DEFAULT_ENABLED,
             noise_suppression_status: None,
@@ -4287,7 +4301,9 @@ impl VoiceStore {
         let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let Ok(channel_id) = channel_key.parse::<i64>() else {
+        let Some(channel_id) =
+            agent_request_channel_id(channel_key, self.external_meeting.is_some())
+        else {
             return;
         };
         if self.room_name.is_empty() {
@@ -4649,6 +4665,7 @@ impl VoiceStore {
             input_device_id,
             output_device_id,
             camera_device_id,
+            virtual_background: self.virtual_background,
             ice_servers,
             refresh_token: Some(TokenRefresher::new(move || {
                 let source = refresh_source.clone();
@@ -4800,6 +4817,7 @@ impl VoiceStore {
             camera_device_id,
             mic_enabled: self.mic_enabled,
             camera_enabled: self.camera_enabled,
+            virtual_background: self.virtual_background,
             screen_share,
         })
     }
@@ -4936,6 +4954,7 @@ impl VoiceStore {
         self.fullscreen_screen = None;
         self.clear_session_handles(None, cx);
         self.call_status = VoiceCallStatus::Reconnecting;
+        self.virtual_background = snapshot.virtual_background;
 
         self.start_session(
             snapshot.ws_url,
@@ -5384,6 +5403,31 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn virtual_background(&self) -> mezon_voice::VirtualBackgroundMode {
+        self.virtual_background
+    }
+
+    pub fn set_virtual_background(
+        &mut self,
+        mode: mezon_voice::VirtualBackgroundMode,
+        cx: &mut Context<Self>,
+    ) {
+        if self.virtual_background == mode {
+            return;
+        }
+        self.virtual_background = mode;
+        if let Some(session) = &self.session {
+            session.set_virtual_background(mode);
+        }
+        if let Some(settings) = crate::Settings::try_global(cx) {
+            settings.update(cx, |s, _| {
+                s.virtual_background = mode;
+            });
+            crate::schedule_settings_save(&settings, cx);
+        }
+        cx.notify();
+    }
+
     fn media_granted(&self, device: MediaDevice, cx: &mut Context<Self>) -> bool {
         let this = cx.weak_entity();
         let session_generation = self.session_generation;
@@ -5419,7 +5463,10 @@ impl VoiceStore {
     pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
         Self::persist_device(DeviceKind::AudioInput, device_id.clone(), cx);
         if let Some(session) = &self.session {
-            session.set_input_device(device_id);
+            session.set_input_device(device_id.clone());
+        }
+        if let Some(live) = crate::live::LiveStore::try_global(cx) {
+            live.update(cx, |live, cx| live.set_input_device(device_id, cx));
         }
         self.device_menu = None;
         self.device_submenu = None;
@@ -5439,7 +5486,10 @@ impl VoiceStore {
     pub fn set_camera_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
         Self::persist_device(DeviceKind::VideoInput, device_id.clone(), cx);
         if let Some(session) = &self.session {
-            session.set_camera_device(device_id);
+            session.set_camera_device(device_id.clone());
+        }
+        if let Some(live) = crate::live::LiveStore::try_global(cx) {
+            live.update(cx, |live, cx| live.set_camera_device(device_id, cx));
         }
         self.device_menu = None;
         self.device_submenu = None;
@@ -5575,7 +5625,7 @@ impl VoiceStore {
         } else {
             self.device_menu = Some(kind);
             self.device_submenu = None;
-            if kind != DeviceMenuKind::ScreenShare {
+            if kind != DeviceMenuKind::ScreenShare && kind != DeviceMenuKind::VirtualBackground {
                 self.refresh_devices(cx);
             }
         }
@@ -6400,8 +6450,8 @@ mod tests {
     use super::{
         BREAKOUT_AUTO_CLOSE_RETRY_SECS, BREAKOUT_EMPTY_CLOSE_DELAY_SECS,
         BREAKOUT_INVITE_RESPONSE_SECS, BreakoutInvite, BreakoutSignal, HostedBreakout,
-        HostedBreakoutPlan, HostedRoomsObservation, breakout_invitees, breakout_signal_from_event,
-        plan_hosted_breakout, retain_hosted_breakouts_for_user,
+        HostedBreakoutPlan, HostedRoomsObservation, agent_request_channel_id, breakout_invitees,
+        breakout_signal_from_event, plan_hosted_breakout, retain_hosted_breakouts_for_user,
     };
     use super::{
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
@@ -6691,6 +6741,13 @@ mod tests {
             vec![2, 3]
         );
         assert_eq!(breakout_invitees(&[], &participants, Some(1)), vec![2, 3]);
+    }
+
+    #[test]
+    fn agent_request_channel_id_uses_zero_for_external_meetings() {
+        assert_eq!(agent_request_channel_id("123", false), Some(123));
+        assert_eq!(agent_request_channel_id("meeting-room-key", false), None);
+        assert_eq!(agent_request_channel_id("anything", true), Some(0));
     }
 
     #[test]

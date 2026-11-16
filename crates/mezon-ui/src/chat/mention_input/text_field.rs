@@ -19,7 +19,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{CopiedMention, copied_mentions};
+use super::{CopiedMention, PastePlainText, copied_mentions};
 use crate::components::primitives::text_actions::{
     Backspace, Copy, Cut, Delete, DeleteToLineEnd, DeleteToLineStart, DeleteToNextWordEnd,
     DeleteToPreviousWordStart, Down, End, Enter, Home, Left, MoveToDocEnd, MoveToDocStart,
@@ -36,6 +36,7 @@ use crate::util::text_edit::{
     range_for_granularity, splice_out_byte_range, surrounding_delete_range,
     swallow_discarded_ime_commit,
 };
+use mezon_widgets::text_edit::{VerticalCaretTarget, caret_index_on_row, vertical_caret_target};
 
 const MASK: char = '\u{2022}';
 const MEASURE_CACHE_ENTRIES: usize = 4;
@@ -198,6 +199,7 @@ pub(crate) enum MentionFieldEvent {
     NavUp,
     NavDown,
     Paste(String),
+    PasteRich { markdown: String, plain: String },
     PasteWithMentions(String, Vec<CopiedMention>),
     PasteImages(Vec<Image>),
     PastePaths(Vec<PathBuf>, ClipboardItem),
@@ -689,29 +691,38 @@ impl MentionInputState {
     }
 
     fn caret_line_target(&self, delta: isize) -> usize {
-        if self.last_lines.len() <= 1 {
+        if self.last_lines.is_empty() {
             return if delta < 0 { 0 } else { self.content.len() };
         }
         let line_height = self.line_height;
         let display_cursor = self.to_display_offset(self.cursor_offset());
         let (line_ix, local) = locate_display_offset(&self.last_lines, display_cursor);
-        let caret_x = self.last_lines[line_ix]
-            .line
-            .position_for_index(local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let target_ix = line_ix as isize + delta;
-        if target_ix < 0 {
-            return 0;
-        }
-        let Some(target) = self.last_lines.get(target_ix as usize) else {
-            return self.content.len();
+        let doc = &self.last_lines[line_ix];
+        let display_target = match vertical_caret_target(&doc.line, local, line_height, delta) {
+            VerticalCaretTarget::InLine(ix) => doc.start + ix,
+            VerticalCaretTarget::PreviousLine(x) => {
+                let Some(prev) = line_ix
+                    .checked_sub(1)
+                    .and_then(|ix| self.last_lines.get(ix))
+                else {
+                    return 0;
+                };
+                prev.start
+                    + caret_index_on_row(
+                        &prev.line,
+                        x,
+                        prev.line.wrap_boundaries().len(),
+                        line_height,
+                    )
+            }
+            VerticalCaretTarget::NextLine(x) => {
+                let Some(next) = self.last_lines.get(line_ix + 1) else {
+                    return self.content.len();
+                };
+                next.start + caret_index_on_row(&next.line, x, 0, line_height)
+            }
         };
-        let local_target = target
-            .line
-            .closest_index_for_position(point(caret_x, px(0.)), line_height)
-            .unwrap_or_else(|ix| ix);
-        self.display_to_content_offset(target.start + local_target)
+        self.display_to_content_offset(display_target)
     }
 
     pub(crate) fn move_caret_line(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -816,25 +827,41 @@ impl MentionInputState {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
-            this.apply_paste(item, cx)
+        mezon_widgets::clipboard::read_rich_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, false, cx)
         });
     }
 
-    fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+    fn paste_plain_text(
+        &mut self,
+        _: &PastePlainText,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, true, cx)
+        });
+    }
+
+    fn apply_paste(&mut self, item: ClipboardItem, plain: bool, cx: &mut Context<Self>) {
         let paths = if self.accepts_files {
             copied_paths(&item)
         } else {
             Vec::new()
         };
         if paths.is_empty() {
-            self.paste_images_or_text(item, cx);
+            self.paste_images_or_text(item, plain, cx);
         } else {
             cx.emit(MentionFieldEvent::PastePaths(paths, item));
         }
     }
 
-    pub(crate) fn paste_images_or_text(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+    pub(crate) fn paste_images_or_text(
+        &mut self,
+        item: ClipboardItem,
+        plain: bool,
+        cx: &mut Context<Self>,
+    ) {
         let images = if self.accepts_files {
             copied_images(&item)
         } else {
@@ -848,15 +875,39 @@ impl MentionInputState {
             .entries()
             .iter()
             .any(|entry| matches!(entry, ClipboardEntry::String(_)));
-        if has_text && let Some(text) = item.text() {
+        if has_text {
             let mentions = copied_mentions(&item);
-            if mentions.is_empty() {
-                cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
-            } else {
-                cx.emit(MentionFieldEvent::PasteWithMentions(
-                    normalize_pasted(&text),
-                    mentions,
-                ));
+            if mentions.is_empty()
+                && !plain
+                && let Some(html) = item
+                    .entries()
+                    .iter()
+                    .find_map(|entry| match entry {
+                        ClipboardEntry::String(s) => Some(s.html()),
+                        _ => None,
+                    })
+                    .flatten()
+                && let Some(markdown) = super::rich_paste::clipboard_html_to_markdown(html)
+            {
+                let plain = item
+                    .text()
+                    .map(|text| normalize_pasted(&text))
+                    .unwrap_or_default();
+                cx.emit(MentionFieldEvent::PasteRich {
+                    markdown: normalize_pasted(&markdown),
+                    plain,
+                });
+                return;
+            }
+            if let Some(text) = item.text() {
+                if mentions.is_empty() {
+                    cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
+                } else {
+                    cx.emit(MentionFieldEvent::PasteWithMentions(
+                        normalize_pasted(&text),
+                        mentions,
+                    ));
+                }
             }
         }
     }
@@ -1406,6 +1457,7 @@ impl Render for MentionInputState {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::paste_plain_text))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -2099,21 +2151,76 @@ mod tests {
             text("folder"),
         ]);
         assert!(
-            field_events(cx, true, |field, _, cx| field
-                .paste_images_or_text(with_bitmap, cx))
-                == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
+            field_events(cx, true, |field, _, cx| field.paste_images_or_text(
+                with_bitmap,
+                false,
+                cx
+            )) == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
         );
         let with_text = clipboard(vec![files(&["/tmp/folder"]), text("/tmp/folder")]);
         assert!(
             field_events(cx, true, |field, _, cx| field
-                .paste_images_or_text(with_text, cx))
+                .paste_images_or_text(with_text, false, cx))
                 == vec![MentionFieldEvent::Paste("/tmp/folder".into())]
         );
         let files_only = clipboard(vec![files(&["/tmp/folder"])]);
         assert!(
             field_events(cx, true, |field, _, cx| field
-                .paste_images_or_text(files_only, cx))
+                .paste_images_or_text(files_only, false, cx))
             .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn rich_html_clipboard_pastes_markdown_unless_plain_requested(cx: &mut gpui::TestAppContext) {
+        let item = clipboard(vec![ClipboardEntry::String(
+            gpui::ClipboardString::new("Hello\r\nworld".into())
+                .with_html(Some("<p>Hello <b>world</b></p>".into())),
+        )]);
+        assert!(
+            paste_events(cx, true, item.clone())
+                == vec![MentionFieldEvent::PasteRich {
+                    markdown: "Hello **world**".into(),
+                    plain: "Hello\nworld".into(),
+                }]
+        );
+        assert!(
+            field_events(cx, true, |field, _, cx| field.paste_images_or_text(
+                item.clone(),
+                true,
+                cx
+            )) == vec![MentionFieldEvent::Paste("Hello\nworld".into())]
+        );
+        cx.update(|cx| cx.write_to_clipboard(item));
+        assert!(
+            field_events(cx, true, |field, window, cx| field.paste_plain_text(
+                &PastePlainText,
+                window,
+                cx
+            )) == vec![MentionFieldEvent::Paste("Hello\nworld".into())]
+        );
+    }
+
+    #[gpui::test]
+    fn copied_mentions_ignore_clipboard_html(cx: &mut gpui::TestAppContext) {
+        let mentions = vec![CopiedMention {
+            display: "@alice".into(),
+            user_id: "42".into(),
+            role_id: String::new(),
+            at: 3,
+        }];
+        let entry = gpui::ClipboardString::new("hi @alice".into())
+            .with_json_metadata(super::super::CopiedMentions {
+                mezon_mentions: mentions.clone(),
+            })
+            .with_html(Some("<b>hi @alice</b>".into()));
+        let item = clipboard(vec![ClipboardEntry::String(entry)]);
+        assert!(
+            paste_events(cx, true, item)
+                == vec![MentionFieldEvent::PasteWithMentions(
+                    "hi @alice".into(),
+                    mentions
+                )]
         );
     }
 

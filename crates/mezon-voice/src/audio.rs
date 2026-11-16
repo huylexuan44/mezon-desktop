@@ -945,7 +945,6 @@ impl AudioIo {
                                 in_alive.store(false, Ordering::Relaxed);
                                 drop(in_stream.take());
                                 input_running = false;
-                                input_healthy = false;
                             }
                             let new_alive = Arc::new(AtomicBool::new(true));
                             let rebuild = rebuild_input_stream(

@@ -14,6 +14,11 @@ pub const CHANNEL_SETTING_LOGO_DARK: &str = "images/channel_setting_logo_dark.sv
 pub const ONBOARDING: &str = "images/onboarding.png";
 pub const EMPTY_WEBHOOK: &str = "images/empty-webhook.svg";
 pub const AGE_RESTRICTED_WARNING: &str = "images/warning.svg";
+pub const VTBG_BG1: &str = "images/vtbg/bg1.png";
+pub const VTBG_BG2: &str = "images/vtbg/bg2.png";
+pub const VTBG_BG3: &str = "images/vtbg/bg3.png";
+pub const VTBG_BG4: &str = "images/vtbg/bg4.png";
+pub const VTBG_BG5: &str = "images/vtbg/bg5.png";
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -57,6 +62,11 @@ mod tests {
             ONBOARDING,
             EMPTY_WEBHOOK,
             AGE_RESTRICTED_WARNING,
+            VTBG_BG1,
+            VTBG_BG2,
+            VTBG_BG3,
+            VTBG_BG4,
+            VTBG_BG5,
             "icons/gift.svg",
         ] {
             let loaded = Assets

@@ -8,11 +8,12 @@ use mezon_store::{
     AccountEvent, AccountStore, AuthState, AutoUpdateStatus, AutoUpdateStore,
     CHANNEL_ACTIVE_ARCHIVED, CHANNEL_ACTIVE_JOINED, CallStore, Channel, ChannelEvent, ChannelId,
     ChannelList, ChannelType, ClanId, ClanList, DirectChannel, DirectKind, DirectMessageStore,
-    GroupMembersStore, InboxStore, MessageSearchEvent, MessageSearchStore, MessagesStore,
-    NoiseSuppressionStatus, PickedSearchUser, PinnedEvent, PinnedMessagesStore, Settings,
-    StreamStore, THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore,
-    UiState, VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore,
-    expand_user_name_tokens, retain_picked_search_users,
+    GroupMembersStore, InboxStore, LiveError, LiveFailure, LiveSource, LiveStore,
+    MessageSearchEvent, MessageSearchStore, MessagesStore, NoiseSuppressionStatus,
+    PickedSearchUser, PinnedEvent, PinnedMessagesStore, Settings, StreamStore,
+    THREAD_STATUS_ARCHIVED, ThreadsEvent, ThreadsStore, TopicsEvent, TopicsStore, UiState,
+    VoiceConnection, VoiceMember, VoiceModerationError, VoiceStore, expand_user_name_tokens,
+    retain_picked_search_users,
 };
 use ui::{PopoverMenuHandle, Tooltip};
 
@@ -60,6 +61,7 @@ pub struct ChatLayout {
     voice_store: Entity<VoiceStore>,
     call_panel: Entity<CallPanelView>,
     stream_store: Entity<StreamStore>,
+    live_store: Entity<LiveStore>,
     voice_strip_scroll: ScrollHandle,
     voice_strip_width: Pixels,
     voice_grid_page: usize,
@@ -79,6 +81,8 @@ pub struct ChatLayout {
     dm_view_fingerprint: Option<(ChannelId, DirectKind, String)>,
     inbox_context_ids: Option<(Option<ClanId>, Option<ChannelId>)>,
     _voice_frame_pump: Option<Task<()>>,
+    _live_frame_pump: Option<Task<()>>,
+    live_frame_store_ptr: Option<usize>,
     show_member_list: bool,
     show_profile_dm: bool,
     ui_state: UiState,
@@ -323,6 +327,58 @@ impl ChatLayout {
         })
         .detach();
 
+        let live_store = LiveStore::global(cx);
+        cx.observe(&live_store, |this, live, cx| {
+            let locale = this.settings.read(cx).language.clone();
+            while let Some(err) = live.update(cx, |store, _| store.take_error()) {
+                match err {
+                    LiveError::Failure(failure) => {
+                        let key = match failure {
+                            LiveFailure::ChannelBusy => "channelStream.liveError.busy",
+                            LiveFailure::Forbidden => "channelStream.liveError.forbidden",
+                            LiveFailure::ServerBusy => "channelStream.liveError.serverBusy",
+                            LiveFailure::Unsupported => "channelStream.liveError.unsupported",
+                            LiveFailure::Network => "channelStream.liveError.network",
+                            LiveFailure::Replaced => "channelStream.liveError.replaced",
+                        };
+                        let msg = mezon_i18n::t(&locale, key).to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+                    }
+                    LiveError::AccessLost => {
+                        let msg = mezon_i18n::t(&locale, "channelStream.liveError.accessLost")
+                            .to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
+                    }
+                    LiveError::SourceUnavailable(source) | LiveError::SourceEnded(source) => {
+                        let source_name = match source {
+                            LiveSource::Screen => {
+                                mezon_i18n::t(&locale, "channelStream.liveScreen")
+                            }
+                            LiveSource::SystemAudio => {
+                                mezon_i18n::t(&locale, "channelStream.liveSystemAudio")
+                            }
+                            LiveSource::Microphone => {
+                                mezon_i18n::t(&locale, "channelStream.liveMic")
+                            }
+                            LiveSource::Camera => {
+                                mezon_i18n::t(&locale, "channelStream.liveCamera")
+                            }
+                        };
+                        let template_key = match err {
+                            LiveError::SourceEnded(_) => "channelStream.liveError.sourceEnded",
+                            _ => "channelStream.liveError.source",
+                        };
+                        let msg =
+                            mezon_i18n::t(&locale, template_key).replace("{{source}}", source_name);
+                        Shell::global(cx).update(cx, |shell, cx| shell.info(msg, cx));
+                    }
+                }
+            }
+            this.sync_live_frame_pump(cx);
+            cx.notify();
+        })
+        .detach();
+
         let threads_store = ThreadsStore::global(cx);
         cx.observe(&threads_store, |this, _, cx| {
             if this.threads_panel_state_changed(cx) {
@@ -372,6 +428,7 @@ impl ChatLayout {
             this.sync_inbox_context(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
+            this.sync_live_frame_pump(cx);
             if this.active_channel_display_changed(cx) {
                 this.media_channel_view_mode = false;
                 this.dismiss_topic_panel(cx);
@@ -441,6 +498,7 @@ impl ChatLayout {
             this.ensure_active_channel_for_clan(cx);
             this.sync_stream_session(cx);
             this.sync_voice_frame_pump(cx);
+            this.sync_live_frame_pump(cx);
             this.dismiss_inbox_popover(cx);
             cx.notify();
         })
@@ -523,6 +581,7 @@ impl ChatLayout {
             voice_store,
             call_panel,
             stream_store,
+            live_store,
             voice_strip_scroll: ScrollHandle::new(),
             voice_strip_width: px(0.),
             voice_grid_page: 0,
@@ -542,6 +601,8 @@ impl ChatLayout {
             dm_view_fingerprint: None,
             inbox_context_ids: None,
             _voice_frame_pump: None,
+            _live_frame_pump: None,
+            live_frame_store_ptr: None,
             show_member_list,
             show_profile_dm: false,
             ui_state,
@@ -593,6 +654,7 @@ impl ChatLayout {
         this.sync_member_list_visibility(cx);
         this.sync_inbox_context(cx);
         this.sync_voice_frame_pump(cx);
+        this.sync_live_frame_pump(cx);
         register_chat_layout(cx.weak_entity(), cx);
         this
     }
@@ -1531,6 +1593,36 @@ impl ChatLayout {
         self._voice_frame_pump = Some(crate::chat::voice::spawn_voice_frame_pump(cx));
     }
 
+    fn sync_live_frame_pump(&mut self, cx: &mut Context<Self>) {
+        let frame_store = if self.is_live_frame_relevant(cx) {
+            self.live_store.read(cx).frame_store()
+        } else {
+            None
+        };
+        let Some(store) = frame_store else {
+            self._live_frame_pump = None;
+            self.live_frame_store_ptr = None;
+            return;
+        };
+        let ptr = std::sync::Arc::as_ptr(&store) as usize;
+        if self._live_frame_pump.is_some() && self.live_frame_store_ptr == Some(ptr) {
+            return;
+        }
+        self.live_frame_store_ptr = Some(ptr);
+        self._live_frame_pump = Some(spawn_live_frame_pump(store, cx));
+    }
+
+    fn is_live_frame_relevant(&self, cx: &Context<Self>) -> bool {
+        if self.is_dm_route(cx) {
+            return false;
+        }
+        let Some(active) = self.channel_list.read(cx).active_channel() else {
+            return false;
+        };
+        active.channel_type == ChannelType::Stream
+            && self.live_store.read(cx).is_active_in(active.id)
+    }
+
     fn sync_stream_session(&mut self, cx: &mut Context<Self>) {
         let active = self
             .channel_list
@@ -1765,6 +1857,13 @@ impl Render for ChatLayout {
             self.stream_store.clone(),
             cx,
         );
+        let live_connected_bar = crate::chat::stream::render_live_connected_bar(
+            cx.theme(),
+            &locale,
+            self.live_store.read(cx),
+            self.live_store.clone(),
+            cx,
+        );
         fn update_banner_bg(hover: bool) -> gpui::Background {
             if hover {
                 linear_gradient(
@@ -1926,6 +2025,8 @@ impl Render for ChatLayout {
         };
         self.voice_store
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
+        self.live_store
+            .update(cx, |store, cx| store.flush_texture_drops(window, cx));
         let theme = cx.theme();
 
         div()
@@ -1994,6 +2095,7 @@ impl Render for ChatLayout {
                                     .flex_1()
                                     .min_h_0()
                                     .overflow_y_scroll()
+                                    .children(live_connected_bar)
                                     .children(stream_connected_bar)
                                     .children(voice_mini_bar)
                                     .children(call_mini_bar)
@@ -2023,6 +2125,28 @@ impl Render for ChatLayout {
             )
             .children(fullscreen)
     }
+}
+
+fn spawn_live_frame_pump<V: 'static>(
+    store: std::sync::Arc<mezon_store::VideoFrameStore>,
+    cx: &mut Context<V>,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let mut rx = store.frame_watch();
+        let mut last_seq = 0u64;
+        loop {
+            let seq = store.publish_seq();
+            if seq != last_seq {
+                last_seq = seq;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    })
 }
 
 impl ChatLayout {
@@ -2161,19 +2285,36 @@ impl ChatLayout {
         let parent = parent_id.parse::<ChannelId>().ok();
         let channel_key = channel_id.to_string();
         let threads = ThreadsStore::global(cx).read(cx);
-        let (active, active_confirmed) = match threads.thread_active(&channel_key) {
-            Some(status) => (
-                if status == THREAD_STATUS_ARCHIVED {
-                    CHANNEL_ACTIVE_ARCHIVED
+        let known_active = threads.thread_active(&channel_key);
+        let supplied_private = private;
+        let private = supplied_private
+            .or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
+        if known_active.is_none() && supplied_private.is_none() {
+            self.channel_list.update(cx, |list, cx| {
+                if list.channel_in_clan(clan_id, channel_id) {
+                    list.refresh_thread_active_from_server(clan_id, channel_id, cx);
                 } else {
-                    CHANNEL_ACTIVE_JOINED
+                    list.allow_archived_thread(channel_id);
+                    list.ensure_channel_in_clan(clan_id, channel_id, cx);
+                }
+            });
+            crate::router::navigate(
+                cx,
+                Route::Channel {
+                    clan_id,
+                    channel_id,
                 },
-                true,
-            ),
-            None => (CHANNEL_ACTIVE_JOINED, false),
-        };
-        let private =
-            private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
+            );
+            return;
+        }
+        let (active, active_confirmed) = (
+            if known_active == Some(THREAD_STATUS_ARCHIVED) {
+                CHANNEL_ACTIVE_ARCHIVED
+            } else {
+                CHANNEL_ACTIVE_JOINED
+            },
+            true,
+        );
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(

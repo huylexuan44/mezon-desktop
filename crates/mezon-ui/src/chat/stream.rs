@@ -1,16 +1,18 @@
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Context, CursorStyle, DismissEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, MouseDownEvent, Rgba, SharedString, Subscription,
-    Window, div, linear_color_stop, linear_gradient, point, prelude::*, px,
+    FocusHandle, Focusable, FontWeight, Hsla, MouseDownEvent, ObjectFit, Rgba, SharedString,
+    Subscription, Window, div, img, linear_color_stop, linear_gradient, point, prelude::*, px,
 };
 #[cfg(target_os = "macos")]
-use mezon_store::{AudioStore, DeviceKind, Settings};
+use mezon_store::{AudioStore, DeviceKind};
 use mezon_store::{
-    AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, STREAM_QUALITIES, StreamMember,
-    StreamPhase, StreamQuality, StreamStore,
+    AuthState, Channel, ChannelId, ChannelList, ClanId, ClanList, LIVE_PREVIEW_KEY, LivePhase,
+    LiveStore, STREAM_QUALITIES, Settings, StreamMember, StreamPhase, StreamQuality, StreamStore,
+    VoiceRenderFrame,
 };
 
 use crate::chat::layout::ChatLayout;
+use crate::chat::screen_share_modal::{start_go_live_flow, start_live_switch_flow};
 use crate::chat::stream_video::StreamVideoView;
 #[cfg(target_os = "macos")]
 use crate::chat::voice::{
@@ -28,10 +30,8 @@ const PUBLISHER_PREJOIN_AVATAR_SIZE: f32 = 80.;
 fn stream_channel_bg(theme: &Theme, joined: bool) -> Rgba {
     if joined {
         gpui::rgb(0x11111b)
-    } else if !theme_is_light(theme) {
-        theme.tokens.theme_setting_primary
     } else {
-        gpui::rgb(0xd1d5db)
+        theme.bg_tertiary
     }
 }
 
@@ -66,9 +66,25 @@ pub fn render_stream_channel(
     let session_here = store.is_session_channel(channel_id);
     let joined = session_here && store.is_joined();
     let joining = session_here && store.is_joining();
-    let shell_bg = stream_channel_bg(theme, joined);
+    let live_here_entity =
+        LiveStore::try_global(cx).filter(|live| live.read(cx).is_active_in(channel_id));
+    let live_here = live_here_entity.is_some();
+    let shell_bg = stream_channel_bg(theme, joined || live_here);
 
-    let body = if let Some(message) = error_message {
+    let body = if let Some(live_entity) = live_here_entity {
+        render_live_publisher(
+            theme,
+            locale,
+            channel,
+            store,
+            &members,
+            viewer_count,
+            show_chat,
+            stream_entity.clone(),
+            live_entity,
+            cx,
+        )
+    } else if let Some(message) = error_message {
         render_error(
             theme,
             locale,
@@ -143,7 +159,7 @@ pub fn render_stream_channel(
             locale,
             &channel.name,
             show_chat,
-            joined || joining,
+            joined || joining || live_here,
             stream.clone(),
         ))
         .child(body)
@@ -366,6 +382,139 @@ pub fn render_stream_connected_bar(
                             )
                             .on_click(move |_, _, cx| {
                                 stream_leave.update(cx, |store, cx| store.leave_stream(cx));
+                            }),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
+pub fn render_live_connected_bar(
+    theme: &Theme,
+    locale: &str,
+    store: &LiveStore,
+    live: Entity<LiveStore>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let (clan_id, channel_id) = store.active_channel()?;
+
+    let (channel_label, mut clan_name) = ChannelList::try_global(cx)
+        .and_then(|list| {
+            list.read(cx)
+                .channel(clan_id, channel_id)
+                .map(|ch| (ch.name.clone(), ch.clan_name.clone()))
+        })
+        .unwrap_or_default();
+    if clan_name.is_empty()
+        && let Some(list) = ClanList::try_global(cx)
+        && let Some(clan) = list.read(cx).clan(clan_id)
+    {
+        clan_name = clan.name.clone();
+    }
+    let address = if clan_name.is_empty() {
+        format!("{channel_label} /")
+    } else {
+        format!("{channel_label} / {clan_name}")
+    };
+    let address = if address.chars().count() > 30 {
+        format!("{}...", address.chars().take(30).collect::<String>())
+    } else {
+        address
+    };
+
+    let live_end = live;
+    let jump_channel = channel_id;
+    let jump_clan = clan_id;
+    let hover_color = theme.text_primary;
+    let leave_icon_color = if theme_is_light(theme) {
+        theme.text_primary
+    } else {
+        theme.text_secondary
+    };
+    let leave_hover_bg = if theme_is_light(theme) {
+        theme.tokens.bg_secondary_button_hover
+    } else {
+        theme.bg_hover
+    };
+    let end_tooltip = SharedString::from(mezon_i18n::t(locale, "channelStream.endLive"));
+
+    Some(
+        div()
+            .w_full()
+            .px_4()
+            .py_2()
+            .bg(theme.tokens.bg_active_member_channel)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .max_w(px(200.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Icon::new(IconName::Live)
+                                            .size(px(16.))
+                                            .text_color(theme.status_online),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.status_online)
+                                            .child(mezon_i18n::t(
+                                                locale,
+                                                "channelStream.youAreLive",
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("live-connected-jump")
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_secondary)
+                                    .hover(move |s| s.text_color(hover_color))
+                                    .child(address)
+                                    .on_click(move |_, _, cx| {
+                                        crate::router::navigate(
+                                            cx,
+                                            crate::router::Route::Channel {
+                                                clan_id: jump_clan,
+                                                channel_id: jump_channel,
+                                            },
+                                        );
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("live-connected-end")
+                            .p_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .opacity(80.)
+                            .hover(move |s| s.bg(leave_hover_bg))
+                            .tooltip(Tooltip::text(end_tooltip))
+                            .child(
+                                Icon::new(IconName::CallEnd)
+                                    .size(px(20.))
+                                    .text_color(leave_icon_color),
+                            )
+                            .on_click(move |_, _, cx| {
+                                live_end.update(cx, |store, cx| store.stop(cx));
                             }),
                     ),
             )
@@ -663,8 +812,8 @@ fn render_pre_join(
                     .child(err),
             )
         })
-        .child(
-            div()
+        .child({
+            let join_button = div()
                 .id(button_id)
                 .w(px(256.))
                 .max_w_full()
@@ -697,9 +846,385 @@ fn render_pre_join(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(gpui::rgb(0xffffff))
                         .child(join_text),
-                ),
-        )
+                );
+
+            if has_publisher {
+                join_button.into_any_element()
+            } else {
+                let live_elsewhere = LiveStore::try_global(cx).is_some_and(|live| {
+                    let s = live.read(cx);
+                    s.is_active() && !s.is_active_in(channel_id)
+                });
+                let go_live_text =
+                    SharedString::from(mezon_i18n::t(locale, "channelStream.goLive"));
+                let elsewhere_tooltip =
+                    SharedString::from(mezon_i18n::t(locale, "channelStream.liveElsewhere"));
+                let secondary_bg = theme.bg_secondary;
+                let secondary_hover = theme.tokens.bg_secondary_button_hover;
+                let secondary_text = theme.tokens.text_theme_primary;
+                let secondary_border = theme.border;
+
+                let go_live_button = div()
+                    .id("stream-go-live-button")
+                    .w(px(256.))
+                    .max_w_full()
+                    .px_4()
+                    .py_2()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(secondary_bg)
+                    .border_1()
+                    .border_color(secondary_border)
+                    .when(!live_elsewhere, |el| {
+                        el.cursor_pointer()
+                            .hover(move |s| s.bg(secondary_hover))
+                            .on_click(move |_, window, cx| {
+                                if let Some(settings) = Settings::try_global(cx) {
+                                    start_go_live_flow(clan_id, channel_id, settings, window, cx);
+                                }
+                            })
+                    })
+                    .when(live_elsewhere, |el| {
+                        el.opacity(0.5).tooltip(Tooltip::text(elsewhere_tooltip))
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(secondary_text)
+                            .child(go_live_text),
+                    );
+
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(join_button)
+                    .child(go_live_button)
+                    .into_any_element()
+            }
+        })
         .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_live_publisher(
+    theme: &Theme,
+    locale: &str,
+    channel: &Channel,
+    store: &StreamStore,
+    members: &[StreamMember],
+    viewer_count: u32,
+    show_chat: bool,
+    stream: Entity<StreamStore>,
+    live: Entity<LiveStore>,
+    cx: &App,
+) -> AnyElement {
+    let show_members = store.show_members();
+    let has_members = !members.is_empty();
+    let (phase, mic_on, camera_on, system_audio_on, screen_on, preview_frame) = {
+        let live_state = live.read(cx);
+        (
+            live_state.phase(),
+            live_state.mic_on(),
+            live_state.camera_on(),
+            live_state.system_audio_on(),
+            live_state.screen_on(),
+            live_state.render_frame(LIVE_PREVIEW_KEY),
+        )
+    };
+
+    let status_overlay_label = match phase {
+        LivePhase::Starting { .. } => Some(mezon_i18n::t(locale, "channelStream.liveConnecting")),
+        LivePhase::Reconnecting { .. } => {
+            Some(mezon_i18n::t(locale, "channelStream.liveReconnecting"))
+        }
+        LivePhase::Idle | LivePhase::Live { .. } => None,
+    };
+
+    let preview_element = preview_frame.map(|frame| match frame {
+        VoiceRenderFrame::Image(image) => img(image)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        #[cfg(target_os = "macos")]
+        VoiceRenderFrame::Surface(surface) => gpui::surface(surface.into_inner())
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+    });
+
+    let top_overlay = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_4()
+        .pt_3()
+        .pb_10()
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(gpui::rgba(0x00000099), 0.),
+            linear_color_stop(gpui::rgba(0x00000000), 1.),
+        ))
+        .child(render_live_badge(locale))
+        .child(render_viewer_count(
+            locale,
+            viewer_count,
+            gpui::rgba(0xffffffe6).into(),
+        ));
+
+    let mic_tooltip = SharedString::from(mezon_i18n::t(locale, "channelStream.liveMic"));
+    let cam_tooltip = SharedString::from(mezon_i18n::t(locale, "channelStream.liveCamera"));
+    let sys_tooltip = SharedString::from(mezon_i18n::t(locale, "channelStream.liveSystemAudio"));
+    let change_screen_tooltip =
+        SharedString::from(mezon_i18n::t(locale, "channelStream.changeScreen"));
+    let stop_screen_tooltip = SharedString::from(mezon_i18n::t(locale, "channelStream.stopScreen"));
+    let end_label = SharedString::from(mezon_i18n::t(locale, "channelStream.endLive"));
+
+    let live_mic = live.clone();
+    let live_cam = live.clone();
+    let live_sys = live.clone();
+    let live_stop_screen = live.clone();
+    let live_end = live;
+
+    let controls_bar = div()
+        .id("live-publisher-controls")
+        .occlude()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .pb_4()
+        .pt_12()
+        .bg(linear_gradient(
+            0.,
+            linear_color_stop(gpui::rgba(0x000000cc), 0.),
+            linear_color_stop(gpui::rgba(0x00000000), 1.),
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    live_control_icon_button(
+                        "live-mic-toggle",
+                        if mic_on {
+                            IconName::Mic
+                        } else {
+                            IconName::MicOff
+                        },
+                        mic_on,
+                        mic_tooltip,
+                    )
+                    .on_click(move |_, _, cx| {
+                        live_mic.update(cx, |s, cx| s.set_mic_enabled(!mic_on, cx));
+                    }),
+                )
+                .child(
+                    live_control_icon_button(
+                        "live-camera-toggle",
+                        if camera_on {
+                            IconName::Video
+                        } else {
+                            IconName::VideoOff
+                        },
+                        camera_on,
+                        cam_tooltip,
+                    )
+                    .on_click(move |_, _, cx| {
+                        live_cam.update(cx, |s, cx| s.set_camera_enabled(!camera_on, cx));
+                    }),
+                )
+                .child(
+                    live_control_icon_button(
+                        "live-system-audio-toggle",
+                        if system_audio_on {
+                            IconName::Speaker
+                        } else {
+                            IconName::SpeakerOff
+                        },
+                        system_audio_on,
+                        sys_tooltip,
+                    )
+                    .on_click(move |_, _, cx| {
+                        live_sys.update(cx, |s, cx| s.set_system_audio(!system_audio_on, cx));
+                    }),
+                )
+                .child(
+                    live_control_icon_button(
+                        "live-change-screen",
+                        IconName::ScreenShare,
+                        screen_on,
+                        change_screen_tooltip,
+                    )
+                    .on_click(move |_, window, cx| {
+                        if let Some(settings) = Settings::try_global(cx) {
+                            start_live_switch_flow(settings, window, cx);
+                        }
+                    }),
+                )
+                .when(screen_on, |row| {
+                    row.child(
+                        live_control_icon_button(
+                            "live-stop-screen",
+                            IconName::ScreenShareOff,
+                            false,
+                            stop_screen_tooltip,
+                        )
+                        .on_click(move |_, _, cx| {
+                            live_stop_screen.update(cx, |s, cx| s.stop_screen(cx));
+                        }),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .id("live-end-button")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_2()
+                .rounded_full()
+                .bg(gpui::rgb(0xda373c))
+                .cursor_pointer()
+                .hover(|s| s.bg(gpui::rgb(0xa12829)))
+                .child(
+                    Icon::new(IconName::CallEnd)
+                        .size(px(20.))
+                        .text_color(gpui::white()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(gpui::white())
+                        .child(end_label),
+                )
+                .on_click(move |_, _, cx| {
+                    live_end.update(cx, |s, cx| s.stop(cx));
+                }),
+        );
+
+    let stage = div()
+        .id("live-publisher-stage")
+        .relative()
+        .size_full()
+        .rounded_xl()
+        .overflow_hidden()
+        .bg(gpui::rgb(0x000000))
+        .children(preview_element)
+        .child(top_overlay)
+        .when_some(status_overlay_label, |el, status_text| {
+            el.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(gpui::rgba(0x000000b3))
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(gpui::white())
+                            .child(status_text),
+                    ),
+            )
+        })
+        .child(controls_bar);
+
+    let members_tooltip_key = if show_members {
+        "channelStream.hideMembers"
+    } else {
+        "channelStream.showMembers"
+    };
+    let members_tooltip = SharedString::from(mezon_i18n::t(locale, members_tooltip_key));
+
+    div()
+        .relative()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .w_full()
+        .bg(gpui::rgb(0x11111b))
+        .p_4()
+        .child(div().flex_1().min_h_0().w_full().child(stage))
+        .when(has_members, |el| {
+            el.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .pt_2()
+                    .child(render_members_toggle_button(
+                        show_members,
+                        members_tooltip,
+                        stream,
+                    ))
+                    .when(show_members, |el| {
+                        el.child(member_row(
+                            theme,
+                            members,
+                            channel.clan_id,
+                            if show_chat { 4 } else { 7 },
+                            cx,
+                        ))
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+fn live_control_icon_button(
+    id: &'static str,
+    icon: IconName,
+    active: bool,
+    tooltip: SharedString,
+) -> gpui::Stateful<gpui::Div> {
+    let bg = if active {
+        gpui::rgba(0xffffff26)
+    } else {
+        gpui::rgba(0xffffff14)
+    };
+    let hover_bg = gpui::rgba(0xffffff38);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(40.))
+        .rounded_full()
+        .bg(bg)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .tooltip(Tooltip::text(tooltip))
+        .child(Icon::new(icon).size(px(20.)).text_color(gpui::white()))
 }
 
 #[allow(clippy::too_many_arguments)]
