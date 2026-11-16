@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Le serveur de diffusion est occupé, réessayez dans un instant",
   "channelStream.liveError.unsupported": "Cet appareil ne peut pas encoder le flux",
   "channelStream.liveError.network": "Connexion au serveur de diffusion perdue",
+  "channelStream.liveError.replaced": "Votre diffusion a été reprise par une autre application ou un autre appareil utilisant votre compte",
   "channelStream.liveError.source": "Impossible de démarrer {{source}}",
   "channelTopbar.activeThreads": "Fils actifs",
   "channelTopbar.archivedThreads": "Fils plus anciens",

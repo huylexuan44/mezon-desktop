@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "De streamserver is bezet, probeer het zo opnieuw",
   "channelStream.liveError.unsupported": "Dit apparaat kan de stream niet coderen",
   "channelStream.liveError.network": "Verbinding met de streamserver verbroken",
+  "channelStream.liveError.replaced": "Je stream is overgenomen door een andere app of een ander apparaat met jouw account",
   "channelStream.liveError.source": "Kon {{source}} niet starten",
   "channelTopbar.activeThreads": "Actieve topics",
   "channelTopbar.archivedThreads": "Oudere threads",

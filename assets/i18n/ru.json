@@ -996,6 +996,7 @@
   "channelStream.liveError.serverBusy": "Сервер трансляций перегружен, попробуйте чуть позже",
   "channelStream.liveError.unsupported": "Это устройство не может кодировать трансляцию",
   "channelStream.liveError.network": "Потеряно соединение с сервером трансляций",
+  "channelStream.liveError.replaced": "Вашу трансляцию перехватило другое приложение или устройство с вашей учётной записью",
   "channelStream.liveError.source": "Не удалось запустить {{source}}",
   "channelTopbar.activeThreads": "Активные ветки",
   "channelTopbar.archivedThreads": "Архивные ветки",

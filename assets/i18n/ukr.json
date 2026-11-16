@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Сервер трансляцій зайнятий, спробуйте за мить",
   "channelStream.liveError.unsupported": "Цей пристрій не може кодувати трансляцію",
   "channelStream.liveError.network": "Втрачено з’єднання із сервером трансляцій",
+  "channelStream.liveError.replaced": "Вашу трансляцію перехопив інший застосунок або пристрій із вашим обліковим записом",
   "channelStream.liveError.source": "Не вдалося запустити {{source}}",
   "channelTopbar.activeThreads": "Активні треди",
   "channelTopbar.archivedThreads": "Старі теми",

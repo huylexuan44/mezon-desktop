@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Il server di streaming è occupato, riprova tra poco",
   "channelStream.liveError.unsupported": "Questo dispositivo non può codificare lo stream",
   "channelStream.liveError.network": "Connessione al server di streaming persa",
+  "channelStream.liveError.replaced": "La tua diretta è stata rilevata da un'altra app o dispositivo che usa il tuo account",
   "channelStream.liveError.source": "Impossibile avviare {{source}}",
   "channelTopbar.activeThreads": "Thread attivi",
   "channelTopbar.archivedThreads": "Thread archiviati",

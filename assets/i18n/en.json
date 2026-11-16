@@ -986,6 +986,7 @@
   "channelStream.liveError.serverBusy": "The stream server is busy, try again in a moment",
   "channelStream.liveError.unsupported": "This device can't encode the stream",
   "channelStream.liveError.network": "Lost connection to the stream server",
+  "channelStream.liveError.replaced": "Your stream was taken over by another app or device using your account",
   "channelStream.liveError.source": "Couldn't start {{source}}",
   "channelTopbar.activeThreads": "Active Threads",
   "channelTopbar.archivedThreads": "Archived Threads",

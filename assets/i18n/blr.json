@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Сервер трансляцый заняты, паспрабуйце праз хвіліну",
   "channelStream.liveError.unsupported": "Гэта прылада не можа кадаць трансляцыю",
   "channelStream.liveError.network": "Страчана злучэнне з серверам трансляцый",
+  "channelStream.liveError.replaced": "Вашу трансляцыю перахапіла іншая праграма або прылада з вашым уліковым запісам",
   "channelStream.liveError.source": "Не ўдалося запусціць {{source}}",
   "channelTopbar.activeThreads": "Актыўныя трэды",
   "channelTopbar.archivedThreads": "Старыя тэмы",

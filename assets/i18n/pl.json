@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Serwer transmisji jest zajęty, spróbuj ponownie za chwilę",
   "channelStream.liveError.unsupported": "To urządzenie nie może zakodować transmisji",
   "channelStream.liveError.network": "Utracono połączenie z serwerem transmisji",
+  "channelStream.liveError.replaced": "Twoją transmisję przejęła inna aplikacja lub urządzenie korzystające z Twojego konta",
   "channelStream.liveError.source": "Nie udało się uruchomić: {{source}}",
   "channelTopbar.activeThreads": "Aktywne wątki",
   "channelTopbar.archivedThreads": "Starsze wątki",

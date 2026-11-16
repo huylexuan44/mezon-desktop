@@ -105,6 +105,7 @@ pub enum LiveFailure {
     ServerBusy,
     Unsupported,
     Network,
+    Replaced,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,6 +242,7 @@ struct ReconnectState {
     attempt: u32,
     last_server_busy: bool,
     retry_deadline: Option<tokio::time::Instant>,
+    stale_resource: Option<(Url, String)>,
 }
 
 fn backoff_for_attempt(attempt: u32) -> Duration {
@@ -375,12 +377,14 @@ async fn session_main(
         attempt: 0,
         last_server_busy: false,
         retry_deadline: None,
+        stale_resource: None,
     };
 
     spawn_connect_attempt(
         connect_gen,
         current_pc_gen,
         false,
+        None,
         factory.clone(),
         audio_track.clone(),
         video_track.clone(),
@@ -665,7 +669,6 @@ async fn session_main(
                                         &mut currently_live,
                                         &mut connect_deadline,
                                         &mut disconnected_deadline,
-                                        &client,
                                         &endpoint.token,
                                         &evt_tx,
                                     ) {
@@ -710,7 +713,6 @@ async fn session_main(
                                 &mut currently_live,
                                 &mut connect_deadline,
                                 &mut disconnected_deadline,
-                                &client,
                                 &endpoint.token,
                                 &evt_tx,
                             ) {
@@ -735,7 +737,6 @@ async fn session_main(
                     &mut currently_live,
                     &mut connect_deadline,
                     &mut disconnected_deadline,
-                    &client,
                     &endpoint.token,
                     &evt_tx,
                 ) {
@@ -754,7 +755,6 @@ async fn session_main(
                     &mut currently_live,
                     &mut connect_deadline,
                     &mut disconnected_deadline,
-                    &client,
                     &endpoint.token,
                     &evt_tx,
                 ) {
@@ -770,6 +770,7 @@ async fn session_main(
                     connect_gen,
                     current_pc_gen,
                     true,
+                    reconnect.stale_resource.take(),
                     factory.clone(),
                     audio_track.clone(),
                     video_track.clone(),
@@ -843,7 +844,6 @@ fn begin_reconnect(
     currently_live: &mut bool,
     connect_deadline: &mut Option<tokio::time::Instant>,
     disconnected_deadline: &mut Option<tokio::time::Instant>,
-    client: &reqwest::Client,
     token: &str,
     evt_tx: &flume::Sender<LiveEvent>,
 ) -> bool {
@@ -858,11 +858,7 @@ fn begin_reconnect(
     }
 
     if let Some(old_url) = resource_url.take() {
-        let delete_client = client.clone();
-        let delete_token = token.to_owned();
-        runtime::runtime().spawn(async move {
-            whip::delete(&delete_client, &old_url, &delete_token).await;
-        });
+        reconnect.stale_resource = Some((old_url, token.to_owned()));
     }
 
     reconnect.attempt = reconnect.attempt.saturating_add(1);
@@ -897,6 +893,7 @@ fn spawn_connect_attempt(
     connect_gen: u64,
     pc_gen: u64,
     is_reconnect: bool,
+    stale_resource: Option<(Url, String)>,
     factory: PeerConnectionFactory,
     audio_track: RtcAudioTrack,
     video_track: RtcVideoTrack,
@@ -908,6 +905,27 @@ fn spawn_connect_attempt(
     connect_tx: flume::Sender<(u64, ConnectOutcome)>,
 ) {
     runtime::runtime().spawn(async move {
+        if let Some((stale_url, stale_token)) = stale_resource
+            && whip::was_replaced(whip::delete(&client, &stale_url, &stale_token).await)
+        {
+            tracing::warn!(
+                "live session was replaced by another publisher on this account; not reconnecting"
+            );
+            let _ = connect_tx
+                .send_async((
+                    connect_gen,
+                    ConnectOutcome::Failed {
+                        endpoint,
+                        error: WhipError::Terminal {
+                            failure: LiveFailure::Replaced,
+                            status: 404,
+                        },
+                    },
+                ))
+                .await;
+            return;
+        }
+
         if is_reconnect
             && let Some(fresh) = refresh.refresh().await
             && !fresh.whip_url.is_empty()

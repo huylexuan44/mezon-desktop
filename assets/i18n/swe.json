@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Streamservern är upptagen, försök igen om en stund",
   "channelStream.liveError.unsupported": "Den här enheten kan inte koda strömmen",
   "channelStream.liveError.network": "Tappade anslutningen till streamservern",
+  "channelStream.liveError.replaced": "Din stream togs över av en annan app eller enhet som använder ditt konto",
   "channelStream.liveError.source": "Kunde inte starta {{source}}",
   "channelTopbar.activeThreads": "Aktiva trådar",
   "channelTopbar.archivedThreads": "Arkiverade trådar",

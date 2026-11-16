@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "Der Stream-Server ist ausgelastet, versuche es gleich erneut",
   "channelStream.liveError.unsupported": "Dieses Gerät kann den Stream nicht codieren",
   "channelStream.liveError.network": "Verbindung zum Stream-Server verloren",
+  "channelStream.liveError.replaced": "Dein Stream wurde von einer anderen App oder einem anderen Gerät mit deinem Konto übernommen",
   "channelStream.liveError.source": "{{source}} konnte nicht gestartet werden",
   "channelTopbar.activeThreads": "Aktive Threads",
   "channelTopbar.archivedThreads": "Archivierte Threads",

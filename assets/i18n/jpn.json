@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "配信サーバーが混雑しています。しばらくしてから再試行してください",
   "channelStream.liveError.unsupported": "このデバイスではストリームをエンコードできません",
   "channelStream.liveError.network": "配信サーバーとの接続が切断されました",
+  "channelStream.liveError.replaced": "あなたのアカウントを使う別のアプリまたはデバイスに配信が引き継がれました",
   "channelStream.liveError.source": "{{source}}を開始できませんでした",
   "channelTopbar.activeThreads": "アクティブスレッド",
   "channelTopbar.archivedThreads": "アーカイブ済みスレッド",

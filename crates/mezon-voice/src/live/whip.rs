@@ -135,8 +135,12 @@ pub(super) async fn publish(
     })
 }
 
-pub(super) async fn delete(client: &reqwest::Client, resource_url: &Url, token: &str) {
-    let _ = tokio::time::timeout(WHIP_DELETE_TIMEOUT, async {
+pub(super) async fn delete(
+    client: &reqwest::Client,
+    resource_url: &Url,
+    token: &str,
+) -> Option<u16> {
+    tokio::time::timeout(WHIP_DELETE_TIMEOUT, async {
         for attempt in 0..2 {
             match client
                 .delete(resource_url.clone())
@@ -148,17 +152,25 @@ pub(super) async fn delete(client: &reqwest::Client, resource_url: &Url, token: 
                     tokio::time::sleep(WHIP_DELETE_RETRY_DELAY).await;
                 }
                 Ok(resp) => {
-                    tracing::info!(status = resp.status().as_u16(), "whip resource deleted");
-                    break;
+                    let status = resp.status().as_u16();
+                    tracing::info!(status, "whip resource deleted");
+                    return Some(status);
                 }
                 Err(err) => {
                     tracing::debug!("whip delete transport error: {}", err.without_url());
-                    break;
+                    return None;
                 }
             }
         }
+        None
     })
-    .await;
+    .await
+    .ok()
+    .flatten()
+}
+
+pub(super) fn was_replaced(delete_status: Option<u16>) -> bool {
+    delete_status == Some(404)
 }
 
 pub(super) fn classify(status: u16, retry_after: Option<&str>) -> WhipError {
@@ -279,6 +291,14 @@ mod tests {
                 status: Some(404)
             }
         );
+    }
+
+    #[test]
+    fn only_a_404_on_the_old_resource_means_the_session_was_replaced() {
+        assert!(was_replaced(Some(404)));
+        assert!(!was_replaced(Some(200)));
+        assert!(!was_replaced(Some(503)));
+        assert!(!was_replaced(None));
     }
 
     #[test]

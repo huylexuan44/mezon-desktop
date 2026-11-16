@@ -339,6 +339,7 @@ impl ChatLayout {
                             LiveFailure::ServerBusy => "channelStream.liveError.serverBusy",
                             LiveFailure::Unsupported => "channelStream.liveError.unsupported",
                             LiveFailure::Network => "channelStream.liveError.network",
+                            LiveFailure::Replaced => "channelStream.liveError.replaced",
                         };
                         let msg = mezon_i18n::t(&locale, key).to_string();
                         Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));

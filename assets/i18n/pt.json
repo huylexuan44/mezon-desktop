@@ -987,6 +987,7 @@
   "channelStream.liveError.serverBusy": "O servidor de transmissão está ocupado, tente novamente em instantes",
   "channelStream.liveError.unsupported": "Este dispositivo não consegue codificar a transmissão",
   "channelStream.liveError.network": "Conexão perdida com o servidor de transmissão",
+  "channelStream.liveError.replaced": "Sua transmissão foi assumida por outro app ou dispositivo usando sua conta",
   "channelStream.liveError.source": "Não foi possível iniciar {{source}}",
   "channelTopbar.activeThreads": "Tópicos ativos",
   "channelTopbar.archivedThreads": "Tópicos arquivados",
