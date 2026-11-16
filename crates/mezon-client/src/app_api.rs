@@ -756,7 +756,18 @@ impl AppApi {
         text: &str,
         search_type: i32,
     ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
-        self.transport.search_ctrl_k(text, search_type).await
+        self.search_ctrl_k_cancellable(text, search_type, None).await
+    }
+
+    pub async fn search_ctrl_k_cancellable(
+        &self,
+        text: &str,
+        search_type: i32,
+        cancel: Option<crate::transport::SearchCancel>,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        self.transport
+            .search_ctrl_k_cancellable(text, search_type, cancel)
+            .await
     }
 
     pub async fn search_mention_users(
@@ -3570,9 +3581,17 @@ impl AppApi {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
-    ) -> Result<()> {
+        call_setup: bool,
+    ) -> Result<bool> {
         self.transport
-            .forward_webrtc_signaling(receiver_id, data_type, json_data, channel_id, caller_id)
+            .forward_webrtc_signaling(
+                receiver_id,
+                data_type,
+                json_data,
+                channel_id,
+                caller_id,
+                call_setup,
+            )
             .await
     }
 
@@ -3582,9 +3601,10 @@ impl AppApi {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
+        call_setup: bool,
     ) -> Result<()> {
         self.transport
-            .make_call_push(receiver_id, json_data, channel_id, caller_id)
+            .make_call_push(receiver_id, json_data, channel_id, caller_id, call_setup)
             .await
     }
 

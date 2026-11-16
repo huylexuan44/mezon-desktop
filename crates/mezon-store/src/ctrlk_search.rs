@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::AppApi;
-pub use mezon_client::transport::SEARCH_CTRL_K_MAX_TEXT_BYTES;
+pub use mezon_client::transport::{
+    SEARCH_CTRL_K_MAX_TEXT_BYTES, SEARCH_CTRL_K_MIN_CHARS, SearchCancel,
+    ctrlk_search_text_accepted,
+};
 
 use crate::ids::{ChannelId, ClanId, UserId};
 
@@ -69,6 +72,7 @@ pub struct CtrlKSearchStore {
     api: Arc<AppApi>,
     search_generation: u64,
     last_response_query: Option<String>,
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     _search_task: Task<()>,
 }
 
@@ -84,6 +88,7 @@ impl CtrlKSearchStore {
             api,
             search_generation: 0,
             last_response_query: None,
+            cancel_tx: None,
             _search_task: Task::ready(()),
         });
         cx.set_global(GlobalCtrlKSearchStore(entity.clone()));
@@ -125,16 +130,31 @@ impl CtrlKSearchStore {
         }
 
         self.cancel_pending();
+
+        if !ctrlk_search_text_accepted(&trimmed) {
+            self.state = CtrlKSearchState::default();
+            self.last_response_query = None;
+            cx.emit(CtrlKSearchEvent::Changed);
+            cx.notify();
+            return;
+        }
+
         mark_search_in_flight(&mut self.state);
+
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        self.cancel_tx = Some(cancel_tx);
 
         let api = self.api.clone();
         let store_generation = self.search_generation;
         self._search_task = cx.spawn(async move |this, cx| {
-            let result = api.search_ctrl_k(&trimmed, search_type.as_raw()).await;
+            let result = api
+                .search_ctrl_k_cancellable(&trimmed, search_type.as_raw(), Some(cancel_rx))
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.search_generation != store_generation {
                     return;
                 }
+                this.cancel_tx = None;
                 let answered = settle_search(&mut this.state, result);
                 this.last_response_query = answered.then_some(trimmed);
                 cx.emit(CtrlKSearchEvent::Changed);
@@ -150,6 +170,9 @@ impl CtrlKSearchStore {
     ) -> Task<anyhow::Result<Vec<CtrlKChannel>>> {
         let api = self.api.clone();
         cx.background_spawn(async move {
+            if !ctrlk_search_text_accepted(&query) {
+                return Ok(Vec::new());
+            }
             let response = api
                 .search_ctrl_k(&query, CtrlKSearchType::Channels.as_raw())
                 .await
@@ -158,8 +181,15 @@ impl CtrlKSearchStore {
         })
     }
 
+    pub fn cancel_in_flight(&mut self) {
+        self.cancel_pending();
+    }
+
     fn cancel_pending(&mut self) {
         self.search_generation = self.search_generation.wrapping_add(1);
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
     }
 }
 

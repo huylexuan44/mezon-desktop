@@ -451,6 +451,7 @@ struct ScreenSession {
 struct ScreenAudioSession {
     _capture: screen_audio::ScreenAudioCapture,
     pump: tokio::task::JoinHandle<()>,
+    audible: flume::Receiver<()>,
 }
 
 impl ScreenSession {
@@ -466,6 +467,7 @@ const UPLINK_SAMPLE_RATE: u32 = 48_000;
 const UPLINK_CHANNELS: u32 = 1;
 
 const SCREEN_AUDIO_BACKLOG_LIMIT: usize = UPLINK_SAMPLE_RATE as usize;
+const SCREEN_AUDIO_AUDIBLE_PEAK: u16 = 64;
 const SCREEN_AUDIO_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const UPLINK_TICK: Duration = Duration::from_millis(10);
 const UPLINK_TICK_SAMPLES: usize = (UPLINK_SAMPLE_RATE / 100) as usize;
@@ -979,7 +981,6 @@ async fn session_main(
                             apply_screen_share_mode(&mut session, screen_mode, &engine);
                         }
                         engine.set_local_screen(Some(session.track.clone()));
-                        engine.set_screen_audio(session.audio.is_some());
                         engine.set_screen_active(true);
                         screen_session = Some(session);
                         emit!();
@@ -998,6 +999,9 @@ async fn session_main(
                     Ok((_, Err(_))) => {}
                     Err(_) => {}
                 }
+            }
+            _ = recv_screen_audio_audible(&screen_session) => {
+                engine.set_screen_audio(true);
             }
             ready = recv_audio_ready(&audio_ready_rx) => {
                 audio_ready_rx = None;
@@ -1648,11 +1652,21 @@ async fn start_screen_audio(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let rx = capture.rx.clone();
+    let (audible_tx, audible) = flume::bounded(1);
     let pump = runtime::runtime().spawn(async move {
         let channels = screen_audio::SCREEN_AUDIO_CHANNELS.max(1) as usize;
+        let mut heard = false;
         while let Ok(samples) = rx.recv_async().await {
             if samples.is_empty() {
                 continue;
+            }
+            if !heard
+                && samples
+                    .iter()
+                    .any(|s| s.unsigned_abs() > SCREEN_AUDIO_AUDIBLE_PEAK)
+            {
+                heard = true;
+                let _ = audible_tx.try_send(());
             }
             if let Some(taps) = &record_taps {
                 taps.push(
@@ -1676,6 +1690,7 @@ async fn start_screen_audio(
     Ok(ScreenAudioSession {
         _capture: capture,
         pump,
+        audible,
     })
 }
 
@@ -1728,6 +1743,15 @@ fn spawn_playback(
         }
     });
     PlaybackTask { handle, health }
+}
+
+async fn recv_screen_audio_audible(session: &Option<ScreenSession>) {
+    let Some(audio) = session.as_ref().and_then(|session| session.audio.as_ref()) else {
+        return std::future::pending().await;
+    };
+    if audio.audible.recv_async().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 async fn recv_audio_ready(
