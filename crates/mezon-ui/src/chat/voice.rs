@@ -1284,20 +1284,22 @@ fn render_pre_join(
         .gap_4()
         .px_4()
         .bg(theme.bg_tertiary)
-        .child(
-            div()
-                .size(px(80.))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(theme.bg_secondary)
-                .child(
-                    Icon::new(IconName::Speaker)
-                        .size(px(40.))
-                        .text_color(theme.text_primary),
-                ),
-        )
+        .when(members.is_empty(), |this| {
+            this.child(
+                div()
+                    .size(px(80.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.bg_secondary)
+                    .child(
+                        Icon::new(IconName::Speaker)
+                            .size(px(40.))
+                            .text_color(theme.text_primary),
+                    ),
+            )
+        })
         .children(avatars)
         .child(
             div()
