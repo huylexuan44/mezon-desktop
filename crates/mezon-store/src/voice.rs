@@ -981,7 +981,7 @@ pub struct VoiceStore {
     hold_to_talk: bool,
     ptt_hint_dismissed: bool,
     network_warning_dismissed: bool,
-    pending_join_role: SfuRole,
+    pending_join_role: Option<(String, SfuRole)>,
     join_role_menu_open: bool,
     last_screen_share: Option<(PickedScreen, bool)>,
     screen_share_mode: ScreenShareMode,
@@ -1403,7 +1403,7 @@ impl VoiceStore {
             hold_to_talk: false,
             ptt_hint_dismissed: false,
             network_warning_dismissed: false,
-            pending_join_role: SfuRole::Speaker,
+            pending_join_role: None,
             join_role_menu_open: false,
             last_screen_share: None,
             link_copied: false,
@@ -4530,7 +4530,7 @@ impl VoiceStore {
         self.ptt_held = false;
         self.hold_to_talk = false;
         self.ptt_hint_dismissed = false;
-        self.pending_join_role = role;
+        self.pending_join_role = None;
         self.join_role_menu_open = false;
 
         let ws_url = AppConfig::global(cx).sfu_ws_url.clone();
@@ -5275,16 +5275,24 @@ impl VoiceStore {
         self.role
     }
 
-    pub fn pending_join_role(&self) -> SfuRole {
-        self.pending_join_role
+    pub fn join_role_for(&self, room_id: &str, participant_count: usize) -> SfuRole {
+        match &self.pending_join_role {
+            Some((picked_room_id, role)) if picked_room_id == room_id => *role,
+            _ => SfuRole::default_for_participants(participant_count),
+        }
     }
 
     pub fn join_role_menu_open(&self) -> bool {
         self.join_role_menu_open
     }
 
-    pub fn set_pending_join_role(&mut self, role: SfuRole, cx: &mut Context<Self>) {
-        self.pending_join_role = role;
+    pub fn set_pending_join_role(
+        &mut self,
+        room_id: String,
+        role: SfuRole,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_join_role = Some((room_id, role));
         self.join_role_menu_open = false;
         cx.notify();
     }

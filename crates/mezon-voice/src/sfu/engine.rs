@@ -191,6 +191,16 @@ pub enum SfuRole {
 }
 
 impl SfuRole {
+    pub const AUDIENCE_BY_DEFAULT_PARTICIPANT_THRESHOLD: usize = 20;
+
+    pub fn default_for_participants(participant_count: usize) -> Self {
+        if participant_count >= Self::AUDIENCE_BY_DEFAULT_PARTICIPANT_THRESHOLD {
+            SfuRole::Audience
+        } else {
+            SfuRole::Speaker
+        }
+    }
+
     pub fn wire(self) -> &'static str {
         match self {
             SfuRole::Speaker => "speaker",
