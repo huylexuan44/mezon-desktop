@@ -451,7 +451,6 @@ fn render_meeting_pre_join(
                     .child(message),
             )
         })
-        .child(virtual_background_pre_join_selector(theme, voice, cx))
         .child(join_role_button(theme, locale, voice, code, join_role, join_action, cx));
 
     div()
@@ -1332,7 +1331,6 @@ fn render_pre_join(
                     .child(message),
             )
         })
-        .child(virtual_background_pre_join_selector(theme, voice, cx))
         .child(join);
 
     div()
@@ -5364,134 +5362,6 @@ fn virtual_background_flyout(
             ),
     )
     .into_any_element()
-}
-
-fn virtual_background_pre_join_selector(
-    theme: &Theme,
-    voice: &Entity<VoiceStore>,
-    cx: &App,
-) -> AnyElement {
-    let current_mode = voice.read(cx).virtual_background();
-    let options = [
-        (mezon_voice::VirtualBackgroundMode::None, "None", None),
-        (mezon_voice::VirtualBackgroundMode::Blur, "Blur", None),
-        (
-            mezon_voice::VirtualBackgroundMode::Bg1,
-            "Office 1",
-            Some(crate::util::assets::VTBG_BG1),
-        ),
-        (
-            mezon_voice::VirtualBackgroundMode::Bg2,
-            "Office 2",
-            Some(crate::util::assets::VTBG_BG2),
-        ),
-        (
-            mezon_voice::VirtualBackgroundMode::Bg3,
-            "Cafe",
-            Some(crate::util::assets::VTBG_BG3),
-        ),
-        (
-            mezon_voice::VirtualBackgroundMode::Bg4,
-            "Studio",
-            Some(crate::util::assets::VTBG_BG4),
-        ),
-        (
-            mezon_voice::VirtualBackgroundMode::Bg5,
-            "Living Room",
-            Some(crate::util::assets::VTBG_BG5),
-        ),
-    ];
-
-    let accent: Hsla = gpui::rgb(ACCENT_BLUE).into();
-    let cards = options.into_iter().map(|(mode, label, img_path)| {
-        let selected = mode == current_mode;
-        let voice = voice.clone();
-        let preview = if let Some(path) = img_path {
-            div()
-                .size_full()
-                .child(img(path).size_full().object_fit(ObjectFit::Cover))
-                .into_any_element()
-        } else {
-            div()
-                .size_full()
-                .bg(theme.bg_secondary)
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(2.))
-                .child(
-                    Icon::new(if mode == mezon_voice::VirtualBackgroundMode::Blur {
-                        IconName::Sparkles
-                    } else {
-                        IconName::VideoOff
-                    })
-                    .size(px(16.))
-                    .text_color(if selected {
-                        accent
-                    } else {
-                        theme.text_secondary.into()
-                    }),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(if selected {
-                            accent
-                        } else {
-                            theme.text_secondary.into()
-                        })
-                        .child(label),
-                )
-                .into_any_element()
-        };
-
-        div()
-            .id(SharedString::from(format!("prejoin-vtbg-{:?}", mode)))
-            .w(px(64.))
-            .h(px(42.))
-            .rounded(px(6.))
-            .overflow_hidden()
-            .border_2()
-            .border_color(if selected {
-                accent
-            } else {
-                theme.border.into()
-            })
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.85))
-            .on_click(move |_, _, cx| {
-                voice.update(cx, |store, cx| {
-                    store.set_virtual_background(mode, cx);
-                });
-            })
-            .child(preview)
-            .into_any_element()
-    });
-
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap_2()
-        .my_2()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_secondary)
-                .child("Virtual Background"),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .justify_center()
-                .gap_2()
-                .children(cards),
-        )
-        .into_any_element()
 }
 
 fn device_row(
