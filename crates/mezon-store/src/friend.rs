@@ -122,7 +122,11 @@ fn friend_from_add(e: &realtime::AddFriend) -> Friend {
         username: e.username.clone(),
         display_name: e.display_name.clone(),
         avatar_url: e.avatar.clone(),
-        state: FriendState::InviteReceived,
+        state: if e.accepted {
+            FriendState::Friend
+        } else {
+            FriendState::InviteReceived
+        },
         source_id: UserId(e.user_id),
     }
 }
@@ -133,13 +137,50 @@ fn friend_from_add(e: &realtime::AddFriend) -> Friend {
 fn apply_add_friend(list: &mut Vec<Friend>, e: &realtime::AddFriend) -> bool {
     let id = UserId(e.user_id);
     if let Some(existing) = list.iter_mut().find(|f| f.id == id) {
-        if existing.state == FriendState::InviteSent {
+        let accepted = e.accepted || existing.state == FriendState::InviteSent;
+        if accepted && !matches!(existing.state, FriendState::Friend | FriendState::Blocked) {
             existing.state = FriendState::Friend;
             return true;
         }
         return false;
     }
     list.push(friend_from_add(e));
+    true
+}
+
+fn apply_friend_state_updated(
+    list: &mut Vec<Friend>,
+    e: &realtime::FriendStateUpdated,
+    me: UserId,
+) -> bool {
+    let state = match e.state {
+        0 => FriendState::Friend,
+        1 => FriendState::InviteSent,
+        2 => FriendState::InviteReceived,
+        3 => FriendState::Blocked,
+        _ => return false,
+    };
+    let id = UserId(e.user_id);
+    let source_for = |current: UserId| match state {
+        FriendState::Friend => current,
+        FriendState::InviteReceived => id,
+        FriendState::InviteSent | FriendState::Blocked => me,
+    };
+    if let Some(existing) = list.iter_mut().find(|f| f.id == id) {
+        let source_id = source_for(existing.source_id);
+        let changed = existing.state != state || existing.source_id != source_id;
+        existing.state = state;
+        existing.source_id = source_id;
+        return changed;
+    }
+    list.push(Friend {
+        id,
+        username: e.username.clone(),
+        display_name: e.display_name.clone(),
+        avatar_url: e.avatar.clone(),
+        state,
+        source_id: source_for(me),
+    });
     true
 }
 
@@ -242,6 +283,7 @@ impl FriendStore {
         RealtimeDispatch::global(cx).update(cx, |dispatch, _| {
             for kind in [
                 RealtimeKind::AddFriend,
+                RealtimeKind::FriendStateUpdated,
                 RealtimeKind::RemoveFriend,
                 RealtimeKind::BlockFriend,
                 RealtimeKind::UnblockFriend,
@@ -373,6 +415,9 @@ impl FriendStore {
         let me = self.current_user_id(cx);
         let changed = match event {
             RealtimeEvent::AddFriend(e) => apply_add_friend(&mut self.friends, e),
+            RealtimeEvent::FriendStateUpdated(e) => {
+                apply_friend_state_updated(&mut self.friends, e, me)
+            }
             RealtimeEvent::RemoveFriend(e) => {
                 apply_remove_friend(&mut self.friends, UserId(e.user_id))
             }
@@ -813,6 +858,7 @@ mod tests {
             username: "carol".into(),
             display_name: "Carol".into(),
             avatar: String::new(),
+            accepted: false,
         };
         assert!(apply_add_friend(&mut list, &e));
         assert_eq!(list.len(), 1);
@@ -890,6 +936,7 @@ mod tests {
             username: "carol".into(),
             display_name: String::new(),
             avatar: String::new(),
+            accepted: false,
         };
         assert!(apply_add_friend(&mut list, &e));
         assert_eq!(list.len(), 1);
@@ -909,5 +956,174 @@ mod tests {
         assert!(apply_remove_friend(&mut list, UserId(42)));
         assert!(list.is_empty());
         assert!(!apply_remove_friend(&mut list, UserId(42)));
+    }
+
+    #[test]
+    fn friend_state_updated_inserts_outgoing_row_and_skips_repeat() {
+        let me = UserId(1);
+        let mut list = Vec::new();
+        let e = realtime::FriendStateUpdated {
+            user_id: 42,
+            username: "carol".into(),
+            display_name: "Carol".into(),
+            avatar: "carol.png".into(),
+            state: 1,
+        };
+        assert!(apply_friend_state_updated(&mut list, &e, me));
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0],
+            Friend {
+                id: UserId(42),
+                username: "carol".into(),
+                display_name: "Carol".into(),
+                avatar_url: "carol.png".into(),
+                state: FriendState::InviteSent,
+                source_id: me,
+            }
+        );
+        assert!(!apply_friend_state_updated(&mut list, &e, me));
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn friend_state_updated_promotes_existing_outgoing_and_incoming_to_friend() {
+        let me = UserId(1);
+        let accepted = realtime::FriendStateUpdated {
+            user_id: 42,
+            username: "carol".into(),
+            display_name: "Carol".into(),
+            avatar: "carol.png".into(),
+            state: 0,
+        };
+
+        let mut outgoing = vec![Friend {
+            id: UserId(42),
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar_url: String::new(),
+            state: FriendState::InviteSent,
+            source_id: me,
+        }];
+        assert!(apply_friend_state_updated(&mut outgoing, &accepted, me));
+        assert_eq!(outgoing[0].state, FriendState::Friend);
+        assert!(!apply_friend_state_updated(&mut outgoing, &accepted, me));
+
+        let mut incoming = vec![Friend {
+            id: UserId(42),
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar_url: String::new(),
+            state: FriendState::InviteReceived,
+            source_id: UserId(42),
+        }];
+        assert!(apply_friend_state_updated(&mut incoming, &accepted, me));
+        assert_eq!(incoming[0].state, FriendState::Friend);
+        assert!(!apply_friend_state_updated(&mut incoming, &accepted, me));
+    }
+
+    #[test]
+    fn friend_state_updated_updates_source_id_on_invite_sent_and_inserts_friend_when_missing() {
+        let me = UserId(1);
+        let mut list = vec![blocked_row(42, 42)];
+        let sent = realtime::FriendStateUpdated {
+            user_id: 42,
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar: String::new(),
+            state: 1,
+        };
+        assert!(apply_friend_state_updated(&mut list, &sent, me));
+        assert_eq!(list[0].state, FriendState::InviteSent);
+        assert_eq!(list[0].source_id, me);
+        assert!(!apply_friend_state_updated(&mut list, &sent, me));
+
+        let mut missing = Vec::new();
+        let accepted = realtime::FriendStateUpdated {
+            user_id: 99,
+            username: "dave".into(),
+            display_name: "Dave".into(),
+            avatar: "dave.png".into(),
+            state: 0,
+        };
+        assert!(apply_friend_state_updated(&mut missing, &accepted, me));
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].state, FriendState::Friend);
+        assert_eq!(missing[0].source_id, me);
+    }
+
+    #[test]
+    fn friend_state_updated_applies_incoming_and_blocked_and_ignores_unknown() {
+        let me = UserId(1);
+        let event = |state| realtime::FriendStateUpdated {
+            user_id: 42,
+            username: "carol".into(),
+            display_name: "Carol".into(),
+            avatar: "carol.png".into(),
+            state,
+        };
+
+        let mut list = vec![blocked_row(42, 1)];
+        assert!(apply_friend_state_updated(&mut list, &event(2), me));
+        assert_eq!(list[0].state, FriendState::InviteReceived);
+        assert_eq!(list[0].source_id, UserId(42));
+
+        let mut list = vec![Friend {
+            id: UserId(42),
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar_url: String::new(),
+            state: FriendState::Friend,
+            source_id: UserId(42),
+        }];
+        assert!(apply_friend_state_updated(&mut list, &event(3), me));
+        assert_eq!(list[0].state, FriendState::Blocked);
+        assert!(is_blocked_by(&list, UserId(42), me));
+        assert!(!apply_friend_state_updated(&mut list, &event(3), me));
+
+        let mut empty = Vec::new();
+        assert!(apply_friend_state_updated(&mut empty, &event(3), me));
+        assert!(is_blocked_by(&empty, UserId(42), me));
+
+        for state in [99, -1] {
+            let mut untouched = vec![blocked_row(42, 1)];
+            assert!(!apply_friend_state_updated(
+                &mut untouched,
+                &event(state),
+                me
+            ));
+            assert_eq!(untouched[0].state, FriendState::Blocked);
+        }
+    }
+
+    #[test]
+    fn accepted_add_friend_event_never_reads_as_incoming_request() {
+        let accepted = realtime::AddFriend {
+            user_id: 42,
+            username: "carol".into(),
+            display_name: "Carol".into(),
+            avatar: String::new(),
+            accepted: true,
+        };
+
+        let mut missing_outgoing = Vec::new();
+        assert!(apply_add_friend(&mut missing_outgoing, &accepted));
+        assert_eq!(missing_outgoing[0].state, FriendState::Friend);
+
+        let mut stale_incoming = vec![Friend {
+            id: UserId(42),
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar_url: String::new(),
+            state: FriendState::InviteReceived,
+            source_id: UserId(42),
+        }];
+        assert!(apply_add_friend(&mut stale_incoming, &accepted));
+        assert_eq!(stale_incoming[0].state, FriendState::Friend);
+        assert!(!apply_add_friend(&mut stale_incoming, &accepted));
+
+        let mut blocked = vec![blocked_row(42, 1)];
+        assert!(!apply_add_friend(&mut blocked, &accepted));
+        assert_eq!(blocked[0].state, FriendState::Blocked);
     }
 }

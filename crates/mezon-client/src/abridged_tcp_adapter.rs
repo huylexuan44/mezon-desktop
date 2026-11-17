@@ -290,6 +290,7 @@ fn envelope_kind(envelope: &mezon_proto::realtime::Envelope) -> &'static str {
         Some(M::UserProfileUpdatedEvent(_)) => "UserProfileUpdated",
         Some(M::ClanDeletedEvent(_)) => "ClanDeleted",
         Some(M::AddFriend(_)) => "AddFriend",
+        Some(M::FriendStateUpdated(_)) => "FriendStateUpdated",
         Some(M::RemoveFriend(_)) => "RemoveFriend",
         Some(M::RefreshSessionEvent(_)) => "RefreshSession",
         Some(M::ApiRequestEvent(_)) => "ApiRequest",
