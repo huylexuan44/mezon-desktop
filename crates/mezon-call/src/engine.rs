@@ -60,6 +60,7 @@ pub struct CallConfig {
     pub output_device: Option<String>,
     pub camera_device: Option<String>,
     pub initial_camera_on: bool,
+    pub virtual_background: mezon_voice::VirtualBackgroundMode,
 }
 
 pub enum EngineCommand {
@@ -68,6 +69,7 @@ pub enum EngineCommand {
     AddRemoteIce(IcePayload),
     SetMicEnabled(bool),
     SetCameraEnabled(bool),
+    SetVirtualBackground(mezon_voice::VirtualBackgroundMode),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetCameraDevice(Option<String>),
@@ -149,6 +151,10 @@ impl CallEngine {
 
     pub fn frame_store(&self) -> Arc<VideoFrameStore> {
         self.frame_store.clone()
+    }
+
+    pub fn set_virtual_background(&self, mode: mezon_voice::VirtualBackgroundMode) {
+        let _ = self.cmd_tx.send(EngineCommand::SetVirtualBackground(mode));
     }
 }
 
@@ -432,6 +438,12 @@ async fn run_engine(
                             &handle,
                             &event_tx,
                         );
+                    }
+                    EngineCommand::SetVirtualBackground(mode) => {
+                        config.virtual_background = mode;
+                        if let Some(controller) = camera.as_ref() {
+                            controller.set_background(mode);
+                        }
                     }
                     EngineCommand::SetInputDevice(device) => audio_io.set_input_device(device),
                     EngineCommand::SetOutputDevice(device) => audio_io.set_output_device(device),
@@ -718,6 +730,7 @@ fn set_camera(
             config.camera_device.clone(),
             video_source.clone(),
             err_tx,
+            config.virtual_background,
         );
         let event_tx = event_tx.clone();
         handle.spawn(async move {

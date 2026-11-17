@@ -331,7 +331,6 @@ fn plane_fits(len: usize, stride: usize, row_bytes: usize, rows: usize) -> bool 
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(not(target_os = "macos"), test))]
 #[must_use]
 pub fn bgra_to_i420(
     bgra: &[u8],

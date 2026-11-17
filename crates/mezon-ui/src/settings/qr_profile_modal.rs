@@ -1232,6 +1232,7 @@ mod tests {
             about_me: None,
             password_setted: false,
             logo: None,
+            banner: None,
             status: String::new(),
             user_status: String::new(),
             dob_seconds: 0,

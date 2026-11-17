@@ -68,6 +68,7 @@ pub enum DeviceMenuKind {
     Microphone,
     Camera,
     ScreenShare,
+    VirtualBackground,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -887,6 +888,7 @@ pub struct VoiceStore {
     channel_label: String,
     mic_enabled: bool,
     camera_enabled: bool,
+    virtual_background: mezon_voice::VirtualBackgroundMode,
     screen_share_enabled: bool,
     noise_suppression_enabled: bool,
     noise_suppression_status: Option<NoiseSuppressionStatus>,
@@ -1012,6 +1014,7 @@ struct VoiceReconnectSnapshot {
     camera_device_id: Option<String>,
     mic_enabled: bool,
     camera_enabled: bool,
+    virtual_background: mezon_voice::VirtualBackgroundMode,
     screen_share: Option<(PickedScreen, bool)>,
 }
 
@@ -1304,6 +1307,9 @@ impl VoiceStore {
             channel_label: String::new(),
             mic_enabled: false,
             camera_enabled: false,
+            virtual_background: crate::Settings::try_global(cx)
+                .map(|s| s.read(cx).virtual_background)
+                .unwrap_or_default(),
             screen_share_enabled: false,
             noise_suppression_enabled: NOISE_SUPPRESSION_DEFAULT_ENABLED,
             noise_suppression_status: None,
@@ -4659,6 +4665,7 @@ impl VoiceStore {
             input_device_id,
             output_device_id,
             camera_device_id,
+            virtual_background: self.virtual_background,
             ice_servers,
             refresh_token: Some(TokenRefresher::new(move || {
                 let source = refresh_source.clone();
@@ -4810,6 +4817,7 @@ impl VoiceStore {
             camera_device_id,
             mic_enabled: self.mic_enabled,
             camera_enabled: self.camera_enabled,
+            virtual_background: self.virtual_background,
             screen_share,
         })
     }
@@ -4946,6 +4954,7 @@ impl VoiceStore {
         self.fullscreen_screen = None;
         self.clear_session_handles(None, cx);
         self.call_status = VoiceCallStatus::Reconnecting;
+        self.virtual_background = snapshot.virtual_background;
 
         self.start_session(
             snapshot.ws_url,
@@ -5402,6 +5411,31 @@ impl VoiceStore {
         cx.notify();
     }
 
+    pub fn virtual_background(&self) -> mezon_voice::VirtualBackgroundMode {
+        self.virtual_background
+    }
+
+    pub fn set_virtual_background(
+        &mut self,
+        mode: mezon_voice::VirtualBackgroundMode,
+        cx: &mut Context<Self>,
+    ) {
+        if self.virtual_background == mode {
+            return;
+        }
+        self.virtual_background = mode;
+        if let Some(session) = &self.session {
+            session.set_virtual_background(mode);
+        }
+        if let Some(settings) = crate::Settings::try_global(cx) {
+            settings.update(cx, |s, _| {
+                s.virtual_background = mode;
+            });
+            crate::schedule_settings_save(&settings, cx);
+        }
+        cx.notify();
+    }
+
     fn media_granted(&self, device: MediaDevice, cx: &mut Context<Self>) -> bool {
         let this = cx.weak_entity();
         let session_generation = self.session_generation;
@@ -5437,7 +5471,10 @@ impl VoiceStore {
     pub fn set_input_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
         Self::persist_device(DeviceKind::AudioInput, device_id.clone(), cx);
         if let Some(session) = &self.session {
-            session.set_input_device(device_id);
+            session.set_input_device(device_id.clone());
+        }
+        if let Some(live) = crate::live::LiveStore::try_global(cx) {
+            live.update(cx, |live, cx| live.set_input_device(device_id, cx));
         }
         self.device_menu = None;
         self.device_submenu = None;
@@ -5457,7 +5494,10 @@ impl VoiceStore {
     pub fn set_camera_device(&mut self, device_id: Option<String>, cx: &mut Context<Self>) {
         Self::persist_device(DeviceKind::VideoInput, device_id.clone(), cx);
         if let Some(session) = &self.session {
-            session.set_camera_device(device_id);
+            session.set_camera_device(device_id.clone());
+        }
+        if let Some(live) = crate::live::LiveStore::try_global(cx) {
+            live.update(cx, |live, cx| live.set_camera_device(device_id, cx));
         }
         self.device_menu = None;
         self.device_submenu = None;
@@ -5593,7 +5633,7 @@ impl VoiceStore {
         } else {
             self.device_menu = Some(kind);
             self.device_submenu = None;
-            if kind != DeviceMenuKind::ScreenShare {
+            if kind != DeviceMenuKind::ScreenShare && kind != DeviceMenuKind::VirtualBackground {
                 self.refresh_devices(cx);
             }
         }

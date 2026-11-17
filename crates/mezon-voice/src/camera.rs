@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use nokhwa::utils::{
 };
 use nokhwa::{native_api_backend, query};
 
+use crate::matting::{MezonMatteProcessor, VirtualBackgroundMode};
 use crate::video::{VideoFrameStore, local_camera_key, rgb_to_i420, yuyv422_to_i420};
 
 const TARGET_WIDTH: u32 = 640;
@@ -114,11 +115,20 @@ fn init_camera_com() {}
 pub struct CameraController {
     stop: Arc<AtomicBool>,
     switch_tx: flume::Sender<Option<String>>,
+    background: Arc<AtomicU8>,
 }
 
 impl CameraController {
     pub fn switch(&self, device_id: Option<String>) {
         let _ = self.switch_tx.send(device_id);
+    }
+
+    pub fn set_background(&self, mode: VirtualBackgroundMode) {
+        self.background.store(mode.as_u8(), Ordering::Relaxed);
+    }
+
+    pub fn background(&self) -> VirtualBackgroundMode {
+        VirtualBackgroundMode::from_u8(self.background.load(Ordering::Relaxed))
     }
 
     pub fn stop(&self) {
@@ -136,15 +146,18 @@ pub fn start_camera(
     identity: String,
     frame_store: Arc<VideoFrameStore>,
     device_id: Option<String>,
+    initial_background: VirtualBackgroundMode,
 ) -> (
     CameraController,
     flume::Receiver<Result<NativeVideoSource, String>>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
+    let background = Arc::new(AtomicU8::new(initial_background.as_u8()));
     let (switch_tx, switch_rx) = flume::unbounded::<Option<String>>();
     let (track_tx, track_rx) = flume::bounded(1);
 
     let thread_stop = stop.clone();
+    let thread_background = background.clone();
     let spawned = std::thread::Builder::new()
         .name("mezon-camera".into())
         .spawn(move || {
@@ -186,6 +199,7 @@ pub fn start_camera(
                 &identity,
                 current_device,
                 &thread_stop,
+                &thread_background,
                 &switch_rx,
             );
         });
@@ -193,7 +207,14 @@ pub fn start_camera(
         tracing::error!("failed to spawn camera capture thread: {e}");
     }
 
-    (CameraController { stop, switch_tx }, track_rx)
+    (
+        CameraController {
+            stop,
+            switch_tx,
+            background,
+        },
+        track_rx,
+    )
 }
 
 pub fn start_camera_into(
@@ -202,11 +223,14 @@ pub fn start_camera_into(
     device_id: Option<String>,
     source: NativeVideoSource,
     err_tx: flume::Sender<String>,
+    initial_background: VirtualBackgroundMode,
 ) -> CameraController {
     let stop = Arc::new(AtomicBool::new(false));
+    let background = Arc::new(AtomicU8::new(initial_background.as_u8()));
     let (switch_tx, switch_rx) = flume::unbounded::<Option<String>>();
 
     let thread_stop = stop.clone();
+    let thread_background = background.clone();
     let spawned = std::thread::Builder::new()
         .name("mezon-camera".into())
         .spawn(move || {
@@ -236,6 +260,7 @@ pub fn start_camera_into(
                 &identity,
                 current_device,
                 &thread_stop,
+                &thread_background,
                 &switch_rx,
             );
         });
@@ -243,7 +268,11 @@ pub fn start_camera_into(
         tracing::error!("failed to spawn camera capture thread: {e}");
     }
 
-    CameraController { stop, switch_tx }
+    CameraController {
+        stop,
+        switch_tx,
+        background,
+    }
 }
 
 fn capture_loop(
@@ -253,6 +282,7 @@ fn capture_loop(
     identity: &str,
     mut current_device: Option<String>,
     thread_stop: &AtomicBool,
+    background: &AtomicU8,
     switch_rx: &flume::Receiver<Option<String>>,
 ) {
     let key = local_camera_key(identity);
@@ -264,6 +294,7 @@ fn capture_loop(
         resolution.height()
     );
 
+    let mut matte_processor = MezonMatteProcessor::new();
     let mut preview = Vec::new();
     let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
     let mut last_capture: Option<Instant> = None;
@@ -311,6 +342,7 @@ fn capture_loop(
                 continue;
             }
             last_capture = Some(Instant::now());
+            let bg_mode = VirtualBackgroundMode::from_u8(background.load(Ordering::Relaxed));
             push_camera_frame(
                 &buffer,
                 &source,
@@ -318,10 +350,13 @@ fn capture_loop(
                 key,
                 started.elapsed().as_micros() as i64,
                 &mut preview,
+                &mut matte_processor,
+                bg_mode,
             );
         };
 
         drop(camera);
+        matte_processor.reset_states();
         camera = match open_camera(switch_to.as_deref()) {
             Ok(camera) => {
                 current_device = switch_to;
@@ -356,6 +391,8 @@ fn push_camera_frame(
     key: u64,
     timestamp_us: i64,
     preview: &mut Vec<u8>,
+    matte_processor: &mut MezonMatteProcessor,
+    mode: VirtualBackgroundMode,
 ) {
     let dw = (buffer.resolution().width() & !1).max(2);
     let dh = (buffer.resolution().height() & !1).max(2);
@@ -407,7 +444,7 @@ fn push_camera_frame(
     } else {
         i420
     };
-    let i420 = flip_i420_horizontal(&i420);
+    let mut i420 = flip_i420_horizontal(&i420);
     let fw = i420.width();
     let fh = i420.height();
 
@@ -425,6 +462,24 @@ fn push_camera_frame(
             sv as usize,
             fw as usize,
             fh as usize,
+        );
+    }
+
+    if mode.is_enabled() {
+        matte_processor.process_frame(preview, fw as usize, fh as usize, mode);
+        let (sy, su, sv) = i420.strides();
+        let (y, u, v) = i420.data_mut();
+        let _ = crate::video::bgra_to_i420(
+            preview,
+            fw as usize,
+            fh as usize,
+            (fw * 4) as usize,
+            y,
+            u,
+            v,
+            sy as usize,
+            su as usize,
+            sv as usize,
         );
     }
 

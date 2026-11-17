@@ -56,6 +56,13 @@ impl ScreenShareMode {
             Self::Video => ContentHint::Fluid,
         }
     }
+
+    pub(crate) fn scalability_mode(self) -> &'static str {
+        match self {
+            Self::Text => "L1T1",
+            Self::Video => "L1T3",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +80,7 @@ mod tests {
         );
         assert_eq!(mode.content_hint(), ContentHint::Text);
         assert_eq!(mode.fallback_content_hint(), ContentHint::Detailed);
+        assert_eq!(mode.scalability_mode(), "L1T1");
     }
 
     #[test]
@@ -82,6 +90,7 @@ mod tests {
         assert_eq!(mode.encode_max_fps(), 30.0);
         assert_eq!(mode.degradation(), DegradationPreference::MaintainFramerate);
         assert_eq!(mode.content_hint(), ContentHint::Fluid);
+        assert_eq!(mode.scalability_mode(), "L1T3");
     }
 
     #[test]

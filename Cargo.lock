@@ -5963,6 +5963,7 @@ dependencies = [
  "objc",
  "objc2-core-audio",
  "objc2-core-foundation",
+ "ort",
  "parking_lot",
  "percent-encoding",
  "pipewire",

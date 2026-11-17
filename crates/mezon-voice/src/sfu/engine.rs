@@ -133,7 +133,6 @@ fn schedule_camera_tier(
     };
     Some((next, tokio::time::Instant::now() + delay))
 }
-const SCREEN_SCALABILITY_MODE: &str = "L1T1";
 
 #[derive(Clone, Copy, Default)]
 struct PublishTiers {
@@ -2834,7 +2833,7 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
                     (
                         mode.max_bitrate_bps(),
                         screen_encode_fps(mode, tiers.screen),
-                        Some(SCREEN_SCALABILITY_MODE.to_owned()),
+                        Some(mode.scalability_mode().to_owned()),
                         mode.degradation(),
                         scale,
                         Priority::High,

@@ -1068,6 +1068,7 @@ fn open_main_window(
     mezon_store::CanvasStore::init(api.clone(), cx);
     mezon_store::PresenceStore::init(api.clone(), cx);
     mezon_store::StreamStore::init(api.clone(), cx);
+    mezon_store::LiveStore::init(api.clone(), cx);
     mezon_store::VoiceStore::init(api.clone(), cx);
     mezon_store::CallStore::init(api.clone(), cx);
     mezon_store::MediaPermissionStore::init(cx);

@@ -756,7 +756,19 @@ impl AppApi {
         text: &str,
         search_type: i32,
     ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
-        self.transport.search_ctrl_k(text, search_type).await
+        self.search_ctrl_k_cancellable(text, search_type, None)
+            .await
+    }
+
+    pub async fn search_ctrl_k_cancellable(
+        &self,
+        text: &str,
+        search_type: i32,
+        cancel: Option<crate::transport::SearchCancel>,
+    ) -> Result<mezon_proto::api::SearchCtrlKResponse> {
+        self.transport
+            .search_ctrl_k_cancellable(text, search_type, cancel)
+            .await
     }
 
     pub async fn search_mention_users(
