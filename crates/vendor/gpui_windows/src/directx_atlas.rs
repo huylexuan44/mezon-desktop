@@ -229,7 +229,9 @@ impl DirectXAtlasState {
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 1;
             }
-            AtlasTextureKind::Polychrome | AtlasTextureKind::Image | AtlasTextureKind::ImageSmall => {
+            AtlasTextureKind::Polychrome
+            | AtlasTextureKind::Image
+            | AtlasTextureKind::ImageSmall => {
                 pixel_format = DXGI_FORMAT_B8G8R8A8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;

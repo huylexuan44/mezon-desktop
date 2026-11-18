@@ -167,7 +167,10 @@ impl PeerConnection {
         sys_handle: SharedPtr<sys_pc::ffi::PeerConnection>,
         observer: Arc<PeerObserver>,
     ) -> Self {
-        Self { sys_handle, observer }
+        Self {
+            sys_handle,
+            observer,
+        }
     }
 
     pub fn set_configuration(&self, config: RtcConfiguration) -> Result<(), RtcError> {
@@ -235,15 +238,19 @@ impl PeerConnection {
         let (tx, rx) = oneshot::channel::<Result<(), RtcError>>();
         let ctx = Box::new(sys_pc::PeerContext(Box::new(tx)));
 
-        self.sys_handle.set_local_description(desc.handle.sys_handle, ctx, |ctx, err| {
-            let tx = ctx.0.downcast::<oneshot::Sender<Result<(), RtcError>>>().unwrap();
+        self.sys_handle
+            .set_local_description(desc.handle.sys_handle, ctx, |ctx, err| {
+                let tx = ctx
+                    .0
+                    .downcast::<oneshot::Sender<Result<(), RtcError>>>()
+                    .unwrap();
 
-            if err.ok() {
-                let _ = tx.send(Ok(()));
-            } else {
-                let _ = tx.send(Err(err.into()));
-            }
-        });
+                if err.ok() {
+                    let _ = tx.send(Ok(()));
+                } else {
+                    let _ = tx.send(Err(err.into()));
+                }
+            });
 
         rx.await.unwrap()
     }
@@ -252,15 +259,19 @@ impl PeerConnection {
         let (tx, rx) = oneshot::channel::<Result<(), RtcError>>();
         let ctx = Box::new(sys_pc::PeerContext(Box::new(tx)));
 
-        self.sys_handle.set_remote_description(desc.handle.sys_handle, ctx, |ctx, err| {
-            let tx = ctx.0.downcast::<oneshot::Sender<Result<(), RtcError>>>().unwrap();
+        self.sys_handle
+            .set_remote_description(desc.handle.sys_handle, ctx, |ctx, err| {
+                let tx = ctx
+                    .0
+                    .downcast::<oneshot::Sender<Result<(), RtcError>>>()
+                    .unwrap();
 
-            if err.ok() {
-                let _ = tx.send(Ok(()));
-            } else {
-                let _ = tx.send(Err(err.into()));
-            }
-        });
+                if err.ok() {
+                    let _ = tx.send(Ok(()));
+                } else {
+                    let _ = tx.send(Err(err.into()));
+                }
+            });
 
         rx.await.map_err(|_| RtcError {
             error_type: RtcErrorType::Internal,
@@ -272,15 +283,19 @@ impl PeerConnection {
         let (tx, rx) = oneshot::channel::<Result<(), RtcError>>();
         let ctx = Box::new(sys_pc::PeerContext(Box::new(tx)));
 
-        self.sys_handle.add_ice_candidate(candidate.handle.sys_handle, ctx, |ctx, err| {
-            let tx = ctx.0.downcast::<oneshot::Sender<Result<(), RtcError>>>().unwrap();
+        self.sys_handle
+            .add_ice_candidate(candidate.handle.sys_handle, ctx, |ctx, err| {
+                let tx = ctx
+                    .0
+                    .downcast::<oneshot::Sender<Result<(), RtcError>>>()
+                    .unwrap();
 
-            if err.ok() {
-                let _ = tx.send(Ok(()));
-            } else {
-                let _ = tx.send(Err(err.into()));
-            }
-        });
+                if err.ok() {
+                    let _ = tx.send(Ok(()));
+                } else {
+                    let _ = tx.send(Err(err.into()));
+                }
+            });
 
         rx.await.map_err(|_| RtcError {
             error_type: RtcErrorType::Internal,
@@ -293,12 +308,14 @@ impl PeerConnection {
         label: &str,
         init: DataChannelInit,
     ) -> Result<DataChannel, RtcError> {
-        let res = self.sys_handle.create_data_channel(label.to_string(), init.into());
+        let res = self
+            .sys_handle
+            .create_data_channel(label.to_string(), init.into());
 
         match res {
-            Ok(sys_handle) => {
-                Ok(DataChannel { handle: imp_dc::DataChannel::configure(sys_handle) })
-            }
+            Ok(sys_handle) => Ok(DataChannel {
+                handle: imp_dc::DataChannel::configure(sys_handle),
+            }),
             Err(e) => Err(unsafe { sys_err::ffi::RtcError::from(e.what()).into() }),
         }
     }
@@ -312,7 +329,9 @@ impl PeerConnection {
         let res = self.sys_handle.add_track(track.sys_handle(), &stream_ids);
 
         match res {
-            Ok(sys_handle) => Ok(RtpSender { handle: imp_rs::RtpSender { sys_handle } }),
+            Ok(sys_handle) => Ok(RtpSender {
+                handle: imp_rs::RtpSender { sys_handle },
+            }),
             Err(e) => unsafe { Err(sys_err::ffi::RtcError::from(e.what()).into()) },
         }
     }
@@ -322,10 +341,14 @@ impl PeerConnection {
         track: MediaStreamTrack,
         init: RtpTransceiverInit,
     ) -> Result<RtpTransceiver, RtcError> {
-        let res = self.sys_handle.add_transceiver(track.sys_handle(), init.into());
+        let res = self
+            .sys_handle
+            .add_transceiver(track.sys_handle(), init.into());
 
         match res {
-            Ok(sys_handle) => Ok(RtpTransceiver { handle: imp_rt::RtpTransceiver { sys_handle } }),
+            Ok(sys_handle) => Ok(RtpTransceiver {
+                handle: imp_rt::RtpTransceiver { sys_handle },
+            }),
             Err(e) => unsafe { Err(sys_err::ffi::RtcError::from(e.what()).into()) },
         }
     }
@@ -335,12 +358,16 @@ impl PeerConnection {
         media_type: MediaType,
         init: RtpTransceiverInit,
     ) -> Result<RtpTransceiver, RtcError> {
-        let res = self.sys_handle.add_transceiver_for_media(media_type.into(), init.into());
+        let res = self
+            .sys_handle
+            .add_transceiver_for_media(media_type.into(), init.into());
 
         match res {
-            Ok(cxx_handle) => {
-                Ok(RtpTransceiver { handle: imp_rt::RtpTransceiver { sys_handle: cxx_handle } })
-            }
+            Ok(cxx_handle) => Ok(RtpTransceiver {
+                handle: imp_rt::RtpTransceiver {
+                    sys_handle: cxx_handle,
+                },
+            }),
             Err(e) => unsafe { Err(sys_err::ffi::RtcError::from(e.what()).into()) },
         }
     }
@@ -375,7 +402,9 @@ impl PeerConnection {
             return None;
         }
 
-        Some(SessionDescription { handle: imp_sdp::SessionDescription { sys_handle: sdp } })
+        Some(SessionDescription {
+            handle: imp_sdp::SessionDescription { sys_handle: sdp },
+        })
     }
 
     pub fn current_remote_description(&self) -> Option<SessionDescription> {
@@ -384,7 +413,9 @@ impl PeerConnection {
             return None;
         }
 
-        Some(SessionDescription { handle: imp_sdp::SessionDescription { sys_handle: sdp } })
+        Some(SessionDescription {
+            handle: imp_sdp::SessionDescription { sys_handle: sdp },
+        })
     }
 
     pub fn remove_track(&self, sender: RtpSender) -> Result<(), RtcError> {
@@ -398,7 +429,10 @@ impl PeerConnection {
         let ctx = Box::new(sys_pc::PeerContext(Box::new(tx)));
 
         self.sys_handle.get_stats(ctx, |ctx, stats| {
-            let tx = ctx.0.downcast::<oneshot::Sender<Result<Vec<RtcStats>, RtcError>>>().unwrap();
+            let tx = ctx
+                .0
+                .downcast::<oneshot::Sender<Result<Vec<RtcStats>, RtcError>>>()
+                .unwrap();
 
             if stats.is_empty() {
                 let _ = tx.send(Ok(vec![]));
@@ -422,7 +456,11 @@ impl PeerConnection {
         self.sys_handle
             .get_senders()
             .into_iter()
-            .map(|sender| RtpSender { handle: imp_rs::RtpSender { sys_handle: sender.ptr } })
+            .map(|sender| RtpSender {
+                handle: imp_rs::RtpSender {
+                    sys_handle: sender.ptr,
+                },
+            })
             .collect()
     }
 
@@ -431,7 +469,9 @@ impl PeerConnection {
             .get_receivers()
             .into_iter()
             .map(|receiver| RtpReceiver {
-                handle: imp_rr::RtpReceiver { sys_handle: receiver.ptr },
+                handle: imp_rr::RtpReceiver {
+                    sys_handle: receiver.ptr,
+                },
             })
             .collect()
     }
@@ -441,7 +481,9 @@ impl PeerConnection {
             .get_transceivers()
             .into_iter()
             .map(|transceiver| RtpTransceiver {
-                handle: imp_rt::RtpTransceiver { sys_handle: transceiver.ptr },
+                handle: imp_rt::RtpTransceiver {
+                    sys_handle: transceiver.ptr,
+                },
             })
             .collect()
     }
@@ -509,7 +551,9 @@ impl sys_pcf::PeerConnectionObserver for PeerObserver {
 
     fn on_data_channel(&self, data_channel: SharedPtr<sys_dc::ffi::DataChannel>) {
         if let Some(f) = self.data_channel_handler.lock().as_mut() {
-            f(DataChannel { handle: imp_dc::DataChannel::configure(data_channel) });
+            f(DataChannel {
+                handle: imp_dc::DataChannel::configure(data_channel),
+            });
         }
     }
 
@@ -543,7 +587,11 @@ impl sys_pcf::PeerConnectionObserver for PeerObserver {
 
     fn on_ice_candidate(&self, candidate: SharedPtr<sys_jsep::ffi::IceCandidate>) {
         if let Some(f) = self.ice_candidate_handler.lock().as_mut() {
-            f(IceCandidate { handle: imp_ic::IceCandidate { sys_handle: candidate } });
+            f(IceCandidate {
+                handle: imp_ic::IceCandidate {
+                    sys_handle: candidate,
+                },
+            });
         }
     }
 
@@ -556,7 +604,13 @@ impl sys_pcf::PeerConnectionObserver for PeerObserver {
         error_text: String,
     ) {
         if let Some(f) = self.ice_candidate_error_handler.lock().as_mut() {
-            f(IceCandidateError { address, port, url, error_code, error_text });
+            f(IceCandidateError {
+                address,
+                port,
+                url,
+                error_code,
+                error_text,
+            });
         }
     }
 
@@ -591,14 +645,22 @@ impl sys_pcf::PeerConnectionObserver for PeerObserver {
             }
 
             f(TrackEvent {
-                receiver: RtpReceiver { handle: imp_rr::RtpReceiver { sys_handle: receiver } },
+                receiver: RtpReceiver {
+                    handle: imp_rr::RtpReceiver {
+                        sys_handle: receiver,
+                    },
+                },
                 streams: streams
                     .into_iter()
-                    .map(|s| MediaStream { handle: imp_ms::MediaStream { sys_handle: s.ptr } })
+                    .map(|s| MediaStream {
+                        handle: imp_ms::MediaStream { sys_handle: s.ptr },
+                    })
                     .collect(),
                 track: imp_mst::new_media_stream_track(track),
                 transceiver: RtpTransceiver {
-                    handle: imp_rt::RtpTransceiver { sys_handle: transceiver },
+                    handle: imp_rt::RtpTransceiver {
+                        sys_handle: transceiver,
+                    },
                 },
             });
         }

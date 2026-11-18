@@ -1021,8 +1021,7 @@ impl Background {
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
             BackgroundTag::LinearGradientMulti => {
                 let index = (self.ramp & !VIEWPORT_ANCHORED_RAMP) as usize;
-                self.solid.a == 0.0
-                    || with_gradient_ramps(|_, ramps| ramps[index].is_transparent())
+                self.solid.a == 0.0 || with_gradient_ramps(|_, ramps| ramps[index].is_transparent())
             }
         }
     }

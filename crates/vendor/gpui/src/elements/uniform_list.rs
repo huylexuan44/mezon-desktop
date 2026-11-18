@@ -250,18 +250,12 @@ impl UniformListScrollHandle {
 
     #[allow(missing_docs)]
     pub fn is_smooth_wheel_scrolling(&self) -> bool {
-        self.0
-            .borrow()
-            .base_handle
-            .is_smooth_wheel_scrolling()
+        self.0.borrow().base_handle.is_smooth_wheel_scrolling()
     }
 
     #[allow(missing_docs)]
     pub fn is_scroll_hover_suppressed(&self) -> bool {
-        self.0
-            .borrow()
-            .base_handle
-            .is_scroll_hover_suppressed()
+        self.0.borrow().base_handle.is_scroll_hover_suppressed()
     }
 
     #[allow(missing_docs)]

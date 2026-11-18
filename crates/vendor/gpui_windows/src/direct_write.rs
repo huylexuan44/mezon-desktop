@@ -244,7 +244,7 @@ impl DirectWriteTextSystem {
                 custom_font_collection,
                 fonts: Vec::new(),
                 font_to_font_id: HashMap::default(),
-            text_format_cache: HashMap::default(),
+                text_format_cache: HashMap::default(),
                 font_info_cache: HashMap::default(),
                 layout_line_scratch: Vec::new(),
             }),

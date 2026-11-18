@@ -1,8 +1,8 @@
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
-    TISGetInputSourceProperty, events::platform_input_from_native,
+    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    WindowFrameSource, ns_string, renderer,
+    ns_string, renderer,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
@@ -10,11 +10,10 @@ use block::ConcreteBlock;
 use cocoa::{
     appkit::{
         NSAppKitVersionNumber, NSAppKitVersionNumber12_0, NSApplication, NSBackingStoreBuffered,
-        NSColor, NSEventModifierFlags, NSFilenamesPboardType, NSPasteboard, NSScreen,
-        NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial,
-        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowButton,
-        NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode,
-        NSWindowStyleMask, NSWindowTitleVisibility,
+        NSColor, NSEventModifierFlags, NSFilenamesPboardType, NSPasteboard, NSScreen, NSView,
+        NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial, NSVisualEffectState,
+        NSVisualEffectView, NSWindow, NSWindowButton, NSWindowCollectionBehavior,
+        NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
     },
     base::{id, nil},
     foundation::{

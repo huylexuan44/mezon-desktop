@@ -247,9 +247,7 @@ impl SvgRenderer {
                 (svg_size.width() * scale, svg_size.height() * scale)
             }
             SvgSize::ExactSize(size) => (size.width.0 as f32, size.height.0 as f32),
-            SvgSize::ScaleFactor(scale) => {
-                (svg_size.width() * scale, svg_size.height() * scale)
-            }
+            SvgSize::ScaleFactor(scale) => (svg_size.width() * scale, svg_size.height() * scale),
         };
 
         if width > MAX_SIZE {
@@ -333,8 +331,7 @@ mod tests {
 
     const IBM_PLEX_REGULAR: &[u8] =
         include_bytes!("../../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
-    const LILEX_REGULAR: &[u8] =
-        include_bytes!("../../../../assets/fonts/lilex/Lilex-Regular.ttf");
+    const LILEX_REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/lilex/Lilex-Regular.ttf");
 
     fn db_with_bundled_fonts() -> Database {
         let mut db = Database::new();

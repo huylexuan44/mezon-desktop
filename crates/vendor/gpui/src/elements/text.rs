@@ -1,8 +1,8 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
-    TextOverflow, TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
+    TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
@@ -1270,9 +1270,7 @@ impl Element for InteractiveText {
                         let text_layout = text_layout.clone();
                         let clickable_ranges = self.clickable_ranges.clone();
                         move |event: &MouseUpEvent, phase, window: &mut Window, cx| {
-                            if phase != DispatchPhase::Bubble
-                                || event.button != MouseButton::Left
-                            {
+                            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                                 return;
                             }
                             let Some(mouse_down_index) = mouse_down.take() else {

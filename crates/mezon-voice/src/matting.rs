@@ -2,10 +2,12 @@ use ort::session::Session;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 
-pub const MATTE_WIDTH: usize = 384;
-pub const MATTE_HEIGHT: usize = 216;
+pub const MODEL_WIDTH: usize = 256;
+pub const MODEL_HEIGHT: usize = 144;
+pub const MATTE_WIDTH: usize = MODEL_WIDTH;
+pub const MATTE_HEIGHT: usize = MODEL_HEIGHT;
 
-static MATTE_MODEL_BYTES: &[u8] = include_bytes!("../assets/mezon_matte.onnx");
+static SEGMENTATION_MODEL_BYTES: &[u8] = include_bytes!("../assets/selfie_segmentation.onnx");
 static BG1_BYTES: &[u8] = include_bytes!("../assets/vtbg/bg1.png");
 static BG2_BYTES: &[u8] = include_bytes!("../assets/vtbg/bg2.png");
 static BG3_BYTES: &[u8] = include_bytes!("../assets/vtbg/bg3.png");
@@ -103,38 +105,38 @@ impl PreloadedBackgrounds {
     }
 }
 
-pub struct MezonMatteProcessor {
+pub struct SelfieSegmentationProcessor {
     session: Option<Session>,
-    r1: Vec<f32>,
-    r2: Vec<f32>,
-    r3: Vec<f32>,
-    r4: Vec<f32>,
     input_tensor_buf: Vec<f32>,
     pha_buf: Vec<f32>,
+    prev_pha: Vec<f32>,
+    has_prev_frame: bool,
     cached_bg: Option<PreloadedBackgrounds>,
     small_blur: Vec<u8>,
 }
 
-impl Default for MezonMatteProcessor {
+pub type MezonMatteProcessor = SelfieSegmentationProcessor;
+
+impl Default for SelfieSegmentationProcessor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MezonMatteProcessor {
+impl SelfieSegmentationProcessor {
     pub fn new() -> Self {
         let session = match Session::builder()
             .and_then(|b| b.with_intra_threads(2))
-            .and_then(|b| b.commit_from_memory(MATTE_MODEL_BYTES))
+            .and_then(|b| b.commit_from_memory(SEGMENTATION_MODEL_BYTES))
         {
             Ok(s) => Some(s),
             Err(e) => {
                 tracing::warn!(
-                    "Failed to initialize ONNX MezonMatte session from memory: {e}, attempting runtime file fallback"
+                    "Failed to initialize ONNX SelfieSegmentation session from memory: {e}, attempting runtime file fallback"
                 );
                 let paths = [
-                    "crates/mezon-voice/assets/mezon_matte.onnx",
-                    "assets/mezon_matte.onnx",
+                    "crates/mezon-voice/assets/selfie_segmentation.onnx",
+                    "assets/selfie_segmentation.onnx",
                 ];
                 let mut loaded = None;
                 for p in paths {
@@ -148,7 +150,7 @@ impl MezonMatteProcessor {
                 }
                 if loaded.is_none() {
                     tracing::warn!(
-                        "Failed to initialize ONNX MezonMatte session from runtime paths"
+                        "Failed to initialize ONNX SelfieSegmentation session from runtime paths"
                     );
                 }
                 loaded
@@ -157,22 +159,19 @@ impl MezonMatteProcessor {
 
         Self {
             session,
-            r1: vec![0.0f32; 16 * 108 * 192],
-            r2: vec![0.0f32; 32 * 54 * 96],
-            r3: vec![0.0f32; 64 * 27 * 48],
-            r4: vec![0.0f32; 128 * 14 * 24],
-            input_tensor_buf: vec![0.0f32; 3 * MATTE_HEIGHT * MATTE_WIDTH],
-            pha_buf: vec![0.0f32; MATTE_HEIGHT * MATTE_WIDTH],
+            input_tensor_buf: vec![0.0f32; 3 * MODEL_HEIGHT * MODEL_WIDTH],
+            pha_buf: vec![0.0f32; MODEL_HEIGHT * MODEL_WIDTH],
+            prev_pha: vec![0.0f32; MODEL_HEIGHT * MODEL_WIDTH],
+            has_prev_frame: false,
             cached_bg: None,
             small_blur: Vec::new(),
         }
     }
 
     pub fn reset_states(&mut self) {
-        self.r1.fill(0.0);
-        self.r2.fill(0.0);
-        self.r3.fill(0.0);
-        self.r4.fill(0.0);
+        self.has_prev_frame = false;
+        self.prev_pha.fill(0.0);
+        self.pha_buf.fill(0.0);
     }
 
     pub fn fail_closed(
@@ -282,26 +281,27 @@ impl MezonMatteProcessor {
             return;
         }
 
-        // 1. Prepare input tensor: resize BGRA to 384x216 normalized RGB
-        let step_x = width as f32 / MATTE_WIDTH as f32;
-        let step_y = height as f32 / MATTE_HEIGHT as f32;
+        // 1. Prepare input tensor: resize BGRA to MODEL_WIDTH x MODEL_HEIGHT normalized RGB [1, 3, 144, 256]
+        let step_x = width as f32 / MODEL_WIDTH as f32;
+        let step_y = height as f32 / MODEL_HEIGHT as f32;
 
-        let hw = MATTE_HEIGHT * MATTE_WIDTH;
+        let hw = MODEL_HEIGHT * MODEL_WIDTH;
         let r_offset = 0;
         let g_offset = hw;
         let b_offset = hw * 2;
 
-        for my in 0..MATTE_HEIGHT {
+        for my in 0..MODEL_HEIGHT {
             let sy = ((my as f32 * step_y) as usize).min(height - 1);
             let row_offset = sy * width * 4;
-            let m_row_offset = my * MATTE_WIDTH;
+            let m_row_offset = my * MODEL_WIDTH;
 
-            for mx in 0..MATTE_WIDTH {
+            for mx in 0..MODEL_WIDTH {
                 let sx = ((mx as f32 * step_x) as usize).min(width - 1);
                 let src_idx = row_offset + sx * 4;
-                let b = bgra_pixels[src_idx] as f32 / 255.0;
-                let g = bgra_pixels[src_idx + 1] as f32 / 255.0;
-                let r = bgra_pixels[src_idx + 2] as f32 / 255.0;
+                // bgra_pixels layout: B, G, R, A
+                let b = bgra_pixels[src_idx] as f32 * 0.003921569;
+                let g = bgra_pixels[src_idx + 1] as f32 * 0.003921569;
+                let r = bgra_pixels[src_idx + 2] as f32 * 0.003921569;
 
                 let dst_idx = m_row_offset + mx;
                 self.input_tensor_buf[r_offset + dst_idx] = r;
@@ -311,140 +311,71 @@ impl MezonMatteProcessor {
         }
 
         // 2. Run ONNX neural inference
-        let src_tensor = match Tensor::from_array((
-            [1, 3, MATTE_HEIGHT as i64, MATTE_WIDTH as i64],
+        let input_tensor = match Tensor::from_array((
+            [1, 3, MODEL_HEIGHT as i64, MODEL_WIDTH as i64],
             self.input_tensor_buf.clone(),
         )) {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!("matte tensor create failed: {e}");
-                self.fail_closed(bgra_pixels, width, height, mode);
-                return;
-            }
-        };
-
-        let r1_tensor = match Tensor::from_array(([1, 16, 108, 192], self.r1.clone())) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("r1 tensor create failed: {e}");
-                self.fail_closed(bgra_pixels, width, height, mode);
-                return;
-            }
-        };
-        let r2_tensor = match Tensor::from_array(([1, 32, 54, 96], self.r2.clone())) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("r2 tensor create failed: {e}");
-                self.fail_closed(bgra_pixels, width, height, mode);
-                return;
-            }
-        };
-        let r3_tensor = match Tensor::from_array(([1, 64, 27, 48], self.r3.clone())) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("r3 tensor create failed: {e}");
-                self.fail_closed(bgra_pixels, width, height, mode);
-                return;
-            }
-        };
-        let r4_tensor = match Tensor::from_array(([1, 128, 14, 24], self.r4.clone())) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("r4 tensor create failed: {e}");
+                tracing::warn!("segmentation tensor create failed: {e}");
                 self.fail_closed(bgra_pixels, width, height, mode);
                 return;
             }
         };
 
         let inference_ok = if let Some(session) = self.session.as_mut() {
-            match session.run(ort::inputs![
-                "src" => src_tensor,
-                "r1i" => r1_tensor,
-                "r2i" => r2_tensor,
-                "r3i" => r3_tensor,
-                "r4i" => r4_tensor
-            ]) {
+            match session.run(ort::inputs!["pixel_values" => input_tensor]) {
                 Ok(outputs) => {
-                    // Extract alpha matte by name: "pha"
-                    let pha_extracted = match outputs
-                        .get("pha")
+                    // Extract alpha mask output: "alphas"
+                    match outputs
+                        .get("alphas")
                         .and_then(|v| v.try_extract_tensor::<f32>().ok())
                     {
-                        Some((_shape, pha)) if pha.len() == self.pha_buf.len() => {
-                            self.pha_buf.copy_from_slice(pha);
+                        Some((_shape, alphas)) if alphas.len() == self.pha_buf.len() => {
+                            // 3. Post-process mask: S-curve choke & motion-adaptive temporal smoothing
+                            // Matches the MediaPipe enhancement logic in Mezon Web / Meet:
+                            // Background / Foreground gate with smooth transition between choke_low and choke_high
+                            let choke_low = 0.28f32;
+                            let choke_high = 0.65f32;
+                            let inv_choke_range = 1.0 / (choke_high - choke_low);
+
+                            for (i, &raw) in alphas.iter().enumerate().take(self.pha_buf.len()) {
+                                let cur = if raw <= 0.03 {
+                                    0.0
+                                } else if raw >= 0.97 {
+                                    1.0
+                                } else {
+                                    let t = ((raw - choke_low) * inv_choke_range).clamp(0.0, 1.0);
+                                    t * t * (3.0 - 2.0 * t)
+                                };
+
+                                if !self.has_prev_frame {
+                                    self.pha_buf[i] = cur;
+                                } else {
+                                    let prev = self.prev_pha[i];
+                                    if cur < prev - 0.02 {
+                                        // Fast release: person moved away, reveal virtual background immediately without ghosting
+                                        self.pha_buf[i] = cur;
+                                    } else {
+                                        // Stationary / subtle edge: smooth transition to stabilize jitter
+                                        let d = (cur - prev).abs();
+                                        let beta = 0.8 * (1.0 - (d / 0.15).min(1.0));
+                                        self.pha_buf[i] = beta * prev + (1.0 - beta) * cur;
+                                    }
+                                }
+                            }
+                            self.prev_pha.copy_from_slice(&self.pha_buf);
+                            self.has_prev_frame = true;
                             true
                         }
                         _ => {
-                            tracing::warn!("failed to extract 'pha' output or length mismatch");
+                            tracing::warn!("failed to extract 'alphas' output or length mismatch");
                             false
                         }
-                    };
-
-                    if pha_extracted {
-                        // Update recurrent states for temporal stability by name, checking lengths before copying
-                        if let Some((_, r1o)) = outputs
-                            .get("r1o")
-                            .and_then(|v| v.try_extract_tensor::<f32>().ok())
-                        {
-                            if r1o.len() == self.r1.len() {
-                                self.r1.copy_from_slice(r1o);
-                            } else {
-                                tracing::warn!(
-                                    "r1o length mismatch: expected {}, got {}",
-                                    self.r1.len(),
-                                    r1o.len()
-                                );
-                            }
-                        }
-                        if let Some((_, r2o)) = outputs
-                            .get("r2o")
-                            .and_then(|v| v.try_extract_tensor::<f32>().ok())
-                        {
-                            if r2o.len() == self.r2.len() {
-                                self.r2.copy_from_slice(r2o);
-                            } else {
-                                tracing::warn!(
-                                    "r2o length mismatch: expected {}, got {}",
-                                    self.r2.len(),
-                                    r2o.len()
-                                );
-                            }
-                        }
-                        if let Some((_, r3o)) = outputs
-                            .get("r3o")
-                            .and_then(|v| v.try_extract_tensor::<f32>().ok())
-                        {
-                            if r3o.len() == self.r3.len() {
-                                self.r3.copy_from_slice(r3o);
-                            } else {
-                                tracing::warn!(
-                                    "r3o length mismatch: expected {}, got {}",
-                                    self.r3.len(),
-                                    r3o.len()
-                                );
-                            }
-                        }
-                        if let Some((_, r4o)) = outputs
-                            .get("r4o")
-                            .and_then(|v| v.try_extract_tensor::<f32>().ok())
-                        {
-                            if r4o.len() == self.r4.len() {
-                                self.r4.copy_from_slice(r4o);
-                            } else {
-                                tracing::warn!(
-                                    "r4o length mismatch: expected {}, got {}",
-                                    self.r4.len(),
-                                    r4o.len()
-                                );
-                            }
-                        }
-                        true
-                    } else {
-                        false
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("matte inference failed: {e}");
+                    tracing::warn!("segmentation inference failed: {e}");
                     false
                 }
             }
@@ -457,7 +388,7 @@ impl MezonMatteProcessor {
             return;
         }
 
-        // 3. Composite background
+        // 4. Composite background (Blur or Image bg1..bg5)
         if mode == VirtualBackgroundMode::Blur {
             self.composite_blur(bgra_pixels, width, height);
         } else {
@@ -483,10 +414,12 @@ impl MezonMatteProcessor {
                 let ox = sx * 4;
                 let s_idx = (sy * sw + sx) * 4;
                 let o_idx = (oy * width + ox) * 4;
-                self.small_blur[s_idx] = bgra_pixels[o_idx];
-                self.small_blur[s_idx + 1] = bgra_pixels[o_idx + 1];
-                self.small_blur[s_idx + 2] = bgra_pixels[o_idx + 2];
-                self.small_blur[s_idx + 3] = 255;
+                if o_idx + 3 < bgra_pixels.len() {
+                    self.small_blur[s_idx] = bgra_pixels[o_idx];
+                    self.small_blur[s_idx + 1] = bgra_pixels[o_idx + 1];
+                    self.small_blur[s_idx + 2] = bgra_pixels[o_idx + 2];
+                    self.small_blur[s_idx + 3] = 255;
+                }
             }
         }
 
@@ -494,38 +427,56 @@ impl MezonMatteProcessor {
         box_blur_bgra(&mut self.small_blur, sw, sh, 3);
         box_blur_bgra(&mut self.small_blur, sw, sh, 3);
 
-        // Bilinear blend onto original image using pha
-        let scale_mx = (MATTE_WIDTH as f32 - 1.0) / (width as f32 - 1.0).max(1.0);
-        let scale_my = (MATTE_HEIGHT as f32 - 1.0) / (height as f32 - 1.0).max(1.0);
+        // Bilinear blend onto original image using smoothed alpha
+        let scale_x = (MODEL_WIDTH as f32 - 1.0) / (width as f32 - 1.0).max(1.0);
+        let scale_y = (MODEL_HEIGHT as f32 - 1.0) / (height as f32 - 1.0).max(1.0);
 
         for y in 0..height {
-            let my = (y as f32 * scale_my) as usize;
-            let m_row = my * MATTE_WIDTH;
+            let fy = (y as f32 * scale_y).clamp(0.0, (MODEL_HEIGHT - 1) as f32);
+            let y0 = fy as usize;
+            let y1 = (y0 + 1).min(MODEL_HEIGHT - 1);
+            let dy = fy - y0 as f32;
+
+            let row0 = y0 * MODEL_WIDTH;
+            let row1 = y1 * MODEL_WIDTH;
             let sy = (y / 4).min(sh - 1);
             let s_row = sy * sw * 4;
             let row = y * width * 4;
 
             for x in 0..width {
-                let mx = (x as f32 * scale_mx) as usize;
-                let alpha = self.pha_buf[m_row + mx].clamp(0.0, 1.0);
+                let fx = (x as f32 * scale_x).clamp(0.0, (MODEL_WIDTH - 1) as f32);
+                let x0 = fx as usize;
+                let x1 = (x0 + 1).min(MODEL_WIDTH - 1);
+                let dx = fx - x0 as f32;
 
-                if alpha < 0.99 {
+                let a00 = self.pha_buf[row0 + x0];
+                let a10 = self.pha_buf[row0 + x1];
+                let a01 = self.pha_buf[row1 + x0];
+                let a11 = self.pha_buf[row1 + x1];
+
+                let alpha = ((a00 * (1.0 - dx) + a10 * dx) * (1.0 - dy)
+                    + (a01 * (1.0 - dx) + a11 * dx) * dy)
+                    .clamp(0.0, 1.0);
+
+                if alpha < 0.999 {
                     let sx = (x / 4).min(sw - 1);
                     let blur_idx = s_row + sx * 4;
                     let out_idx = row + x * 4;
 
-                    let bg_b = self.small_blur[blur_idx] as f32;
-                    let bg_g = self.small_blur[blur_idx + 1] as f32;
-                    let bg_r = self.small_blur[blur_idx + 2] as f32;
+                    if out_idx + 3 <= bgra_pixels.len() && blur_idx + 3 <= self.small_blur.len() {
+                        let bg_b = self.small_blur[blur_idx] as f32;
+                        let bg_g = self.small_blur[blur_idx + 1] as f32;
+                        let bg_r = self.small_blur[blur_idx + 2] as f32;
 
-                    let fg_b = bgra_pixels[out_idx] as f32;
-                    let fg_g = bgra_pixels[out_idx + 1] as f32;
-                    let fg_r = bgra_pixels[out_idx + 2] as f32;
+                        let fg_b = bgra_pixels[out_idx] as f32;
+                        let fg_g = bgra_pixels[out_idx + 1] as f32;
+                        let fg_r = bgra_pixels[out_idx + 2] as f32;
 
-                    let inv = 1.0 - alpha;
-                    bgra_pixels[out_idx] = (fg_b * alpha + bg_b * inv) as u8;
-                    bgra_pixels[out_idx + 1] = (fg_g * alpha + bg_g * inv) as u8;
-                    bgra_pixels[out_idx + 2] = (fg_r * alpha + bg_r * inv) as u8;
+                        let inv = 1.0 - alpha;
+                        bgra_pixels[out_idx] = (fg_b * alpha + bg_b * inv) as u8;
+                        bgra_pixels[out_idx + 1] = (fg_g * alpha + bg_g * inv) as u8;
+                        bgra_pixels[out_idx + 2] = (fg_r * alpha + bg_r * inv) as u8;
+                    }
                 }
             }
         }
@@ -557,32 +508,50 @@ impl MezonMatteProcessor {
             }
         };
 
-        let scale_mx = (MATTE_WIDTH as f32 - 1.0) / (width as f32 - 1.0).max(1.0);
-        let scale_my = (MATTE_HEIGHT as f32 - 1.0) / (height as f32 - 1.0).max(1.0);
+        let scale_x = (MODEL_WIDTH as f32 - 1.0) / (width as f32 - 1.0).max(1.0);
+        let scale_y = (MODEL_HEIGHT as f32 - 1.0) / (height as f32 - 1.0).max(1.0);
 
         for y in 0..height {
-            let my = (y as f32 * scale_my) as usize;
-            let m_row = my * MATTE_WIDTH;
+            let fy = (y as f32 * scale_y).clamp(0.0, (MODEL_HEIGHT - 1) as f32);
+            let y0 = fy as usize;
+            let y1 = (y0 + 1).min(MODEL_HEIGHT - 1);
+            let dy = fy - y0 as f32;
+
+            let row0 = y0 * MODEL_WIDTH;
+            let row1 = y1 * MODEL_WIDTH;
             let row = y * width * 4;
 
             for x in 0..width {
-                let mx = (x as f32 * scale_mx) as usize;
-                let alpha = self.pha_buf[m_row + mx].clamp(0.0, 1.0);
+                let fx = (x as f32 * scale_x).clamp(0.0, (MODEL_WIDTH - 1) as f32);
+                let x0 = fx as usize;
+                let x1 = (x0 + 1).min(MODEL_WIDTH - 1);
+                let dx = fx - x0 as f32;
 
-                if alpha < 0.99 {
+                let a00 = self.pha_buf[row0 + x0];
+                let a10 = self.pha_buf[row0 + x1];
+                let a01 = self.pha_buf[row1 + x0];
+                let a11 = self.pha_buf[row1 + x1];
+
+                let alpha = ((a00 * (1.0 - dx) + a10 * dx) * (1.0 - dy)
+                    + (a01 * (1.0 - dx) + a11 * dx) * dy)
+                    .clamp(0.0, 1.0);
+
+                if alpha < 0.999 {
                     let idx = row + x * 4;
-                    let bg_b = bg[idx] as f32;
-                    let bg_g = bg[idx + 1] as f32;
-                    let bg_r = bg[idx + 2] as f32;
+                    if idx + 3 <= bgra_pixels.len() && idx + 3 <= bg.len() {
+                        let bg_b = bg[idx] as f32;
+                        let bg_g = bg[idx + 1] as f32;
+                        let bg_r = bg[idx + 2] as f32;
 
-                    let fg_b = bgra_pixels[idx] as f32;
-                    let fg_g = bgra_pixels[idx + 1] as f32;
-                    let fg_r = bgra_pixels[idx + 2] as f32;
+                        let fg_b = bgra_pixels[idx] as f32;
+                        let fg_g = bgra_pixels[idx + 1] as f32;
+                        let fg_r = bgra_pixels[idx + 2] as f32;
 
-                    let inv = 1.0 - alpha;
-                    bgra_pixels[idx] = (fg_b * alpha + bg_b * inv) as u8;
-                    bgra_pixels[idx + 1] = (fg_g * alpha + bg_g * inv) as u8;
-                    bgra_pixels[idx + 2] = (fg_r * alpha + bg_r * inv) as u8;
+                        let inv = 1.0 - alpha;
+                        bgra_pixels[idx] = (fg_b * alpha + bg_b * inv) as u8;
+                        bgra_pixels[idx + 1] = (fg_g * alpha + bg_g * inv) as u8;
+                        bgra_pixels[idx + 2] = (fg_r * alpha + bg_r * inv) as u8;
+                    }
                 }
             }
         }

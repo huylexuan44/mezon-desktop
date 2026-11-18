@@ -38,7 +38,10 @@ impl NativeAudioSource {
         num_channels: u32,
         queue_size_ms: u32,
     ) -> NativeAudioSource {
-        assert!(queue_size_ms % 10 == 0, "queue_size_ms must be a multiple of 10");
+        assert!(
+            queue_size_ms % 10 == 0,
+            "queue_size_ms must be a multiple of 10"
+        );
 
         let sys_handle = sys_at::ffi::new_audio_track_source(
             options.into(),
@@ -48,7 +51,12 @@ impl NativeAudioSource {
         );
 
         let queue_size_samples = (queue_size_ms * sample_rate * num_channels) / 1000;
-        Self { sys_handle, sample_rate, num_channels, queue_size_samples }
+        Self {
+            sys_handle,
+            sample_rate,
+            num_channels,
+            queue_size_samples,
+        }
     }
 
     pub fn sys_handle(&self) -> SharedPtr<sys_at::ffi::AudioTrackSource> {
@@ -56,7 +64,8 @@ impl NativeAudioSource {
     }
 
     pub fn set_audio_options(&self, options: AudioSourceOptions) {
-        self.sys_handle.set_audio_options(&sys_at::ffi::AudioSourceOptions::from(options))
+        self.sys_handle
+            .set_audio_options(&sys_at::ffi::AudioSourceOptions::from(options))
     }
 
     pub fn audio_options(&self) -> AudioSourceOptions {

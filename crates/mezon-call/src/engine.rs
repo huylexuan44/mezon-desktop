@@ -520,7 +520,10 @@ async fn answer_remote_offer(
     pc.set_remote_description(offer)
         .await
         .context("set remote (offer) failed")?;
-    tracing::info!(pending_ice = pending_ice.len(), "call: remote offer applied");
+    tracing::info!(
+        pending_ice = pending_ice.len(),
+        "call: remote offer applied"
+    );
     drain_ice(pc, pending_ice).await;
     let answer = pc
         .create_answer(AnswerOptions::default())
@@ -545,7 +548,10 @@ async fn apply_remote_answer(
     pc.set_remote_description(answer)
         .await
         .context("set remote (answer) failed")?;
-    tracing::info!(pending_ice = pending_ice.len(), "call: remote answer applied");
+    tracing::info!(
+        pending_ice = pending_ice.len(),
+        "call: remote answer applied"
+    );
     drain_ice(pc, pending_ice).await;
     Ok(())
 }

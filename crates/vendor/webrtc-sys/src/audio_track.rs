@@ -105,6 +105,7 @@ impl AudioSinkWrapper {
     }
 
     fn on_data(&self, data: &[i16], sample_rate: i32, nb_channels: usize, nb_frames: usize) {
-        self.observer.on_data(data, sample_rate, nb_channels, nb_frames);
+        self.observer
+            .on_data(data, sample_rate, nb_channels, nb_frames);
     }
 }

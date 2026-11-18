@@ -71,8 +71,7 @@ mod tests {
     impl Render for RootView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div().key_context("Root").size_full().child(
-                AnyView::from(self.panel.clone())
-                    .cached(StyleRefinement::default().size_full()),
+                AnyView::from(self.panel.clone()).cached(StyleRefinement::default().size_full()),
             )
         }
     }

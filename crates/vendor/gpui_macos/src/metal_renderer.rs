@@ -507,7 +507,8 @@ impl MetalRenderer {
                     layer.as_ref(),
                     setDrawableSize: ns_size
                 ];
-                let _: () = msg_send![layer.as_ref(), setContents: ptr::null_mut::<std::ffi::c_void>()];
+                let _: () =
+                    msg_send![layer.as_ref(), setContents: ptr::null_mut::<std::ffi::c_void>()];
             }
         }
         self.layer = None;
@@ -526,7 +527,11 @@ impl MetalRenderer {
                 return;
             }
             let fallback = [GradientRamp::default()];
-            let ramps = if ramps.is_empty() { &fallback[..] } else { ramps };
+            let ramps = if ramps.is_empty() {
+                &fallback[..]
+            } else {
+                ramps
+            };
             let buffer = self.device.new_buffer_with_data(
                 ramps.as_ptr() as *const c_void,
                 mem::size_of_val(ramps) as u64,
@@ -889,7 +894,9 @@ impl MetalRenderer {
         );
         command_encoder.set_fragment_buffer(
             PathRasterizationInputIndex::GradientRamps as u64,
-            self.gradient_ramps.as_ref().map(|(_, buffer)| buffer.as_ref()),
+            self.gradient_ramps
+                .as_ref()
+                .map(|(_, buffer)| buffer.as_ref()),
             0,
         );
         command_encoder.draw_primitives(
@@ -973,7 +980,9 @@ impl MetalRenderer {
         );
         command_encoder.set_fragment_buffer(
             QuadInputIndex::GradientRamps as u64,
-            self.gradient_ramps.as_ref().map(|(_, buffer)| buffer.as_ref()),
+            self.gradient_ramps
+                .as_ref()
+                .map(|(_, buffer)| buffer.as_ref()),
             0,
         );
         command_encoder.set_vertex_bytes(

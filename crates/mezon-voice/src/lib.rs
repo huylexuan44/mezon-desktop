@@ -61,7 +61,7 @@ pub use live::{
     LIVE_PREVIEW_KEY, LiveEndpoint, LiveEndpointRefresher, LiveEvent, LiveFailure, LiveOptions,
     LiveSession, LiveSource,
 };
-pub use matting::{MezonMatteProcessor, VirtualBackgroundMode};
+pub use matting::{MezonMatteProcessor, SelfieSegmentationProcessor, VirtualBackgroundMode};
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
     MediaDevice, MediaPermission, media_permission, media_permission_changes,

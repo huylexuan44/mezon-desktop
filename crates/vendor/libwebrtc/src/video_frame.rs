@@ -136,7 +136,12 @@ where
 
 impl<T: AsRef<dyn VideoBuffer>> VideoFrame<T> {
     pub fn new(rotation: VideoRotation, buffer: T) -> Self {
-        Self { rotation, timestamp_us: 0, frame_metadata: None, buffer }
+        Self {
+            rotation,
+            timestamp_us: 0,
+            frame_metadata: None,
+            buffer,
+        }
     }
 }
 
@@ -214,7 +219,9 @@ macro_rules! new_buffer_type {
 
             #[cfg(not(target_arch = "wasm32"))]
             fn to_i420(&self) -> I420Buffer {
-                I420Buffer { handle: self.handle.to_i420() }
+                I420Buffer {
+                    handle: self.handle.to_i420(),
+                }
             }
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -302,7 +309,11 @@ impl I420Buffer {
     }
 
     pub fn strides(&self) -> (u32, u32, u32) {
-        (self.handle.stride_y(), self.handle.stride_u(), self.handle.stride_v())
+        (
+            self.handle.stride_y(),
+            self.handle.stride_u(),
+            self.handle.stride_v(),
+        )
     }
 
     pub fn data(&self) -> (&[u8], &[u8], &[u8]) {
@@ -392,7 +403,11 @@ impl I422Buffer {
     }
 
     pub fn strides(&self) -> (u32, u32, u32) {
-        (self.handle.stride_y(), self.handle.stride_u(), self.handle.stride_v())
+        (
+            self.handle.stride_y(),
+            self.handle.stride_u(),
+            self.handle.stride_v(),
+        )
     }
 
     pub fn data(&self) -> (&[u8], &[u8], &[u8]) {
@@ -439,7 +454,11 @@ impl I444Buffer {
     }
 
     pub fn strides(&self) -> (u32, u32, u32) {
-        (self.handle.stride_y(), self.handle.stride_u(), self.handle.stride_v())
+        (
+            self.handle.stride_y(),
+            self.handle.stride_u(),
+            self.handle.stride_v(),
+        )
     }
 
     pub fn data(&self) -> (&[u8], &[u8], &[u8]) {
@@ -486,7 +505,11 @@ impl I010Buffer {
     }
 
     pub fn strides(&self) -> (u32, u32, u32) {
-        (self.handle.stride_y(), self.handle.stride_u(), self.handle.stride_v())
+        (
+            self.handle.stride_y(),
+            self.handle.stride_u(),
+            self.handle.stride_v(),
+        )
     }
 
     pub fn data(&self) -> (&[u16], &[u16], &[u16]) {

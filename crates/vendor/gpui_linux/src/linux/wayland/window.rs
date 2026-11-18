@@ -1751,10 +1751,7 @@ impl PlatformWindow for WaylandWindow {
         if let Some(toplevel) = state.surface_state.toplevel() {
             toplevel.resize(
                 &state.globals.seat,
-                state
-                    .client
-                    .get_serial(SerialKind::MousePress)
-                    .as_raw(),
+                state.client.get_serial(SerialKind::MousePress).as_raw(),
                 edge.to_xdg(),
             )
         }

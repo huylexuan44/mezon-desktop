@@ -39,9 +39,9 @@ use crate::{
     RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
     SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
 };
-use anyhow::{Context as _, Result};
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
+use anyhow::{Context as _, Result};
 use async_task::Runnable;
 use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support"))]
