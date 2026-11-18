@@ -18,7 +18,10 @@ pub struct EncodedRateControl {
 impl Default for VideoResolution {
     // Default to 720p
     fn default() -> Self {
-        VideoResolution { width: 1280, height: 720 }
+        VideoResolution {
+            width: 1280,
+            height: 720,
+        }
     }
 }
 
@@ -65,13 +68,17 @@ pub mod native {
 
     impl NativeVideoSource {
         pub fn new(resolution: VideoResolution, is_screencast: bool) -> Self {
-            Self { handle: vs_imp::NativeVideoSource::new(resolution, is_screencast) }
+            Self {
+                handle: vs_imp::NativeVideoSource::new(resolution, is_screencast),
+            }
         }
 
         /// Creates a source for pre-encoded access units: no raw black-frame
         /// keepalive is injected before the first capture.
         pub fn new_encoded(resolution: VideoResolution) -> Self {
-            Self { handle: vs_imp::NativeVideoSource::new_encoded(resolution) }
+            Self {
+                handle: vs_imp::NativeVideoSource::new_encoded(resolution),
+            }
         }
 
         pub fn capture_frame<T: AsRef<dyn VideoBuffer>>(&self, frame: &VideoFrame<T>) {
@@ -111,7 +118,8 @@ pub mod native {
             pixel_format: i32,
             timestamp_us: i64,
         ) -> bool {
-            self.handle.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us)
+            self.handle
+                .capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us)
         }
 
         /// Captures a Jetson DMA-buffer backed video frame with packet trailer metadata.

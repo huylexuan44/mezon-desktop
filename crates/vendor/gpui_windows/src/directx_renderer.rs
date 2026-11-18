@@ -1402,21 +1402,22 @@ fn create_swap_chain(
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
         Flags: preferred_flags,
     };
-    let (swap_chain, flags) =
-        match unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) } {
-            Ok(swap_chain) => (swap_chain, preferred_flags),
-            Err(err) => {
-                log::warn!(
-                    "waitable hwnd swap chain failed ({err}), falling back to plain FLIP_SEQUENTIAL"
-                );
-                desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-                desc.Flags = 0;
-                (
-                    unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) }?,
-                    0,
-                )
-            }
-        };
+    let (swap_chain, flags) = match unsafe {
+        dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None)
+    } {
+        Ok(swap_chain) => (swap_chain, preferred_flags),
+        Err(err) => {
+            log::warn!(
+                "waitable hwnd swap chain failed ({err}), falling back to plain FLIP_SEQUENTIAL"
+            );
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+            desc.Flags = 0;
+            (
+                unsafe { dxgi_factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None) }?,
+                0,
+            )
+        }
+    };
     unsafe { dxgi_factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER) }?;
     Ok((swap_chain, flags))
 }

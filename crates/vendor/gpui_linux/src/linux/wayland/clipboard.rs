@@ -119,17 +119,18 @@ impl<T: ReceiveData> DataOffer<T> {
         let result = text_content.replace("\r\n", "\n");
         // mezon vendor edit: clipboard html for rich paste.
         let html = if gpui::clipboard_html_wanted() && self.has_mime_type("text/html") {
-            self.read_bytes(connection, "text/html").and_then(|html_bytes| {
-                if let Some(rest) = html_bytes.strip_prefix(&[0xFF, 0xFE]) {
-                    let units: Vec<u16> = rest
-                        .chunks_exact(2)
-                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                        .collect();
-                    String::from_utf16(&units).ok()
-                } else {
-                    String::from_utf8(html_bytes).ok()
-                }
-            })
+            self.read_bytes(connection, "text/html")
+                .and_then(|html_bytes| {
+                    if let Some(rest) = html_bytes.strip_prefix(&[0xFF, 0xFE]) {
+                        let units: Vec<u16> = rest
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        String::from_utf16(&units).ok()
+                    } else {
+                        String::from_utf8(html_bytes).ok()
+                    }
+                })
         } else {
             None
         };

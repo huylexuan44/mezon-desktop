@@ -16,7 +16,11 @@ impl From<sys_webrtc::ffi::Priority> for Priority {
 
 impl From<sys_rp::ffi::RtpExtension> for RtpHeaderExtensionParameters {
     fn from(value: sys_rp::ffi::RtpExtension) -> Self {
-        Self { uri: value.uri, id: value.id, encrypted: value.encrypt }
+        Self {
+            uri: value.uri,
+            id: value.id,
+            encrypted: value.encrypt,
+        }
     }
 }
 
@@ -24,7 +28,11 @@ impl From<sys_rp::ffi::RtpParameters> for RtpParameters {
     fn from(value: sys_rp::ffi::RtpParameters) -> Self {
         Self {
             codecs: value.codecs.into_iter().map(Into::into).collect(),
-            header_extensions: value.header_extensions.into_iter().map(Into::into).collect(),
+            header_extensions: value
+                .header_extensions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             encodings: value.encodings.into_iter().map(Into::into).collect(),
             rtcp: value.rtcp.into(),
             transaction_id: value.transaction_id,
@@ -57,7 +65,11 @@ impl From<sys_rp::ffi::RtpCodecParameters> for RtpCodecParameters {
                     message_type: f.message_type.repr,
                 })
                 .collect(),
-            parameters: value.parameters.into_iter().map(|kv| (kv.key, kv.value)).collect(),
+            parameters: value
+                .parameters
+                .into_iter()
+                .map(|kv| (kv.key, kv.value))
+                .collect(),
         }
     }
 }
@@ -78,7 +90,9 @@ impl From<sys_rp::ffi::RtpEncodingParameters> for RtpEncodingParameters {
     fn from(value: sys_rp::ffi::RtpEncodingParameters) -> Self {
         Self {
             active: value.active,
-            max_bitrate: value.has_max_bitrate_bps.then_some(value.max_bitrate_bps as u64),
+            max_bitrate: value
+                .has_max_bitrate_bps
+                .then_some(value.max_bitrate_bps as u64),
             max_framerate: value.has_max_framerate.then_some(value.max_framerate),
             priority: value.network_priority.into(),
             rid: value.rid,
@@ -123,7 +137,10 @@ impl From<sys_rp::ffi::RtpCodecCapability> for RtpCodecCapability {
 
 impl From<sys_rp::ffi::RtpHeaderExtensionCapability> for RtpHeaderExtensionCapability {
     fn from(value: sys_rp::ffi::RtpHeaderExtensionCapability) -> Self {
-        Self { direction: value.direction.into(), uri: value.uri }
+        Self {
+            direction: value.direction.into(),
+            uri: value.uri,
+        }
     }
 }
 
@@ -131,7 +148,11 @@ impl From<sys_rp::ffi::RtpCapabilities> for RtpCapabilities {
     fn from(value: sys_rp::ffi::RtpCapabilities) -> Self {
         Self {
             codecs: value.codecs.into_iter().map(Into::into).collect(),
-            header_extensions: value.header_extensions.into_iter().map(Into::into).collect(),
+            header_extensions: value
+                .header_extensions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -149,17 +170,26 @@ impl From<Priority> for sys_webrtc::ffi::Priority {
 
 impl From<RtpHeaderExtensionParameters> for sys_rp::ffi::RtpExtension {
     fn from(value: RtpHeaderExtensionParameters) -> Self {
-        Self { uri: value.uri, id: value.id, encrypt: value.encrypted }
+        Self {
+            uri: value.uri,
+            id: value.id,
+            encrypt: value.encrypted,
+        }
     }
 }
 
 impl From<RtpParameters> for sys_rp::ffi::RtpParameters {
     fn from(value: RtpParameters) -> Self {
-        let degradation_preference =
-            sys_rp::ffi::DegradationPreference { repr: value.degradation_preference };
+        let degradation_preference = sys_rp::ffi::DegradationPreference {
+            repr: value.degradation_preference,
+        };
         Self {
             codecs: value.codecs.into_iter().map(Into::into).collect(),
-            header_extensions: value.header_extensions.into_iter().map(Into::into).collect(),
+            header_extensions: value
+                .header_extensions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             encodings: value.encodings.into_iter().map(Into::into).collect(),
             rtcp: value.rtcp.into(),
             transaction_id: value.transaction_id,
@@ -190,9 +220,12 @@ impl From<RtpCodecParameters> for sys_rp::ffi::RtpCodecParameters {
                 .rtcp_feedback
                 .into_iter()
                 .map(|f| {
-                    let feedback_type = sys_rp::ffi::RtcpFeedbackType { repr: f.feedback_type };
-                    let message_type =
-                        sys_rp::ffi::RtcpFeedbackMessageType { repr: f.message_type };
+                    let feedback_type = sys_rp::ffi::RtcpFeedbackType {
+                        repr: f.feedback_type,
+                    };
+                    let message_type = sys_rp::ffi::RtcpFeedbackMessageType {
+                        repr: f.message_type,
+                    };
                     sys_rp::ffi::RtcpFeedback {
                         feedback_type,
                         has_message_type: f.has_message_type,

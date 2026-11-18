@@ -1464,12 +1464,8 @@ mod tests {
             ibus_preedit_event(String::new(), 0, true),
             Some(ImEvent::ClearPreedit)
         ));
-        let hide = Message::new_signal(
-            "/",
-            "org.freedesktop.IBus.InputContext",
-            "HidePreeditText",
-        )
-        .unwrap();
+        let hide = Message::new_signal("/", "org.freedesktop.IBus.InputContext", "HidePreeditText")
+            .unwrap();
         assert!(matches!(
             parse_ibus_hide_preedit(&hide),
             Some(ImEvent::HidePreedit)
@@ -1490,7 +1486,9 @@ mod tests {
                 caret_chars: 1,
             },
         ]));
-        assert!(!events_only_clear_preedit(&[ImEvent::Commit("được ".into())]));
+        assert!(!events_only_clear_preedit(&[ImEvent::Commit(
+            "được ".into()
+        )]));
         assert!(!events_only_clear_preedit(&[]));
     }
 

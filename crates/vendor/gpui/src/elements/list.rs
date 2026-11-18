@@ -10,8 +10,8 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    MouseMoveEvent, Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Task, Window, point, px, size,
+    MouseMoveEvent, Overflow, Pixels, Point, ScrollWheelEvent, Size, Style, StyleRefinement,
+    Styled, Task, Window, point, px, size,
 };
 use collections::VecDeque;
 use refineable::Refineable as _;
@@ -159,9 +159,7 @@ fn wheel_cubic_bezier_coordinate(t: f32, p1: f32, p2: f32) -> f32 {
 
 fn wheel_cubic_bezier_derivative(t: f32, p1: f32, p2: f32) -> f32 {
     let inverse = 1. - t;
-    3. * inverse * inverse * p1
-        + 6. * inverse * t * (p2 - p1)
-        + 3. * t * t * (1. - p2)
+    3. * inverse * inverse * p1 + 6. * inverse * t * (p2 - p1) + 3. * t * t * (1. - p2)
 }
 
 fn solve_wheel_scroll_bezier(progress: f32) -> f32 {
@@ -287,8 +285,8 @@ fn start_smooth_wheel_scroll(
             let (_, velocity, _) = animation.sample(now);
             (animation.target - animation.applied, velocity)
         });
-        let target = (current + remaining + delta.as_f32())
-            .clamp(-state.max_scroll_offset().as_f32(), 0.);
+        let target =
+            (current + remaining + delta.as_f32()).clamp(-state.max_scroll_offset().as_f32(), 0.);
         if (target - current).abs() <= f32::EPSILON {
             state.wheel_scroll_animation = None;
             return;
@@ -315,11 +313,7 @@ fn start_smooth_wheel_scroll(
     }
 }
 
-fn schedule_smooth_wheel_frame(
-    list_state: ListState,
-    current_view: EntityId,
-    window: &mut Window,
-) {
+fn schedule_smooth_wheel_frame(list_state: ListState, current_view: EntityId, window: &mut Window) {
     window.on_next_frame(move |window, cx| {
         let continue_animation = {
             let state = &mut *list_state.0.borrow_mut();
@@ -798,11 +792,7 @@ impl ListState {
         count: usize,
         size_hint: Size<Pixels>,
     ) {
-        self.splice_focusable_with_size_hint(
-            old_range,
-            (0..count).map(|_| None),
-            Some(size_hint),
-        )
+        self.splice_focusable_with_size_hint(old_range, (0..count).map(|_| None), Some(size_hint))
     }
 
     /// Register with the list state that the items in `old_range` have been replaced
@@ -1318,9 +1308,7 @@ impl StateInner {
             } else {
                 self.scroll_top(&self.logical_scroll_top())
             };
-        let new_scroll_top = (current_scroll_top - delta.y)
-            .max(px(0.))
-            .min(scroll_max);
+        let new_scroll_top = (current_scroll_top - delta.y).max(px(0.)).min(scroll_max);
         if mark_hover_activity && new_scroll_top != current_scroll_top {
             self.touch_scroll_hover_activity();
         }
@@ -1935,12 +1923,7 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) -> ListPrepaintState {
-        ensure_scroll_hover_release_task(
-            &self.state,
-            window.current_view(),
-            window,
-            cx,
-        );
+        ensure_scroll_hover_release_task(&self.state, window.current_view(), window, cx);
         let state = &mut *self.state.0.borrow_mut();
         state.reset = false;
 
@@ -2016,25 +1999,11 @@ impl Element for List {
                 let pixel_delta = event.delta.pixel_delta(px(40.));
                 let smooth_line_scroll = list_state.0.borrow().smooth_line_scroll;
                 if !precise && smooth_line_scroll {
-                    start_smooth_wheel_scroll(
-                        &list_state,
-                        pixel_delta.y,
-                        current_view,
-                        window,
-                        cx,
-                    );
+                    start_smooth_wheel_scroll(&list_state, pixel_delta.y, current_view, window, cx);
                 } else {
                     let state = &mut *list_state.0.borrow_mut();
                     state.wheel_scroll_animation = None;
-                    state.scroll(
-                        height,
-                        pixel_delta,
-                        current_view,
-                        window,
-                        cx,
-                        true,
-                        true,
-                    );
+                    state.scroll(height, pixel_delta, current_view, window, cx, true, true);
                 }
             }
         });
@@ -2045,11 +2014,8 @@ impl Element for List {
             }
         });
 
-        let should_listen_for_pointer_move = self
-            .state
-            .0
-            .borrow()
-            .scroll_hover_waiting_for_pointer_move;
+        let should_listen_for_pointer_move =
+            self.state.0.borrow().scroll_hover_waiting_for_pointer_move;
         if should_listen_for_pointer_move {
             let list_state = self.state.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
