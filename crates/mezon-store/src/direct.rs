@@ -8,6 +8,7 @@ use mezon_client::transport::{ApiChannelDesc, ApiDirectChannel, build_send_conte
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
 use crate::Freshness;
+use crate::clan_members::ClanMembersStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::users_by_user::UsersByUserStore;
 
@@ -223,7 +224,23 @@ impl DirectChannelList {
 
     fn upsert_created(&mut self, channel: DirectChannel) {
         let id = channel.id;
-        self.upsert(channel);
+        if let Some(existing) = self.find_mut(id) {
+            if existing.label.is_empty() && !channel.label.is_empty() {
+                existing.label = channel.label;
+            }
+            if existing.avatar.is_empty() && !channel.avatar.is_empty() {
+                existing.avatar = channel.avatar;
+            }
+            if existing.peer_user_id.is_none() && channel.peer_user_id.is_some() {
+                existing.peer_user_id = channel.peer_user_id;
+            }
+            if existing.peer_username.is_empty() && !channel.peer_username.is_empty() {
+                existing.peer_username = channel.peer_username;
+            }
+            self.sort_by_recent();
+        } else {
+            self.upsert(channel);
+        }
         self.pending_created = Some(id);
     }
 
@@ -420,37 +437,19 @@ impl DirectMessageStore {
             let channel_id = ChannelId(desc.channel_id);
             let channel_type = DirectKind::from_raw(desc.channel_type).channel_type();
             this.update(cx, |this, cx| {
-                let (peer_username, peer_avatar) =
-                    if !member_username.is_empty() && !member_avatar.is_empty() {
-                        (member_username.clone(), member_avatar.clone())
-                    } else {
-                        UsersByUserStore::try_global(cx)
-                            .and_then(|store| store.read(cx).user(user_id))
-                            .map(|user| {
-                                (
-                                    if user.username.is_empty() {
-                                        member_username.clone()
-                                    } else {
-                                        user.username.clone()
-                                    },
-                                    if user.avatar_url.is_empty() {
-                                        member_avatar.clone()
-                                    } else {
-                                        user.avatar_url.clone()
-                                    },
-                                )
-                            })
-                            .unwrap_or((member_username.clone(), member_avatar.clone()))
-                    };
-                let label = if !member_label.is_empty() {
-                    member_label
-                } else if !peer_username.is_empty() {
-                    peer_username.clone()
-                } else {
-                    desc.channel_label.clone()
-                };
-                let channel =
+                let (mut label, peer_avatar, peer_username) = new_dm_peer_profile(
+                    user_id,
+                    &member_label,
+                    &member_avatar,
+                    &member_username,
+                    cx,
+                );
+                if label.is_empty() {
+                    label.clone_from(&desc.channel_label);
+                }
+                let mut channel =
                     direct_from_created(&desc, user_id, &label, &peer_avatar, &peer_username);
+                reconcile_cached_direct_profile(&mut channel, cx);
                 this.channels.upsert_created(channel);
                 this.freshness.mark_fetched();
                 cx.emit(DirectEvent::Changed { channel_id: None });
@@ -556,13 +555,24 @@ impl DirectMessageStore {
                     let kind = DirectKind::from_raw(desc.channel_type);
                     let mode = kind.stream_mode();
                     this.update(cx, |this, cx| {
-                        let channel = direct_from_created(
-                            &desc,
+                        let (mut label, peer_avatar, peer_username) = new_dm_peer_profile(
                             user_id,
                             &member_label,
                             &member_avatar,
                             &member_username,
+                            cx,
                         );
+                        if label.is_empty() {
+                            label.clone_from(&desc.channel_label);
+                        }
+                        let mut channel = direct_from_created(
+                            &desc,
+                            user_id,
+                            &label,
+                            &peer_avatar,
+                            &peer_username,
+                        );
+                        reconcile_cached_direct_profile(&mut channel, cx);
                         this.channels.upsert_created(channel);
                         this.freshness.mark_fetched();
                         cx.emit(DirectEvent::Changed { channel_id: None });
@@ -641,37 +651,19 @@ impl DirectMessageStore {
             let send_mode = kind.stream_mode();
 
             this.update(cx, |this, cx| {
-                let (peer_username, peer_avatar) =
-                    if !member_username.is_empty() && !member_avatar.is_empty() {
-                        (member_username.clone(), member_avatar.clone())
-                    } else {
-                        UsersByUserStore::try_global(cx)
-                            .and_then(|store| store.read(cx).user(user_id))
-                            .map(|user| {
-                                (
-                                    if user.username.is_empty() {
-                                        member_username.clone()
-                                    } else {
-                                        user.username.clone()
-                                    },
-                                    if user.avatar_url.is_empty() {
-                                        member_avatar.clone()
-                                    } else {
-                                        user.avatar_url.clone()
-                                    },
-                                )
-                            })
-                            .unwrap_or((member_username.clone(), member_avatar.clone()))
-                    };
-                let label = if !member_label.is_empty() {
-                    member_label
-                } else if !peer_username.is_empty() {
-                    peer_username.clone()
-                } else {
-                    desc.channel_label.clone()
-                };
-                let channel =
+                let (mut label, peer_avatar, peer_username) = new_dm_peer_profile(
+                    user_id,
+                    &member_label,
+                    &member_avatar,
+                    &member_username,
+                    cx,
+                );
+                if label.is_empty() {
+                    label.clone_from(&desc.channel_label);
+                }
+                let mut channel =
                     direct_from_created(&desc, user_id, &label, &peer_avatar, &peer_username);
+                reconcile_cached_direct_profile(&mut channel, cx);
                 this.channels.upsert_created(channel);
                 this.freshness.mark_fetched();
                 cx.emit(DirectEvent::Changed { channel_id: None });
@@ -1497,6 +1489,46 @@ fn direct_from_channel_desc(desc: &mezon_proto::api::ChannelDescription) -> ApiD
         last_seen_timestamp,
         create_time_seconds: desc.create_time_seconds,
         creator_id: desc.creator_id,
+    }
+}
+
+fn new_dm_peer_profile(
+    user_id: UserId,
+    member_label: &str,
+    member_avatar: &str,
+    member_username: &str,
+    cx: &App,
+) -> (String, String, String) {
+    let account = UsersByUserStore::try_global(cx)
+        .and_then(|store| store.read(cx).user(user_id))
+        .or_else(|| {
+            ClanMembersStore::try_global(cx).and_then(|store| store.read(cx).find_user(user_id))
+        });
+    if let Some(user) = account {
+        let label = if !user.display_name.is_empty() {
+            user.display_name.clone()
+        } else if !user.username.is_empty() {
+            user.username.clone()
+        } else {
+            member_label.to_string()
+        };
+        let username = if !user.username.is_empty() {
+            user.username.clone()
+        } else {
+            member_username.to_string()
+        };
+        (label, user.avatar_url.clone(), username)
+    } else {
+        let label = if !member_label.is_empty() {
+            member_label.to_string()
+        } else {
+            member_username.to_string()
+        };
+        (
+            label,
+            member_avatar.to_string(),
+            member_username.to_string(),
+        )
     }
 }
 
@@ -3612,5 +3644,149 @@ mod tests {
         assert_eq!(dm.kind.channel_type(), 3);
         assert!(dm.is_unread());
         assert!(dm.last_sent_timestamp > 0);
+    }
+
+    #[test]
+    fn created_dm_keeps_listed_peer_profile() {
+        let mut existing = dm(1, 100);
+        existing.peer_user_id = Some(UserId(7));
+        existing.label = "Account".into();
+        existing.avatar = "acc.png".into();
+        existing.peer_username = "user".into();
+        let mut list = list_from(vec![existing]);
+
+        let desc = api_channel_desc(1, "server-label", 3, 2, 0);
+        list.upsert_created(direct_from_created(
+            &desc,
+            UserId(7),
+            "Clan Nick",
+            "clan.png",
+            "clan_user",
+        ));
+
+        let kept = list.find(ChannelId(1)).unwrap();
+        assert_eq!(kept.peer_user_id, Some(UserId(7)));
+        assert_eq!(kept.label, "Account");
+        assert_eq!(kept.avatar, "acc.png");
+        assert_eq!(kept.peer_username, "user");
+        assert_eq!(list.pending_created, Some(ChannelId(1)));
+        assert_index_consistent(&list);
+    }
+
+    #[test]
+    fn created_dm_fills_missing_peer_fields() {
+        let mut existing = dm(1, 100);
+        existing.label.clear();
+        existing.avatar.clear();
+        existing.peer_user_id = None;
+        existing.peer_username.clear();
+        let mut list = list_from(vec![existing]);
+
+        let desc = api_channel_desc(1, "server-label", 3, 2, 0);
+        list.upsert_created(direct_from_created(
+            &desc,
+            UserId(7),
+            "Account",
+            "acc.png",
+            "user",
+        ));
+
+        let filled = list.find(ChannelId(1)).unwrap();
+        assert_eq!(filled.peer_user_id, Some(UserId(7)));
+        assert_eq!(filled.label, "Account");
+        assert_eq!(filled.avatar, "acc.png");
+        assert_eq!(filled.peer_username, "user");
+        assert_eq!(list.pending_created, Some(ChannelId(1)));
+        assert_index_consistent(&list);
+    }
+
+    #[gpui::test]
+    fn new_dm_peer_profile_prefers_account_over_clan_member(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let members = ClanMembersStore::init(api.clone(), cx);
+            members.update(cx, |store, _| {
+                store.seed_members_for_test(
+                    crate::ids::ClanId(1),
+                    vec![
+                        crate::clan_members::ClanMember {
+                            user: crate::clan_members::User {
+                                id: UserId(7),
+                                username: "user".into(),
+                                display_name: "Account".into(),
+                                avatar_url: "acc.png".into(),
+                                ..Default::default()
+                            },
+                            clan_nick: "Nick".into(),
+                            clan_avatar: "clan.png".into(),
+                            ..Default::default()
+                        },
+                        crate::clan_members::ClanMember {
+                            user: crate::clan_members::User {
+                                id: UserId(8),
+                                username: "noavatar".into(),
+                                display_name: "No Avatar".into(),
+                                avatar_url: String::new(),
+                                ..Default::default()
+                            },
+                            clan_nick: "Clan8".into(),
+                            clan_avatar: "clan.png".into(),
+                            ..Default::default()
+                        },
+                    ],
+                );
+            });
+
+            assert_eq!(
+                new_dm_peer_profile(UserId(7), "Nick", "clan.png", "user", cx),
+                (
+                    "Account".to_string(),
+                    "acc.png".to_string(),
+                    "user".to_string(),
+                )
+            );
+            assert_eq!(
+                new_dm_peer_profile(UserId(8), "Clan8", "clan.png", "noavatar", cx),
+                (
+                    "No Avatar".to_string(),
+                    String::new(),
+                    "noavatar".to_string(),
+                )
+            );
+            assert_eq!(
+                new_dm_peer_profile(UserId(99), "Nick", "clan.png", "user", cx),
+                (
+                    "Nick".to_string(),
+                    "clan.png".to_string(),
+                    "user".to_string(),
+                )
+            );
+
+            let users = UsersByUserStore::init(api, cx);
+            users.update(cx, |store, cx| {
+                store.apply_user_profile(
+                    crate::clan_members::User {
+                        id: UserId(10),
+                        username: "ten".into(),
+                        display_name: "Ten Account".into(),
+                        avatar_url: "ten.png".into(),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            });
+            assert_eq!(
+                new_dm_peer_profile(UserId(10), "ClanTen", "clan.png", "ten", cx),
+                (
+                    "Ten Account".to_string(),
+                    "ten.png".to_string(),
+                    "ten".to_string(),
+                )
+            );
+        });
     }
 }
